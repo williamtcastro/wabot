@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -361,5 +362,86 @@ func TestOwnMessagesLabelledMe(t *testing.T) {
 	m := newTestModel(t, chatMessages()...)
 	if v := m.View(); !strings.Contains(v, "me → ") || strings.Contains(v, "you → ") {
 		t.Fatalf("feed should label own messages \"me\":\n%s", v)
+	}
+}
+
+func TestNewMessagesDivider(t *testing.T) {
+	incoming := slices.DeleteFunc(chatMessages(), func(x store.Message) bool { return x.FromMe })
+	m := newTestModel(t, incoming...)
+	var cutoff int64
+	for _, x := range m.bot.Store.Messages(maria, 100) {
+		if x.ID == "M27" {
+			cutoff = x.Seq
+		}
+	}
+	m.bot.Store.MarkReadUpTo(maria, cutoff)
+	run(m, m.loadChats())
+	if !strings.Contains(m.View(), styleBadge.Render("2")) {
+		t.Fatal("sidebar should show 2 unread for Maria from the database")
+	}
+	run(m, m.open(maria))
+	if v := m.View(); !strings.Contains(v, "2 new messages") {
+		t.Fatalf("expected the new-messages divider:\n%s", v)
+	}
+}
+
+func TestSearchJumpsToMessage(t *testing.T) {
+	m := newTestModel(t, chatMessages()...)
+	run(m, m.command("/search message 3"))
+	if !m.searching || len(m.results) == 0 {
+		t.Fatalf("search returned nothing (searching=%v)", m.searching)
+	}
+	if !strings.Contains(m.View(), "Search: message 3") {
+		t.Fatal("results header missing")
+	}
+	var target store.Message
+	for i, r := range m.results {
+		if r.Text == "message 3 from Maria" {
+			m.resultSel, target = i, r
+		}
+	}
+	if target.Seq == 0 {
+		t.Fatalf("expected 'message 3 from Maria' among %d results", len(m.results))
+	}
+	run(m, press(m, "enter"))
+	if m.searching || m.active != maria || m.focus != focusMessages {
+		t.Fatalf("enter should open Maria with a message selected (searching=%v active=%s focus=%v)", m.searching, m.active, m.focus)
+	}
+	if got := m.visible[m.sel]; got.Seq != target.Seq {
+		t.Fatalf("selected %q, want %q", got.Text, target.Text)
+	}
+}
+
+func TestOpeningChatClearsBadgeOffline(t *testing.T) {
+	incoming := slices.DeleteFunc(chatMessages(), func(x store.Message) bool { return x.FromMe })
+	m := newTestModel(t, incoming...)
+	if i := chatIndex(m.chats, maria); i < 0 || m.chats[i].Unread == 0 {
+		t.Fatal("Maria should start unread")
+	}
+	_, followUp := m.Update(m.open(maria)())
+	run(m, followUp)
+	if i := chatIndex(m.chats, maria); i < 0 || m.chats[i].Unread != 0 {
+		t.Fatal("badge should clear after opening the chat")
+	}
+	for _, c := range m.bot.Store.Messages(maria, 1) {
+		if m.bot.Store.ReadSeq(maria) != c.Seq {
+			t.Fatal("opening the chat should mark it read locally even when not logged in")
+		}
+	}
+}
+
+func TestSearchWithNoResultsIgnoresKeys(t *testing.T) {
+	m := newTestModel(t, chatMessages()...)
+	run(m, m.command("/search zzzznothing"))
+	if !m.searching || len(m.results) != 0 {
+		t.Fatalf("expected an empty result list, got %d", len(m.results))
+	}
+	run(m, press(m, "G", "down", "enter"))
+	if !m.searching {
+		t.Fatal("keys on an empty result list should do nothing, not open a chat")
+	}
+	run(m, press(m, "esc"))
+	if m.searching {
+		t.Fatal("esc should close the results")
 	}
 }

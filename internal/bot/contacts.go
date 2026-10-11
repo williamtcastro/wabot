@@ -209,31 +209,76 @@ func (b *Bot) isGroupAdmin(ctx context.Context, chat, user string) bool {
 func (b *Bot) group(ctx context.Context, chat string) groupInfo {
 	b.mu.RLock()
 	g, ok := b.groups[chat]
-	fresh := time.Since(b.groupsAt) < 10*time.Minute
+	stale := time.Since(b.groupsAt) > groupsTTL
 	b.mu.RUnlock()
-	if ok || fresh || !b.Client.IsLoggedIn() {
-		return g
+	switch {
+	case !b.Client.IsLoggedIn() || !stale:
+	case ok:
+		go b.refreshGroups(context.Background())
+	default:
+		b.refreshGroups(ctx)
+		b.mu.RLock()
+		g = b.groups[chat]
+		b.mu.RUnlock()
 	}
+	return g
+}
+
+const groupsTTL = 10 * time.Minute
+
+// refreshGroups fetches every group we're in, caches names and admins in the database (so they show
+// instantly next start), and tells subscribers names may have changed.
+func (b *Bot) refreshGroups(ctx context.Context) {
+	if !b.groupsBusy.CompareAndSwap(false, true) {
+		return
+	}
+	defer b.groupsBusy.Store(false)
 	joined, err := b.Client.GetJoinedGroups(ctx)
 	if err != nil {
-		return g
+		b.Log.Warn("refresh groups failed", "err", err)
+		return
 	}
 	all := make(map[string]groupInfo, len(joined))
+	cached := make([]store.Group, 0, len(joined))
 	for _, j := range joined {
 		info := groupInfo{name: j.Name, admins: map[string]bool{}}
+		var admins []string
 		for _, p := range j.Participants {
 			if p.IsAdmin || p.IsSuperAdmin {
 				for _, id := range []types.JID{p.JID, p.PhoneNumber, p.LID} {
 					if !id.IsEmpty() {
-						info.admins[b.PhoneJID(id.ToNonAD()).String()] = true
+						jid := b.PhoneJID(id.ToNonAD()).String()
+						info.admins[jid] = true
+						admins = append(admins, jid)
 					}
 				}
 			}
 		}
 		all[j.JID.String()] = info
+		cached = append(cached, store.Group{JID: j.JID.String(), Name: j.Name, Admins: admins})
+	}
+	if err := b.Store.SaveGroups(cached); err != nil {
+		b.Log.Warn("cache groups failed", "err", err)
 	}
 	b.mu.Lock()
 	b.groups, b.groupsAt = all, time.Now()
 	b.mu.Unlock()
-	return all[chat]
+	b.publish(NamesChanged{})
+}
+
+// NamesChanged is published when group names were refreshed, so views can re-read chat names.
+type NamesChanged struct{}
+
+func (b *Bot) loadCachedGroups() {
+	all := map[string]groupInfo{}
+	for _, g := range b.Store.Groups() {
+		info := groupInfo{name: g.Name, admins: map[string]bool{}}
+		for _, a := range g.Admins {
+			info.admins[a] = true
+		}
+		all[g.JID] = info
+	}
+	b.mu.Lock()
+	b.groups = all
+	b.mu.Unlock()
 }

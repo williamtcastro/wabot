@@ -18,6 +18,15 @@ func (b *Bot) handle(evt any) {
 	case *events.Connected:
 		b.setState("connected", "")
 		b.announcePresence()
+		go b.refreshGroups(context.Background())
+	case *events.Receipt:
+		// "read-self" means we read the chat on another device, e.g. the phone.
+		if v.Type == types.ReceiptTypeReadSelf || (v.IsFromMe && v.Type == types.ReceiptTypeRead) {
+			chat := b.PhoneJID(v.Chat.ToNonAD()).String()
+			if seq := b.Store.MaxSeqOf(chat, v.MessageIDs); seq > 0 && b.Store.MarkReadUpTo(chat, seq) {
+				b.publish(store.ChatRead{Chat: chat, Seq: seq})
+			}
+		}
 	case *events.PushNameSetting, *events.AppStateSyncComplete:
 		b.announcePresence()
 	case *events.Disconnected:

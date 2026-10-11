@@ -39,9 +39,14 @@ type (
 	clearNoticeMsg int
 	panelMsg       struct{ title, body string }
 	openedMsg      struct {
-		seq       int
-		jid, name string
-		msgs      []store.Message
+		seq           int
+		jid, name     string
+		msgs          []store.Message
+		readSeq, jump int64
+	}
+	searchMsg struct {
+		query   string
+		results []store.Message
 	}
 	feedMsg         []store.Message
 	contactNamesMsg []string
@@ -62,7 +67,6 @@ type model struct {
 	focus  focus
 
 	chats  []store.Chat
-	unread map[string]int
 	cursor int
 	filter string
 
@@ -83,6 +87,13 @@ type model struct {
 	noticeErr bool
 	noticeID  int
 	openSeq   int
+
+	newAfter int64
+
+	searching   bool
+	searchQuery string
+	results     []store.Message
+	resultSel   int
 
 	contactNames []string
 	dirCache     map[string][]string
@@ -108,7 +119,7 @@ func newModel(b *bot.Bot, sub chan any) *model {
 	in.KeyMap.NextSuggestion = key.NewBinding(key.WithKeys("down"))
 	in.KeyMap.PrevSuggestion = key.NewBinding(key.WithKeys("up"))
 	in.Focus()
-	return &model{bot: b, sub: sub, input: in, status: b.Status(), unread: map[string]int{}, sel: -1}
+	return &model{bot: b, sub: sub, input: in, status: b.Status(), sel: -1}
 }
 
 func (m *model) Init() tea.Cmd {
@@ -138,19 +149,27 @@ func (m *model) loadFeed() tea.Cmd {
 }
 
 // open loads a chat ("" for All activity). Only the most recent request is applied.
-func (m *model) open(jid string) tea.Cmd {
+func (m *model) open(jid string) tea.Cmd { return m.openAt(jid, 0) }
+
+// openAt opens a chat and, when jump is a message seq, selects that message.
+func (m *model) openAt(jid string, jump int64) tea.Cmd {
 	m.openSeq++
-	return m.load(m.openSeq, jid)
+	return m.load(m.openSeq, jid, jump)
 }
 
-func (m *model) load(seq int, jid string) tea.Cmd {
+func (m *model) load(seq int, jid string, jump int64) tea.Cmd {
 	return func() tea.Msg {
 		if jid == "" {
 			return openedMsg{seq: seq}
 		}
-		msgs := m.bot.Store.Messages(jid, 400)
+		limit := 400
+		if jump > 0 {
+			limit = max(limit, m.bot.Store.CountFrom(jid, jump)+20)
+		}
+		msgs := m.bot.Store.Messages(jid, limit)
 		slices.Reverse(msgs)
-		return openedMsg{seq: seq, jid: jid, name: m.bot.ChatName(context.Background(), jid, ""), msgs: msgs}
+		return openedMsg{seq: seq, jid: jid, name: m.bot.ChatName(context.Background(), jid, ""), msgs: msgs,
+			readSeq: m.bot.Store.ReadSeq(jid), jump: jump}
 	}
 }
 
@@ -213,6 +232,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dirCache[msg.dir], m.dirLoading = msg.names, ""
 		return m, m.suggest()
 
+	case searchMsg:
+		m.searching, m.searchQuery, m.results, m.resultSel = true, msg.query, safeAll(msg.results), 0
+		m.render(false)
+		m.vp.GotoTop()
+		return m, nil
+
 	case contactNamesMsg:
 		m.contactNames, m.loadingNames = msg, false
 		return m, m.suggest()
@@ -262,10 +287,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		delete(m.unread, msg.jid)
+		m.newAfter = msg.readSeq
 		m.syncCursor()
 		m.layout()
 		m.render(true)
+		if msg.jump > 0 {
+			if i := slices.IndexFunc(m.visible, func(x store.Message) bool { return x.Seq == msg.jump }); i >= 0 {
+				m.sel, m.focus = i, focusMessages
+				m.input.Blur()
+				m.render(false)
+			}
+		}
 		return m, m.markRead(msg.msgs)
 
 	case eventMsg:
@@ -277,6 +309,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.loadChats())
 			}
 			m.render(false)
+		case store.ChatRead, bot.NamesChanged:
+			cmds = append(cmds, m.loadChats())
 		case store.ChatsChanged:
 			cmds = append(cmds, m.loadChats(), m.loadFeed())
 			if m.active != "" {
@@ -293,8 +327,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if v.Chat == m.active && !slices.ContainsFunc(m.msgs, func(x store.Message) bool { return x.Seq == v.Seq }) {
 				m.msgs = append(m.msgs, v)
 				cmds = append(cmds, m.markRead([]store.Message{v}))
-			} else if !v.FromMe && v.Type != "reaction" {
-				m.unread[v.Chat]++
 			}
 			cmds = append(cmds, m.loadChats())
 			m.render(m.sel < 0)

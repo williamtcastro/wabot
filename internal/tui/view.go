@@ -71,6 +71,8 @@ func (m *model) render(toBottom bool) {
 		})
 		content = "Scan with WhatsApp → Linked devices → Link a device\n" +
 			styleDim.Render("or type /pair <your phone number>") + "\n\n" + sb.String()
+	case m.searching:
+		content = m.renderResults(width)
 	case m.panelTitle != "":
 		content = lipgloss.NewStyle().Width(width).Render(m.panelBody)
 	case m.active == "":
@@ -80,6 +82,12 @@ func (m *model) render(toBottom bool) {
 	}
 	m.vp.SetContent(content)
 	switch {
+	case m.searching:
+		if m.resultSel < m.vp.YOffset {
+			m.vp.SetYOffset(m.resultSel)
+		} else if m.resultSel >= m.vp.YOffset+m.vp.Height {
+			m.vp.SetYOffset(m.resultSel - m.vp.Height + 1)
+		}
 	case m.sel >= 0 && m.sel < len(m.starts):
 		start := m.starts[m.sel]
 		end := len(strings.Split(content, "\n"))
@@ -139,6 +147,13 @@ func (m *model) renderChat(width int) string {
 	bubbleW := max(20, width*3/4)
 	var out []string
 	lastDay, lastSender := "", ""
+	newCount := 0
+	for _, x := range m.visible {
+		if x.Seq > m.newAfter && !x.FromMe {
+			newCount++
+		}
+	}
+	dividerShown := false
 	for i, x := range m.visible {
 		if day := dayLabel(x.Timestamp); day != lastDay {
 			if len(out) > 0 {
@@ -148,6 +163,15 @@ func (m *model) renderChat(width int) string {
 			lastDay, lastSender = day, ""
 		} else if x.Sender != lastSender {
 			out = append(out, "")
+		}
+		if newCount > 0 && !dividerShown && x.Seq > m.newAfter && !x.FromMe {
+			dividerShown = true
+			label := "1 new message"
+			if newCount > 1 {
+				label = fmt.Sprintf("%d new messages", newCount)
+			}
+			out = append(out, styleAccent.Render(separator(label, width)), "")
+			lastSender = ""
 		}
 		var block []string
 		if x.IsGroup && !x.FromMe && x.Sender != lastSender {
@@ -269,6 +293,8 @@ func (m *model) box(content string, w, h int, focused bool) string {
 
 func (m *model) paneTitle() string {
 	switch {
+	case m.searching:
+		return styleBold.Render("Search: "+m.searchQuery) + styleDim.Render(fmt.Sprintf("   %d results", len(m.results)))
 	case m.panelTitle != "":
 		return styleBold.Render(m.panelTitle) + styleDim.Render("   esc to close")
 	case m.active == "":
@@ -315,6 +341,8 @@ func (m *model) footer() string {
 		left = styleErr.Render("✗ " + m.notice)
 	case m.notice != "":
 		left = styleAccent.Render("✓ ") + m.notice
+	case m.searching:
+		left = hints("↑↓", "move", "enter", "jump to message", "esc", "close")
 	case m.focus == focusChats:
 		left = hints("type", "filter", "↑↓ ^J/^K", "move", "enter", "open", "esc", "back")
 	case m.focus == focusMessages:
@@ -348,7 +376,13 @@ func (m *model) renderSidebar(height int) string {
 	}
 	type row struct{ top, bottom string }
 	allBottom := "every chat, live"
-	switch n := len(m.unread); {
+	unreadChats := 0
+	for _, c := range m.chats {
+		if c.Unread > 0 {
+			unreadChats++
+		}
+	}
+	switch n := unreadChats; {
 	case n == 1:
 		allBottom = "1 chat with new messages"
 	case n > 1:
@@ -363,7 +397,7 @@ func (m *model) renderSidebar(height int) string {
 		}
 		right := styleDim.Render(shortTime(c.LastAt))
 		nameStyle := lipgloss.NewStyle()
-		if n := m.unread[c.JID]; n > 0 {
+		if n := c.Unread; n > 0 {
 			right = styleBadge.Render(fmt.Sprint(n))
 			nameStyle = styleBold
 		}
@@ -406,4 +440,27 @@ func (m *model) nameOf(jid string) string {
 		return "Me"
 	}
 	return "+" + userOf(jid)
+}
+
+func (m *model) renderResults(width int) string {
+	if len(m.results) == 0 {
+		return styleDim.Render("\n  No messages match. Words must appear whole, except the last one (\"bom di\" finds \"bom dia\").")
+	}
+	lines := make([]string, 0, len(m.results))
+	for i, x := range m.results {
+		who := styleBold.Foreground(colorFor(x.Chat)).Render(m.nameOf(x.Chat))
+		switch {
+		case x.FromMe:
+			who += styleDim.Render(" › ") + styleMe.Render("me:")
+		case x.IsGroup:
+			who += styleDim.Render(" › " + cmp.Or(x.PushName, userOf(x.Sender)) + ":")
+		}
+		line := styleDim.Render(x.Timestamp.Local().Format("02/01 15:04")) + "  " + who + " " + shortText(x)
+		gutter := "  "
+		if i == m.resultSel {
+			gutter = styleAccent.Render("▌ ")
+		}
+		lines = append(lines, gutter+ansi.Truncate(line, width-2, "…"))
+	}
+	return strings.Join(lines, "\n")
 }

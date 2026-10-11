@@ -7,6 +7,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+
+	"golang.org/x/text/runes"
+	"golang.org/x/text/transform"
+	"golang.org/x/text/unicode/norm"
 )
 
 // Filter selects messages for /messages, /messages/wait, /events and the webhook.
@@ -17,6 +22,7 @@ type Filter struct {
 	FromMe   *bool
 	IsGroup  *bool
 	Since    int64
+	Text     string
 }
 
 var messageTypes = map[string]bool{
@@ -53,6 +59,7 @@ func ParseFilter(q url.Values, resolve func(string) (string, error)) (Filter, er
 			*dst = &bv
 		}
 	}
+	f.Text = strings.TrimSpace(q.Get("q"))
 	if v := q.Get("since"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n < 0 {
@@ -74,6 +81,9 @@ func (f Filter) Match(m Message) bool {
 		return false
 	}
 	if f.IsGroup != nil && *f.IsGroup != m.IsGroup {
+		return false
+	}
+	if f.Text != "" && !textMatches(f.Text, m.Text) {
 		return false
 	}
 	return m.Seq > f.Since
@@ -104,5 +114,33 @@ func (f Filter) where() (string, []any) {
 		conds = append(conds, "is_group = ?")
 		args = append(args, *f.IsGroup)
 	}
+	if q := ftsQuery(f.Text); q != "" {
+		conds = append(conds, "seq IN (SELECT rowid FROM wabot_messages_fts WHERE wabot_messages_fts MATCH ?)")
+		args = append(args, q)
+	}
 	return strings.Join(conds, " AND "), args
+}
+
+// textMatches mirrors the FTS5 query in Go (for live events and webhooks): every word must match a
+// word of the text, accents and case ignored, the last one as a prefix.
+func textMatches(query, text string) bool {
+	words := tokens(query)
+	have := tokens(text)
+	for i, w := range words {
+		last := i == len(words)-1
+		if !slices.ContainsFunc(have, func(h string) bool { return h == w || (last && strings.HasPrefix(h, w)) }) {
+			return false
+		}
+	}
+	return true
+}
+
+var stripMarks = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
+
+func tokens(s string) []string {
+	folded, _, err := transform.String(stripMarks, strings.ToLower(s))
+	if err != nil {
+		folded = strings.ToLower(s)
+	}
+	return strings.FieldsFunc(folded, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) })
 }

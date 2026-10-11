@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -46,15 +47,16 @@ type Bot struct {
 	Lookups   *Limiter
 	Webhook   *Webhook
 
-	autoLimit *Limiter
-	mu        sync.RWMutex
-	qr        string
-	state     string
-	subs      map[chan any]struct{}
-	jids      map[string]types.JID
-	groups    map[string]groupInfo
-	typingIn  map[string]*time.Timer
-	groupsAt  time.Time
+	autoLimit  *Limiter
+	mu         sync.RWMutex
+	qr         string
+	state      string
+	subs       map[chan any]struct{}
+	jids       map[string]types.JID
+	groups     map[string]groupInfo
+	typingIn   map[string]*time.Timer
+	groupsAt   time.Time
+	groupsBusy atomic.Bool
 }
 
 func New(ctx context.Context, dbPath string, waLogger waLog.Logger, log *slog.Logger) (*Bot, error) {
@@ -90,6 +92,7 @@ func New(ctx context.Context, dbPath string, waLogger waLog.Logger, log *slog.Lo
 		subs:      map[chan any]struct{}{},
 		jids:      map[string]types.JID{},
 	}
+	b.loadCachedGroups()
 	b.Client.AddEventHandler(b.handle)
 	b.Client.SetMediaHTTPClient(&http.Client{Transport: limitedTransport{http.DefaultTransport}})
 	return b, nil

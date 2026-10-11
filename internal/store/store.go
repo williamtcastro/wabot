@@ -25,6 +25,9 @@ func Open(ctx context.Context, db *sql.DB) (*Store, error) {
 	if err := migrateAudit(ctx, db); err != nil {
 		return nil, fmt.Errorf("create audit table: %w", err)
 	}
+	if err := migrateState(ctx, db); err != nil {
+		return nil, fmt.Errorf("create state and search tables: %w", err)
+	}
 	return &Store{db: db}, nil
 }
 
@@ -151,6 +154,9 @@ func (s *Store) Save(m Message) (Message, bool, error) {
 		return m, false, err
 	}
 	m.Seq = seq
+	if m.FromMe {
+		s.MarkReadUpTo(m.Chat, seq)
+	}
 	if strings.HasSuffix(m.Chat, "@lid") || strings.HasSuffix(m.Sender, "@lid") {
 		s.mu.Lock()
 		s.lidKey = ""
@@ -181,6 +187,16 @@ func (s *Store) Import(msgs []Message) error {
 			}
 		}
 		_, _, _ = save(tx, m)
+	}
+	imported := map[string]bool{}
+	for _, m := range msgs {
+		imported[m.Chat] = true
+	}
+	for chat := range imported {
+		if _, err := tx.Exec(`INSERT INTO wabot_chat_state (chat, read_seq) SELECT ?, MAX(seq) FROM wabot_messages WHERE chat = ?
+			ON CONFLICT (chat) DO UPDATE SET read_seq = excluded.read_seq WHERE excluded.read_seq > read_seq`, chat, chat); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -295,6 +311,11 @@ func (s *Store) RelinkLIDs() {
 	if _, err := s.db.Exec(`DELETE FROM wabot_messages WHERE chat LIKE '%@lid' AND ` + fmt.Sprintf(mapped, "chat")); err != nil {
 		return
 	}
+	_, _ = s.db.Exec(`INSERT INTO wabot_chat_state (chat, read_seq)
+		SELECT (SELECT pn FROM whatsmeow_lid_map WHERE lid = replace(chat, '@lid', '')) || '@s.whatsapp.net', read_seq
+		FROM wabot_chat_state WHERE chat LIKE '%@lid' AND ` + fmt.Sprintf(mapped, "chat") + `
+		ON CONFLICT (chat) DO UPDATE SET read_seq = MAX(read_seq, excluded.read_seq)`)
+	_, _ = s.db.Exec(`DELETE FROM wabot_chat_state WHERE chat LIKE '%@lid' AND ` + fmt.Sprintf(mapped, "chat"))
 	s.mu.Lock()
 	s.lidKey = key
 	s.mu.Unlock()
@@ -307,7 +328,9 @@ func (s *Store) Chats(ctx context.Context, limit int, name func(chat, pushName s
 	rows, err := s.db.QueryContext(ctx, `
 SELECT chat, is_group, type, CASE WHEN deleted THEN '' ELSE text END, from_me, MAX(ts),
 	(SELECT push_name FROM wabot_messages p WHERE p.chat = m.chat AND p.from_me = 0 AND p.push_name <> '' AND p.is_group = 0
-	 ORDER BY ts DESC LIMIT 1)
+	 ORDER BY ts DESC LIMIT 1),
+	(SELECT COUNT(*) FROM wabot_messages u WHERE u.chat = m.chat AND u.from_me = 0 AND u.type <> 'reaction' AND u.deleted = 0
+	 AND u.seq > COALESCE((SELECT read_seq FROM wabot_chat_state r WHERE r.chat = m.chat), 0))
 FROM wabot_messages m WHERE type <> 'reaction' GROUP BY chat ORDER BY MAX(ts) DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -318,7 +341,7 @@ FROM wabot_messages m WHERE type <> 'reaction' GROUP BY chat ORDER BY MAX(ts) DE
 		var c Chat
 		var ts int64
 		var push sql.NullString
-		if err := rows.Scan(&c.JID, &c.IsGroup, &c.LastType, &c.LastText, &c.LastFromMe, &ts, &push); err != nil {
+		if err := rows.Scan(&c.JID, &c.IsGroup, &c.LastType, &c.LastText, &c.LastFromMe, &ts, &push, &c.Unread); err != nil {
 			return nil, err
 		}
 		c.LastAt = time.UnixMilli(ts)

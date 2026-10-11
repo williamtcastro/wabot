@@ -295,3 +295,16 @@ func TestAuditEndpoint(t *testing.T) {
 		t.Fatalf("audit = %s (%v)", w.Body, err)
 	}
 }
+
+func TestMessagesSearch(t *testing.T) {
+	b := newTestBot(t)
+	seed(t, b)
+	h := NewHandler(b, "tok")
+	rec := do(h, "GET", "/messages?q=TUDO&from_me=true", map[string]string{"Authorization": "Bearer tok"})
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if got := messageSeqs(t, rec.Body.Bytes()); len(got) != 1 || got[0] != 3 {
+		t.Fatalf("q=TUDO&from_me=true -> seqs %v, want [3]", got)
+	}
+}

@@ -35,6 +35,8 @@ Selected message
 
 Commands
   /to <name|number|jid>     open a chat
+  /search <words>           search every chat (↑↓ pick, Enter jumps to it, Esc closes)
+  /copy                     copy this chat's number (same as Ctrl+Y)
   /all                      live feed of every chat
   /contacts [search]        your address book
   /groups                   your groups
@@ -54,6 +56,7 @@ var tuiCommands = []struct{ name, args, desc string }{
 	{"/groups", "", "your groups"},
 	{"/send", "<number> <text>", "one-off message"},
 	{"/file", "<path> [caption]", "send a file here"},
+	{"/search", "<words>", "search all messages"},
 	{"/copy", "", "copy this chat's number"},
 	{"/read", "", "mark this chat read"},
 	{"/pair", "<phone>", "pairing-code login"},
@@ -146,6 +149,13 @@ func (m *model) command(line string) tea.Cmd {
 			_, err = m.bot.SendFile(ctx, actor, chat, data, filepath.Base(path), caption, bot.SendOptions{})
 			return "", err
 		})
+	case "/search":
+		if rest == "" {
+			return m.setNotice("type what to search for, e.g. /search bom dia", true)
+		}
+		return func() tea.Msg {
+			return searchMsg{rest, m.bot.Store.Query(store.Filter{Text: rest}, 200, false)}
+		}
 	case "/copy":
 		return m.copyNumber()
 	case "/read":
@@ -176,7 +186,7 @@ func (m *model) openByName(q string) tea.Cmd {
 			if err != nil {
 				return noticeMsg{err.Error(), true}
 			}
-			return m.load(seq, m.bot.PhoneJID(jid).String())()
+			return m.load(seq, m.bot.PhoneJID(jid).String(), 0)()
 		}
 		contacts, err := m.bot.Contacts(ctx, q)
 		switch {
@@ -185,29 +195,42 @@ func (m *model) openByName(q string) tea.Cmd {
 		case len(contacts) == 0:
 			return noticeMsg{"no contact matches " + q, true}
 		case len(contacts) == 1:
-			return m.load(seq, contacts[0].JID)()
+			return m.load(seq, contacts[0].JID, 0)()
 		}
 		return panelMsg{fmt.Sprintf("%d contacts match %q · be more specific", len(contacts), q), formatContacts(contacts, 30)}
 	}
 }
 
 // markRead sends read receipts for incoming messages in the open chat.
+// markRead marks what's on screen as read: locally right away (so badges clear even offline) and,
+// when connected, with read receipts to the senders.
 func (m *model) markRead(msgs []store.Message) tea.Cmd {
 	var ids []string
+	var last int64
 	for _, x := range msgs {
-		if !x.FromMe && x.Type != "reaction" && x.Chat == m.active {
+		if x.Chat != m.active {
+			continue
+		}
+		last = max(last, x.Seq)
+		if !x.FromMe && x.Type != "reaction" {
 			ids = append(ids, x.ID)
 		}
 	}
 	if len(ids) > 20 {
 		ids = ids[len(ids)-20:]
 	}
-	if len(ids) == 0 || !m.status.LoggedIn {
+	if last == 0 {
 		return nil
 	}
-	chat := m.active
+	chat, online := m.active, m.status.LoggedIn
 	return func() tea.Msg {
-		_, _ = m.bot.MarkRead(context.Background(), actor, chat, ids)
+		moved := m.bot.Store.MarkReadUpTo(chat, last)
+		if online && len(ids) > 0 {
+			_, _ = m.bot.MarkRead(context.Background(), actor, chat, ids)
+		}
+		if moved {
+			return m.loadChats()()
+		}
 		return nil
 	}
 }

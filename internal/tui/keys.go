@@ -8,6 +8,9 @@ import (
 )
 
 func (m *model) key(k tea.KeyMsg) tea.Cmd {
+	if m.searching {
+		return m.resultsKey(k)
+	}
 	if m.focus == focusInput && strings.HasPrefix(m.input.Value(), "/") {
 		switch k.String() {
 		case "tab":
@@ -248,6 +251,36 @@ func (m *model) messagesKey(k tea.KeyMsg) tea.Cmd {
 			m.input, cmd = m.input.Update(k)
 			return cmd
 		}
+	}
+	m.render(false)
+	return nil
+}
+
+func (m *model) resultsKey(k tea.KeyMsg) tea.Cmd {
+	if len(m.results) == 0 && k.String() != "esc" && k.String() != "q" && k.String() != "ctrl+c" {
+		return nil
+	}
+	switch k.String() {
+	case "ctrl+c":
+		return tea.Quit
+	case "up", "k", "ctrl+k":
+		m.resultSel = max(0, m.resultSel-1)
+	case "down", "j", "ctrl+j":
+		m.resultSel = min(len(m.results)-1, m.resultSel+1)
+	case "g":
+		m.resultSel = 0
+	case "G":
+		m.resultSel = len(m.results) - 1
+	case "enter":
+		if m.resultSel < len(m.results) {
+			hit := m.results[m.resultSel]
+			m.searching = false
+			return m.openAt(hit.Chat, hit.Seq)
+		}
+	case "esc", "q":
+		m.searching = false
+		m.render(true)
+		return nil
 	}
 	m.render(false)
 	return nil

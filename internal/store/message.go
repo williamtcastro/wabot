@@ -48,6 +48,7 @@ type Chat struct {
 	LastType   string    `json:"last_type"`
 	LastFromMe bool      `json:"last_from_me"`
 	LastAt     time.Time `json:"last_at"`
+	Unread     int       `json:"unread"`
 }
 
 // ChatsChanged is published after a history sync bulk-imports messages.

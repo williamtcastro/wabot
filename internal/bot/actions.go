@@ -127,6 +127,15 @@ func (b *Bot) MarkRead(ctx context.Context, actor, chat string, ids []string) (i
 		}
 		n += len(batch)
 	}
+	moved := false
+	if len(ids) == 0 {
+		moved = b.Store.MarkChatRead(key)
+	} else {
+		moved = b.Store.MarkReadUpTo(key, b.Store.MaxSeqOf(key, ids))
+	}
+	if moved {
+		b.publish(store.ChatRead{Chat: key, Seq: b.Store.ReadSeq(key)})
+	}
 	b.Audit(actor, "read", key, fmt.Sprintf("%d messages", n), nil)
 	return n, nil
 }
