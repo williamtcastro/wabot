@@ -2,3 +2,6 @@ wabot
 *.db
 *.db-shm
 *.db-wal
+*.db-journal
+*.log
+zz_*_test.go
