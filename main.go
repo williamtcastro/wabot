@@ -29,6 +29,9 @@ import (
 	"github.com/williamtcastro/wabot/internal/tui"
 )
 
+// version is set by release builds (-ldflags "-X main.version=...").
+var version = "dev"
+
 const usage = `wabot - a tiny WhatsApp bot built on whatsmeow
 
 Usage:
@@ -36,6 +39,7 @@ Usage:
   wabot serve [-addr ADDR]             run the HTTP API
   wabot tui   [-addr ADDR]             interactive terminal UI (optionally also serves the API)
   wabot send  NUMBER|JID TEXT...       send one message and exit
+  wabot version                        print the version
   wabot logout                         unlink the device and delete the session
 
 Flags (right after the command, before other arguments):
@@ -72,8 +76,12 @@ func main() {
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
-	if cmd == "-h" || cmd == "--help" || cmd == "help" {
+	switch cmd {
+	case "-h", "--help", "help":
 		fmt.Println(usage)
+		return
+	case "version", "--version":
+		fmt.Println("wabot", version)
 		return
 	}
 
