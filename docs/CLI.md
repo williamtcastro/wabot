@@ -65,7 +65,7 @@ Prints usage (also `-h` / `--help`).
 
 | Flag | Env | Default | |
 |---|---|---|---|
-| `-db PATH` | `WABOT_DB` | `wabot.db` | session and message database (SQLite) |
+| `-db PATH` | `WABOT_DB` | `~/.config/wabot/wabot.db` | session and message database (SQLite). See [The database](#the-database) |
 | `-addr ADDR` | `WABOT_ADDR` | `127.0.0.1:8080` for `serve`, off for `tui` | HTTP listen address. A non-loopback address requires a token |
 | `-token TOKEN` | `WABOT_TOKEN` | none | require `Authorization: Bearer TOKEN` on the API |
 | `-webhook URL` | `WABOT_WEBHOOK` | none | POST incoming messages as JSON to this http(s) URL |
@@ -111,7 +111,22 @@ Message text, the token and the webhook URL are never logged. `*.log` files are 
 
 ## The database
 
-One SQLite file (`wabot.db` plus its `-wal`/`-shm` companions) holds:
+One SQLite file (`wabot.db` plus its `-wal`/`-shm` companions) holds everything. By default it
+lives in `~/.config/wabot/` on both macOS and Linux, or in `$XDG_CONFIG_HOME/wabot/` when that
+variable is set to an absolute path (on Windows: `%AppData%\wabot\`). `-db` and `WABOT_DB` override
+it. The directory is created with mode `0700` if it doesn't exist.
+
+Older versions kept `wabot.db` in the current directory. If the default file doesn't exist yet but
+a `./wabot.db` does, wabot prints a one-line notice to stderr and starts a fresh session at the
+default path. It never moves anything by itself; to keep your session, either move it:
+
+```sh
+mkdir -p ~/.config/wabot && mv wabot.db* ~/.config/wabot/
+```
+
+or keep using it where it is with `-db wabot.db` (or `WABOT_DB=wabot.db`).
+
+The file holds:
 
 - whatsmeow's tables (`whatsmeow_*`): your encryption keys, session, contacts, and
   phone-number ↔ hidden-ID links. **Anyone with this file can act as your WhatsApp
@@ -145,7 +160,7 @@ At startup wabot sets the database file and its `-wal`/`-shm` files to mode `060
 `wabot_audit` columns: `id`, `at` (Unix ms), `actor`, `action`, `target`, `detail`, `ok`, `error`.
 
 You can inspect the database with any SQLite tool, e.g.
-`sqlite3 wabot.db "select seq, chat, type, ts from wabot_messages order by seq desc limit 10"`.
+`sqlite3 ~/.config/wabot/wabot.db "select seq, chat, type, ts from wabot_messages order by seq desc limit 10"`.
 
 Only one process can use a database at a time, so don't run `serve`, `tui` and `send` on
 the same file at once.

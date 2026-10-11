@@ -1,4 +1,4 @@
-package main
+package bot
 
 import (
 	"fmt"
@@ -36,7 +36,7 @@ func (l *Limiter) Reserve(chat string) (time.Time, error) { return l.ReserveN(ch
 // ReserveN reserves n consecutive slots, all or none, and returns when the last one is due.
 func (l *Limiter) ReserveN(chat string, n int) (time.Time, error) {
 	if l.PerMinute > 0 && n > l.PerMinute {
-		return time.Time{}, badInput("at most %d per minute", l.PerMinute)
+		return time.Time{}, BadInput("at most %d per minute", l.PerMinute)
 	}
 	now := time.Now()
 	l.mu.Lock()

@@ -1,4 +1,4 @@
-package main
+package bot
 
 import (
 	"bytes"
@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/williamtcastro/wabot/internal/store"
 )
 
 const (
@@ -35,7 +37,7 @@ type webhookJob struct {
 type Webhook struct {
 	URL    string
 	Secret string
-	Filter Filter
+	Filter store.Filter
 
 	log    *slog.Logger
 	client *http.Client
@@ -50,7 +52,7 @@ func (w *Webhook) SetChat(chat string) {
 	w.mu.Unlock()
 }
 
-func NewWebhook(ctx context.Context, url, secret string, filter Filter, log *slog.Logger) *Webhook {
+func NewWebhook(ctx context.Context, url, secret string, filter store.Filter, log *slog.Logger) *Webhook {
 	w := &Webhook{
 		URL: url, Secret: secret, Filter: filter,
 		log: log.With("component", "webhook"),
@@ -67,7 +69,7 @@ func NewWebhook(ctx context.Context, url, secret string, filter Filter, log *slo
 }
 
 // Deliver queues m if it matches the filter. event is "message" or "update".
-func (w *Webhook) Deliver(event string, m Message) {
+func (w *Webhook) Deliver(event string, m store.Message) {
 	w.mu.RLock()
 	f := w.Filter
 	w.mu.RUnlock()
@@ -113,7 +115,7 @@ func (w *Webhook) send(ctx context.Context, job webhookJob) {
 		if !retryable {
 			return
 		}
-		if sleepUntil(ctx, time.Now().Add(backoff+mrand.N(backoff/2))) != nil {
+		if SleepUntil(ctx, time.Now().Add(backoff+mrand.N(backoff/2))) != nil {
 			return
 		}
 		backoff *= 2

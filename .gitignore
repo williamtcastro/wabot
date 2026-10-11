@@ -5,3 +5,4 @@ wabot
 *.db-journal
 *.log
 zz_*_test.go
+bin/

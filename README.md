@@ -21,7 +21,10 @@ Requires Go 1.26+.
 
 ```sh
 go build -o wabot .
+go test ./...          # optional: offline test suite
 ```
+
+Or `go install github.com/williamtcastro/wabot@latest` to put `wabot` in `$(go env GOPATH)/bin`.
 
 ## 1. Log in (once)
 
@@ -30,8 +33,11 @@ go build -o wabot .
 ./wabot login -phone +5511999999999 # or get an 8-character pairing code instead
 ```
 
-The session is saved to `wabot.db` (change it with `-db` or `WABOT_DB`). Keep that file private:
-anyone who has it can act as your WhatsApp account.
+The session is saved to `~/.config/wabot/wabot.db` on both macOS and Linux (or
+`$XDG_CONFIG_HOME/wabot/wabot.db`; change it with `-db` or `WABOT_DB`). Keep that file private:
+anyone who has it can act as your WhatsApp account. Older versions kept `wabot.db` in the current
+directory; if wabot finds one there it prints how to move it (`mv wabot.db* ~/.config/wabot/`) or
+keep using it (`-db wabot.db`).
 
 ## 2a. Run the HTTP API
 
@@ -95,8 +101,10 @@ in Python and Node, [docs/BOT.md](docs/BOT.md#verifying-webhook-signatures).
 
 A chat list on the left, the open conversation on the right. Press `Tab` to move between the
 input, the chat list (type to filter) and the messages, or type `/to maria` or
-`/to 5511999999999`. Then anything you type goes to that chat. With a message selected,
-`r` replies, `e` edits, `d d` deletes, `1`–`6` react and `s` saves media. Typing `/` shows a
+`/to 5511999999999`. Then anything you type goes to that chat. `Ctrl+J` / `Ctrl+K` jump to the
+next / previous chat and `Ctrl+D` / `Ctrl+U` scroll half a page. With a message selected,
+`j` / `k` move, `g` / `G` go to the first / last, `r` replies, `e` edits, `d d` deletes, `1`–`6`
+react and `s` saves media. Typing `/` shows a
 hint bar of commands; `Tab` completes command names, chat and contact names after `/to`, numbers
 after `/send` and file paths after `/file`. `/help` lists everything. See [docs/TUI.md](docs/TUI.md).
 
@@ -107,7 +115,7 @@ after `/send` and file paths after `/file`. `/help` lists everything. See [docs/
 ./wabot send 120363012345678901@g.us "hello group"
 ```
 
-Don't run `send` while `serve` or `tui` is running with the same `wabot.db`. Only one
+Don't run `send` while `serve` or `tui` is running with the same database. Only one
 connection per session is allowed, so use the HTTP API in that case.
 
 ## Bot behaviour
@@ -125,7 +133,7 @@ Turn it off with `-autoreply=false`. For your own logic, either:
 
 - set `-webhook https://your-app/hook` and reply through `POST /send` (works from any language),
 - poll `GET /messages/wait` or stream `GET /events` if you can't expose a port, or
-- edit `autoReply()` in `bot.go`.
+- edit `autoReply()` in `internal/bot/events.go`.
 
 See [docs/BOT.md](docs/BOT.md) for examples.
 
@@ -143,7 +151,7 @@ account shows as offline so your phone keeps getting notifications; `-online` ch
 
 | Flag | Env | Default | Meaning |
 |---|---|---|---|
-| `-db` | `WABOT_DB` | `wabot.db` | session database |
+| `-db` | `WABOT_DB` | `~/.config/wabot/wabot.db` | session database |
 | `-addr` | `WABOT_ADDR` | `127.0.0.1:8080` for `serve` | HTTP listen address; non-loopback needs a token |
 | `-token` | `WABOT_TOKEN` | none | API bearer token (strongly recommended) |
 | `-webhook` | `WABOT_WEBHOOK` | none | URL that gets new messages as JSON |
@@ -185,16 +193,14 @@ with a 400. Find group JIDs with `GET /groups` or `/groups` in the TUI.
 
 ## Files
 
-| File | What it does |
+| Path | What it does |
 |---|---|
-| `main.go` | CLI commands and flags |
-| `bot.go` | whatsmeow client, events, sending, replies, reactions, edits, deletes, read receipts, media download, recipient lookup, contacts, auto-replies |
-| `store.go` | message history, filters, chat list (SQLite) |
-| `api.go` | HTTP API, long-poll, SSE, idempotency, request logging and the `/docs` page |
-| `webhook.go` | webhook queue, retries and HMAC signing |
-| `limit.go` | outgoing message rate limiter |
-| `audit.go` | audit log table and app logger setup |
-| `tui.go` | terminal UI (Bubble Tea + Bubbles + Lip Gloss) |
+| `main.go` | CLI commands, flags, default database path, logger setup |
+| `internal/bot/` | whatsmeow client, events, sending, replies, reactions, edits, deletes, read receipts, media download, recipient lookup, contacts, auto-replies, rate limiter, webhook |
+| `internal/store/` | message history, filters, chat list and audit log (SQLite) |
+| `internal/api/` | HTTP API, long-poll, SSE, idempotency, request logging and the `/docs` page |
+| `internal/tui/` | terminal UI (Bubble Tea + Bubbles + Lip Gloss) |
+| `docs/` | user docs and the OpenAPI spec (embedded into the binary by `docs/docs.go`) |
 
 ## License
 

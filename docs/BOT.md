@@ -4,7 +4,7 @@ There are three ways to make the bot do things:
 
 1. a **webhook**: wabot POSTs messages to your service, which replies through the API
 2. **polling**: your service pulls new messages with `GET /messages/wait` or `GET /events`
-3. **Go code** in `bot.go`
+3. **Go code** in `internal/bot/events.go`
 
 Whichever you pick, keep the [rate limits](API.md#rate-limiting) on. Bots that send a lot, fast,
 or to people who never wrote to them are what get numbers banned.
@@ -154,9 +154,9 @@ while True:
 `GET /events` (SSE) works too and resumes by itself with `EventSource`. See
 [API.md](API.md#get-events).
 
-## Option 3: edit `bot.go`
+## Option 3: edit `internal/bot/events.go`
 
-`autoReply()` in `bot.go` is a plain `switch` on the message text. It answers in any chat,
+`autoReply()` in `internal/bot/events.go` is a plain `switch` on the message text. It answers in any chat,
 including your own "Message yourself" chat, and quotes the command. It runs in its own goroutine
 and has a small budget (6 replies per minute, one per 10 s per chat); replies over the budget are
 dropped. Add a case:

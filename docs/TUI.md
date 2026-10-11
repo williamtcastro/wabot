@@ -36,7 +36,7 @@ If the session isn't logged in yet, the main pane shows a QR code. Scan it, or t
 ╭───────────────────────────────────────────────────────────────────────────────────────────╮
 │ › _                                                                                       │
 ╰───────────────────────────────────────────────────────────────────────────────────────────╯
- tab chats  ·  ↑ select msg  ·  ^N/^P switch  ·  /help commands          ● +5511988887777
+ tab chats  ·  ↑ select msg  ·  ^J/^K switch  ·  ^D/^U scroll  ·  /help co… ● +5511988887777
 ```
 
 The focused panel has a green border.
@@ -66,7 +66,7 @@ The focused panel has a green border.
   for 5 seconds. On the right, a dot shows the connection: green with your number when
   connected and logged in, red with the state otherwise.
 
-The chat list comes from messages stored in `wabot.db`, so it fills up as you use the bot.
+The chat list comes from messages stored in the database (`~/.config/wabot/wabot.db` by default), so it fills up as you use the bot.
 Right after a fresh `wabot login`, WhatsApp also sends a batch of recent conversations, which
 are imported automatically.
 
@@ -81,8 +81,9 @@ This is the `/help` panel, word for word:
 ```
 Moving around
   Tab / Shift+Tab     cycle focus: input → chats → messages
-  Ctrl+N / Ctrl+P     next / previous chat
+  Ctrl+J / Ctrl+K     next / previous chat (from anywhere)
   ↑ (empty input)     select messages
+  Ctrl+D / Ctrl+U     scroll half a page down / up
   PgUp / PgDn         scroll
   Esc                 cancel / close / back to the input
 
@@ -91,6 +92,7 @@ Chat list (focused)
   ↑ ↓  Enter          pick and open
 
 Selected message
+  j k  ↑ ↓           move               g  G   first / last
   r  reply           e  edit (yours, 20 min)
   d d  delete        s  save media to ~/Downloads
   1-6  react 👍 ❤️ 😂 😮 😢 🙏     0  remove reaction
@@ -108,7 +110,7 @@ Commands
   /help  /quit
 
 Typing a command, Tab completes it (and names after /to, numbers after /send,
-paths after /file), ↑ ↓ cycle the matches.
+paths after /file), ↑ ↓ or Ctrl+J / Ctrl+K cycle the matches.
 ```
 
 Details:
@@ -116,11 +118,19 @@ Details:
 - **Focus.** `Tab` cycles input → chats → messages, `Shift+Tab` goes backwards. The messages
   panel is skipped when no chat is open or it has no messages.
 - **Chat list.** Typing filters by name (or part of the JID); `Backspace` edits the filter, the
-  first `Esc` clears it and the second goes back to the input. `Enter` opens the highlighted
-  chat. `Ctrl+N` / `Ctrl+P` open the chat after / before the open one (or the highlighted one when
-  the chat list is focused), without changing focus.
-- **Selecting messages.** `↑` in an empty input selects the newest message. Move with `↑` `↓`
-  (or `k` `j`); `↓` past the newest message returns to the input. `Enter` also starts a reply.
+  first `Esc` clears it and the second goes back to the input. `↑` `↓` move the highlight and
+  `Enter` opens the highlighted chat. Letters always go to the filter, so `j` / `k` don't move here.
+- **Switching chats.** `Ctrl+J` / `Ctrl+K` open the chat after / before the open one from
+  anywhere, without changing focus. When the chat list is focused they step from the highlighted
+  chat instead (and move the highlight with it). Going up past the first chat opens **All
+  activity**. While you're typing a command with completions, they cycle the completions instead
+  (see [Autocomplete](#autocomplete)). Many terminals send `Ctrl+J` as a line feed; wabot tells it
+  apart from `Enter`, so `Enter` still sends.
+- **Scrolling.** `Ctrl+D` / `Ctrl+U` scroll the conversation (or an open panel) half a page down /
+  up whatever is focused; `PgDn` / `PgUp` scroll a full page. They don't edit the input.
+- **Selecting messages.** `↑` in an empty input selects the newest message. Move with `j` / `k`
+  (or `↓` `↑`); `g` jumps to the first loaded message and `G` to the newest. `j` or `↓` past the
+  newest message returns to the input. `Enter` also starts a reply.
   Any other letter jumps back to the input and is typed there, so you can just start writing.
 - **Reply / edit.** `r` or `e` puts you back in the input with a context bar. For an edit the
   input is pre-filled with the current text. `Enter` sends, `Esc` cancels. Deleted messages
@@ -144,7 +154,7 @@ While the input starts with `/`:
   their arguments and a short description (`/to <name|number>  open a chat · …`). An unknown
   command shows `no such command`. The bar goes away once you type a space after the command.
 - The best match appears as grey ghost text after the cursor. **`Tab`** accepts it; `↑` / `↓`
-  cycle through the other matches. If nothing matches, `Tab` does nothing (it doesn't move
+  or `Ctrl+J` / `Ctrl+K` cycle through the other matches. If nothing matches, `Tab` does nothing (it doesn't move
   focus).
 - Completion knows the arguments too:
   - `/to `: names of your chats and address-book contacts, the number for chats without a
@@ -182,7 +192,7 @@ in the audit log with actor `tui` (including `/pair`).
   keep the app logs (HTTP requests, actions, webhook deliveries). whatsmeow's own logs stay off;
   to see them, run `wabot serve -debug` with the same `-db` instead.
 - File paths in `/file` can't contain spaces.
-- New commands go in `tuiCommands`, `tuiHelp` (in `tui.go`) and this file, so autocomplete,
+- New commands go in `tuiCommands`, `tuiHelp` (in `internal/tui/commands.go`) and this file, so autocomplete,
   the hint bar and `/help` stay in sync.
 - WhatsApp sometimes identifies people by a hidden ID (`…@lid`) instead of their number,
   e.g. for messages you type on your phone. Until WhatsApp reveals which number that ID
