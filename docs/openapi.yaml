@@ -20,7 +20,8 @@ info:
     429 with `Retry-After`. Number lookups (uncached phone numbers, `/check`, `/typing`) have a separate
     limit of 3 × `-rate` per minute with the same 429 behaviour.
 
-    **Errors** are always `{"error": "..."}`: 400 bad input, 401 bad token, 403 not local (no token set), 404 not found, 410 media expired,
+    **Errors** are always `{"error": "..."}`: 400 bad input, 401 bad token, 403 not local (no token set), 404 not found,
+    409 idempotency key reused for a different request, 410 media expired,
     429 rate limited, 502 WhatsApp failure or not logged in, 504 timeout.
 servers:
   - url: /
@@ -108,7 +109,8 @@ paths:
       description: |
         Optionally quote a stored message with `reply_to` (not a deleted one; an edited one is quoted with its
         current text). With an idempotency key, a repeat within 24 h returns the first result instead of
-        sending again; failed sends aren't remembered.
+        sending again; failed sends aren't remembered. The key is bound to `to`, `text` and `reply_to`; reusing it
+        for a different request is a 409.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
@@ -128,6 +130,7 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "502": { $ref: "#/components/responses/BadGateway" }
         "504": { $ref: "#/components/responses/Timeout" }
@@ -136,7 +139,10 @@ paths:
     post:
       tags: [Messaging]
       summary: Send an image or document
-      description: Images (detected from the content) go as photos, anything else as a document. Max 64 MB.
+      description: |
+        Images (detected from the content) go as photos, anything else as a document. Max 64 MB. An idempotency
+        key is bound to `to`, the file name, `caption`, `reply_to` and the file's SHA-256; reusing it for a
+        different request is a 409.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
@@ -157,6 +163,7 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "502": { $ref: "#/components/responses/BadGateway" }
         "504": { $ref: "#/components/responses/Timeout" }
@@ -511,7 +518,7 @@ paths:
     get:
       tags: [Admin]
       summary: Control actions, newest first
-      description: Sends, files, reactions, edits, deletes (including failed attempts), read receipts, pairing and logout. Message text is never stored.
+      description: Sends, files, reactions, edits, deletes (every attempt, including ones rejected for bad input), read receipts, pairing and logout. Message text is never stored.
       parameters:
         - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
         - { name: before, in: query, description: "Only entries with a lower id (cursor).", schema: { type: integer, format: int64 } }
@@ -530,6 +537,7 @@ paths:
     get:
       tags: [Docs]
       summary: This Swagger UI page
+      description: Loads swagger-ui-dist from jsDelivr with Subresource Integrity (sha384) hashes.
       security: []
       responses:
         "200":
@@ -583,7 +591,7 @@ components:
     IdempotencyKey:
       name: Idempotency-Key
       in: header
-      description: "A repeat with the same key within 24 h returns the first result instead of sending again. Failures aren't cached. Max 200 characters."
+      description: "A repeat of the same request with the same key within 24 h returns the first result instead of sending again; the same key with a different request is a 409. Failures aren't cached. Max 200 characters."
       schema: { type: string, maxLength: 200, example: "order-1234-shipped" }
 
   responses:
@@ -615,6 +623,12 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: The idempotency key was already used for a different request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: "idempotency key was already used for a different request" }
     NotFound:
       description: Not found
       content:

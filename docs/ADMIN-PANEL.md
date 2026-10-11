@@ -99,6 +99,8 @@ Configured by `-log-format text|json`, `-log-file PATH` (stderr otherwise) and `
 | `delivered after retry` | info | `component=webhook`, `delivery`, `attempt` |
 | `giving up on delivery` | error | `component=webhook`, `delivery`, `attempts` |
 | `queue full, dropping delivery` | error | `component=webhook`, `delivery` |
+| `webhook filter chat resolved` | info | `chat`, `jid` |
+| `webhook filter: could not resolve chat, keeping it as typed` | warn | `chat`, `err` |
 | `API has no token: only local, same-origin requests are accepted` | warn | `addr` |
 | `HTTP API listening` | info | `addr`, `docs` |
 | `HTTP API stopped` | error | `err` (`tui -addr` only) |
@@ -113,36 +115,38 @@ whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 | `at` | Unix milliseconds |
 | `actor` | who: `api`, `tui`, `cli`, `autoreply`, `whatsapp` |
 | `action` | what (below) |
-| `target` | chat JID, when there is one. For attempts that failed before the recipient was resolved, the recipient as given (`5511999999999`) |
+| `target` | chat JID, when there is one. For failed attempts, the recipient or chat as given (`5511999999999`) |
 | `detail` | short, non-sensitive description |
 | `ok` | 1 or 0 |
 | `error` | error text when `ok` is 0 |
 
 | Action | Written by | `detail` |
 |---|---|---|
-| `send` | `Bot.SendText` | `text, N chars`; empty when it failed before sending |
-| `send_file` | `Bot.SendFile` | `<file name>, N bytes`; the file name when it failed before sending |
-| `react` | `Bot.React` | `<emoji> on <id>`; the id when the target wasn't found |
+| `send` | `Bot.SendText` | `text, N chars` |
+| `send_file` | `Bot.SendFile` | `<file name>, N bytes` |
+| `react` | `Bot.React` | `<emoji> on <id>` |
 | `edit` | `Bot.Edit` | message id |
 | `delete` | `Bot.Delete` | message id |
-| `read` | `Bot.MarkRead` | `N messages` (only when something was marked, or on failure) |
+| `read` | `Bot.MarkRead` | `N messages` (written when something was marked, or on any failure) |
 | `pair` | `Bot.PairPhone`: `POST /pair`, TUI `/pair`, `wabot login -phone` | |
 | `logout` | `POST /logout`, `wabot logout` | |
 | `logged_out` | WhatsApp event (actor `whatsapp`) | reason code |
 
-Failed attempts are recorded too (`ok` = 0): a recipient that isn't on WhatsApp, an unknown or
-deleted `reply_to`, a message id that doesn't exist, a 429, or WhatsApp rejecting the send. Some
-input checks still return 400 without an audit row: empty text or file, and the `/edit` and
-`/delete` permission checks (not your message, older than 20 minutes, not text, someone else's
-message in a 1:1 chat).
+`send`, `send_file`, `react`, `edit` and `delete` run through `Bot.audited`, which records every
+attempt exactly once, whatever the outcome. Failures (`ok` = 0) include input errors such as empty
+text or file, a recipient that isn't on WhatsApp, an unknown or deleted `reply_to`, a message id
+that doesn't exist, editing someone else's message or one past the 20-minute window, as well as
+429s and WhatsApp rejecting the send.
 
 Each `Bot.Audit` call also writes the `action` / `action failed` log line above, so the log and
 the table agree.
 
 ## Conventions for new controls
 
-- Every control action (anything that changes state on WhatsApp or in wabot) calls
-  `Bot.Audit(actor, action, target, detail, err)` once, after the attempt, with the real error.
+- Every control action (anything that changes state on WhatsApp or in wabot) is wrapped in
+  `Bot.audited(actor, action, target, detail, fn)`, so it's recorded once with the real error,
+  including validation failures. Use `Bot.Audit` directly only where the action doesn't fit that
+  shape (pair, logout, read).
   Add the new `action` name to the tables in this file and to the `AuditEntry` enum in
   `openapi.yaml`.
 - `actor` is who asked: `api`, `tui`, `cli`, `autoreply`, `whatsapp`, and later

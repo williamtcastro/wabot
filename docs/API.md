@@ -6,7 +6,8 @@ Base URL: whatever you passed to `-addr` (default `http://127.0.0.1:8080` for `s
 > Swagger UI page generated from [`openapi.yaml`](openapi.yaml), where you can click
 > **Authorize**, paste your token and try every endpoint from the browser. The raw spec is at
 > `/openapi.yaml`, ready to import into Postman, Insomnia or Bruno. Neither of those two URLs
-> needs the token.
+> needs the token. The page loads Swagger UI from jsDelivr with Subresource Integrity (sha384)
+> hashes, so a tampered CDN file won't run.
 
 ## Endpoints at a glance
 
@@ -72,6 +73,7 @@ Non-2xx responses always look like this:
 | 401 | missing or wrong token |
 | 403 | no token is configured and the request isn't a same-origin request to localhost |
 | 404 | not found: no QR pending, unknown message `id` in that chat, unknown `seq`, a message without media, or a deleted message's media |
+| 409 | an idempotency key was reused for a different request |
 | 410 | media expired on WhatsApp's servers (`/media`) |
 | 429 | rate limited (sends or number lookups); see the `Retry-After` header (seconds) and [Rate limiting](#rate-limiting) |
 | 502 | WhatsApp rejected or failed the request (also "not logged in") |
@@ -223,8 +225,15 @@ Returns the sent Message.
 **Idempotency.** If you send the same key again within 24 hours, you get the first result back
 and nothing is sent again. A request that arrives while the first one is still in flight waits
 for it. Failed sends aren't remembered, so you can retry them with the same key. Keys are kept
-in memory (lost on restart), are separate for `/send` and `/send/file`, and the request body
-isn't compared: a reused key with different text still returns the first message.
+in memory (lost on restart) and are separate for `/send` and `/send/file`.
+
+A key is bound to the request it was first used with: `to`, `text` and `reply_to` for `/send`;
+`to`, file name, `caption`, `reply_to` and the file's SHA-256 for `/send/file`. Reusing a key for
+a different request within 24 hours is a **409**:
+
+```json
+{ "error": "idempotency key was already used for a different request" }
+```
 
 ## `POST /send/file`
 
@@ -515,8 +524,9 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/check \
 ## `GET /audit`
 
 Control actions taken through wabot, newest first: sends, files, reactions, edits, deletes,
-read receipts, pairing and logout, plus WhatsApp logging the device out. Message text is never
-stored here.
+read receipts, pairing and logout, plus WhatsApp logging the device out. Every send, file,
+reaction, edit and delete attempt is recorded exactly once, including ones rejected for bad
+input (`ok: false` with the error). Message text is never stored here.
 
 | Query | Default | |
 |---|---|---|
@@ -626,5 +636,7 @@ gaps, use `/messages/wait` or `/events` with a cursor instead, or as a backfill.
   -webhook-filter "type=text,image&from_me=false"
 ```
 
-`since` is ignored there. A `chat` in the webhook filter isn't looked up on WhatsApp, so use the
-exact JID (`5511999999999@s.whatsapp.net`, `…@g.us`).
+`since` is ignored there. A `chat` given as a phone number is looked up on WhatsApp once the bot
+is logged in, the same way `/send` resolves recipients (so Brazil's optional 9th digit and hidden
+`@lid` IDs are handled). Until then, or if the lookup fails, it's matched as typed and a warning
+is logged. A JID (`…@s.whatsapp.net`, `…@g.us`) is used as is.

@@ -29,7 +29,7 @@ If the session isn't logged in yet, the main pane shows a QR code. Scan it, or t
 │   ~John              Yesterday ││ ────────────────────── Today ──────────────────────     │
 │   ok, até amanhã               ││                                                         │
 │                                ││   ┃ you: tudo, e você?                                  │
-│                                ││   bem também!  👍  14:05                                │
+│                                ││   bem também!  │ 👍  14:05                              │
 │                                ││                                                         │
 │                                ││                    📄 notes.pdf · 84 KB  edited 14:06 ✓ │
 ╰────────────────────────────────╯╰─────────────────────────────────────────────────────────╯
@@ -52,10 +52,12 @@ The focused panel has a green border.
   Your messages are right-aligned and green, others on the left. In groups each sender's name
   is shown in its own color. Replies show the quoted message above them (`┃`), or
   `┃ ↩ reply to an earlier message` when the quoted message isn't among the loaded ones.
-  Reactions appear next to the time of the message they're on, and edited or deleted messages
-  are marked. Media shows as a label: `📷 Photo`, `🎥 Video`, `🎤 Voice message`, `💟 Sticker`,
+  Reactions appear after the message, set off by a `│` divider, before the time
+  (`bora!  │ ❤️ 👍2  21:41 ✓`); removed reactions disappear along with the divider. Edited or
+  deleted messages are marked. Media shows as a label: `📷 Photo`, `🎥 Video`, `🎤 Voice message`, `💟 Sticker`,
   `📄 file name · size`, `📍 location`.
-- **Context bar** (only while replying or editing): `↩ Replying to Maria …` or `✎ Editing …`.
+- **Context bar** (above the input, only when needed): `↩ Replying to Maria …`, `✎ Editing …`, or
+  the command hint bar while you type a command (see [Autocomplete](#autocomplete)).
 - **Input**: plain text goes to the open chat; lines starting with `/` are commands.
 - Text from other people (messages, names, file names) is shown with terminal escape codes,
   control characters and bidi overrides removed, so a message can't redraw your screen or
@@ -104,6 +106,9 @@ Commands
   /read                     mark the open chat as read
   /pair <phone>             log in with a pairing code
   /help  /quit
+
+Typing a command, Tab completes it (and names after /to, numbers after /send,
+paths after /file), ↑ ↓ cycle the matches.
 ```
 
 Details:
@@ -131,6 +136,26 @@ Details:
   `PgUp` `PgDn` scroll them, `Esc` closes them.
 - `Ctrl+C` quits, as do `/quit` and `/q`.
 
+## Autocomplete
+
+While the input starts with `/`:
+
+- A **hint bar** above the input lists the commands matching what you've typed so far, with
+  their arguments and a short description (`/to <name|number>  open a chat · …`). An unknown
+  command shows `no such command`. The bar goes away once you type a space after the command.
+- The best match appears as grey ghost text after the cursor. **`Tab`** accepts it; `↑` / `↓`
+  cycle through the other matches. If nothing matches, `Tab` does nothing (it doesn't move
+  focus).
+- Completion knows the arguments too:
+  - `/to `: names of your chats and address-book contacts, the number for chats without a
+    contact name, and group JIDs.
+  - `/send `: numbers and group JIDs of your chats.
+  - `/file `: files and folders on disk, relative to the current directory or starting with
+    `~/`. Hidden files only show up once you type a `.`; names containing spaces are skipped
+    (`/file` can't take them anyway).
+
+Outside a command, `Tab` keeps its normal job of cycling focus.
+
 Everything you send from the TUI goes through the same rate limiter as the API and is recorded
 in the audit log with actor `tui` (including `/pair`).
 
@@ -143,7 +168,7 @@ in the audit log with actor `tui` (including `/pair`).
 | `/contacts [search]` | list your contacts, optionally filtered by name or part of the number |
 | `/groups` | list your groups with their JIDs |
 | `/send <number or JID> <text>` | one-off message without switching chats |
-| `/file <path> [caption]` | send a file to the open chat (images go as photos, the rest as documents) |
+| `/file <path> [caption]` | send a file to the open chat (images go as photos, the rest as documents). `~/` expands to your home directory |
 | `/read` | mark the latest 50 incoming messages in the open chat as read |
 | `/pair <phone>` | pairing-code login |
 | `/help` | keys and commands |
@@ -157,6 +182,8 @@ in the audit log with actor `tui` (including `/pair`).
   keep the app logs (HTTP requests, actions, webhook deliveries). whatsmeow's own logs stay off;
   to see them, run `wabot serve -debug` with the same `-db` instead.
 - File paths in `/file` can't contain spaces.
+- New commands go in `tuiCommands`, `tuiHelp` (in `tui.go`) and this file, so autocomplete,
+  the hint bar and `/help` stay in sync.
 - WhatsApp sometimes identifies people by a hidden ID (`…@lid`) instead of their number,
   e.g. for messages you type on your phone. Until WhatsApp reveals which number that ID
   belongs to, the person can show up as a separate chat. The two merge automatically as soon

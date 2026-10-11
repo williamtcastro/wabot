@@ -6,7 +6,7 @@ One Go binary, one SQLite file, no cgo. Use it three ways:
 - **HTTP API**: send texts and files, reply, react, edit, delete, mark as read; read the stored
   history with filters; long-poll or stream new messages with resumable cursors; download media;
   receive signed webhooks
-- **TUI**: chat from your terminal, with replies, reactions, edits and media saving
+- **TUI**: chat from your terminal, with replies, reactions, edits, media saving and command autocomplete
 - **CLI**: `wabot send 5511999999999 "hello"` from scripts and cron jobs
 
 It links to your account as a "Linked device", the same way WhatsApp Web does. Outgoing messages
@@ -96,8 +96,9 @@ in Python and Node, [docs/BOT.md](docs/BOT.md#verifying-webhook-signatures).
 A chat list on the left, the open conversation on the right. Press `Tab` to move between the
 input, the chat list (type to filter) and the messages, or type `/to maria` or
 `/to 5511999999999`. Then anything you type goes to that chat. With a message selected,
-`r` replies, `e` edits, `d d` deletes, `1`–`6` react and `s` saves media. `/help` lists
-everything. See [docs/TUI.md](docs/TUI.md).
+`r` replies, `e` edits, `d d` deletes, `1`–`6` react and `s` saves media. Typing `/` shows a
+hint bar of commands; `Tab` completes command names, chat and contact names after `/to`, numbers
+after `/send` and file paths after `/file`. `/help` lists everything. See [docs/TUI.md](docs/TUI.md).
 
 ## 2c. One-shot CLI
 

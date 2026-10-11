@@ -70,7 +70,7 @@ Prints usage (also `-h` / `--help`).
 | `-token TOKEN` | `WABOT_TOKEN` | none | require `Authorization: Bearer TOKEN` on the API |
 | `-webhook URL` | `WABOT_WEBHOOK` | none | POST incoming messages as JSON to this http(s) URL |
 | `-webhook-secret S` | `WABOT_WEBHOOK_SECRET` | none | sign webhook bodies with HMAC-SHA256 ([how to verify](BOT.md#verifying-webhook-signatures)) |
-| `-webhook-filter Q` | `WABOT_WEBHOOK_FILTER` | none | only deliver matching messages, e.g. `type=text&from_me=false` ([syntax](API.md#filters)) |
+| `-webhook-filter Q` | `WABOT_WEBHOOK_FILTER` | none | only deliver matching messages, e.g. `type=text&from_me=false` ([syntax](API.md#filters)). A `chat=<number>` is resolved on WhatsApp after login |
 | `-rate N` | `WABOT_RATE` | `20` | max messages sent per minute; `0` = unlimited. Number lookups get 3 × this. `WABOT_RATE` must be a non-negative integer or wabot exits with code 2 |
 | `-chat-gap D` | | `1s` | min time between two messages to the same chat |
 | `-max-wait D` | | `30s` | queue a send at most this long before answering 429; `0` = wait as long as needed |

@@ -12,14 +12,14 @@ TUI and a one-shot CLI. All state lives in one SQLite file (default `wabot.db`).
 
 | File | Responsibility |
 |---|---|
-| `main.go` | subcommands (`login`, `serve`, `tui`, `send`, `logout`), flags, env vars, wiring of limiters/webhook/logger, the loopback-without-token check (`isLoopbackAddr`) |
+| `main.go` | subcommands (`login`, `serve`, `tui`, `send`, `logout`), flags, env vars, wiring of limiters/webhook/logger, the loopback-without-token check (`isLoopbackAddr`), resolving a `-webhook-filter` chat number after login (`resolveWebhookChat`) |
 | `bot.go` | `Bot` type: whatsmeow client, event handling (incl. incoming edits/deletes), sending via `deliver`, replies, reactions, edits, deletes, read receipts, typing, media download (`limitedTransport` 100 MB cap), recipient resolution and the lookup limiter, presence (`-online`), contacts, auto-replies, DB file permissions, pub/sub |
 | `store.go` | `wabot_messages` table and its migration from the old rowid schema, `Message`/`Media`/`Chat` types, `Filter` (shared by `/messages`, `/messages/wait`, `/events`, webhook), chat list, history-sync import, LID relinking |
-| `api.go` | HTTP routes, bearer auth, `localOnly` (token-less mode: loopback Host, no cross-site), long-poll, SSE, `/media`, idempotency keys, request logging, error mapping (`writeError`), embedded OpenAPI spec and `/docs` page |
+| `api.go` | HTTP routes, bearer auth, `localOnly` (token-less mode: loopback Host, no cross-site), long-poll, SSE, `/media`, idempotency keys (bound to a request fingerprint; reuse for a different request → 409 `errConflict`), request logging, error mapping (`writeError`), embedded OpenAPI spec and `/docs` page |
 | `webhook.go` | webhook queue and workers, retries with backoff, HMAC signing (`Sign`) |
 | `limit.go` | `Limiter`: per-minute and per-chat spacing, `RateLimitError` (429). Three instances: `Bot.Limiter` (sends), `Bot.Lookups` (number checks, presence; 3 × rate), `autoLimit` (auto-replies, drop instead of queue) |
 | `audit.go` | `wabot_audit` table, `Bot.Audit`, `AuditLog`, `NewLogger` (slog setup) |
-| `tui.go` | Bubble Tea model: chat sidebar, conversation pane, message selection and actions, commands, `tuiHelp`, `safe()` sanitizing of untrusted text |
+| `tui.go` | Bubble Tea model: chat sidebar, conversation pane, message selection and actions, commands (`tuiCommands`, `tuiHelp`), autocomplete (`suggest`, `pathSuggestions`, `chatTarget`), `safe()` sanitizing of untrusted text |
 | `docs/openapi.yaml` | OpenAPI 3 spec, embedded into the binary with `//go:embed` (rebuild after editing) |
 | `docs/*.md` | user docs: CLI, API, TUI, writing bot logic, admin panel plan |
 
@@ -45,10 +45,11 @@ There's no test suite. To check TUI layout without a terminal or a WhatsApp logi
 - **Few comments, more docs.** Code comments only for non-obvious "why". Explanations go in `docs/*.md`.
 - **Keep the docs in sync.** A change to an endpoint means updating `api.go`, `docs/openapi.yaml` *and*
   `docs/API.md`. A TUI key or command means updating `tuiHelp` in `tui.go` and `docs/TUI.md`. A flag means
-  updating `usage` in `main.go`, `docs/CLI.md` and the README table.
+  updating `usage` in `main.go`, `docs/CLI.md` and the README table. A new TUI command goes in
+  `tuiCommands` (autocomplete and hint bar), `tuiHelp` and `docs/TUI.md`.
 - Errors from the API are always `{"error": "..."}` via `writeError` (401/403 come from the auth
   middleware), which maps errors to codes:
-  `inputError` (build it with `badInput(...)`) → 400, `errNotFound` → 404, `RateLimitError` → 429 with
+  `inputError` (build it with `badInput(...)`) → 400, `errNotFound` → 404, `errConflict` → 409, `RateLimitError` → 429 with
   `Retry-After`, context cancel/deadline → 504, anything else → 502 (WhatsApp failure). Return
   `badInput` from `Bot` methods for caller mistakes so the API, TUI and CLI all report them the same way.
 - **Everything that sends a message goes through `Bot.deliver`** (or `Bot.sendControl` for edits and
@@ -60,11 +61,13 @@ There's no test suite. To check TUI layout without a terminal or a WhatsApp logi
   whatsmeow event handler.
 - Presence: default is "unavailable" so the owner's phone keeps notifications. Use `chatPresence` for
   typing indicators; it goes available and back when `-online` is off.
-- **Every control action calls `Bot.Audit(actor, action, target, detail, err)`** once, after the attempt,
-  including attempts that fail before anything is sent.
-  `actor` is `api`, `tui`, `cli`, `autoreply` or `whatsapp`; pass it into `Bot` methods rather than
-  guessing. Never put message text, tokens or secrets in `detail` or in log attributes. New actions go in
-  the tables in `docs/ADMIN-PANEL.md` and the `AuditEntry` enum in `docs/openapi.yaml`.
+- **Wrap every control action in `Bot.audited(actor, action, target, detail, fn)`.** It runs `fn` and calls
+  `Bot.Audit` exactly once with the outcome, so input-validation failures (empty text, not your message,
+  edit window) are recorded too. Put the validation inside `fn`, not before it. Call `Bot.Audit` directly
+  only for actions that don't return a `Message` (pair, logout, read). `actor` is `api`, `tui`, `cli`,
+  `autoreply` or `whatsapp`; pass it into `Bot` methods rather than guessing. Never put message text,
+  tokens or secrets in `detail` or in log attributes. New actions go in the tables in
+  `docs/ADMIN-PANEL.md` and the `AuditEntry` enum in `docs/openapi.yaml`.
 - Logging is `log/slog` via `b.Log`. Errors go in an `err` attribute. Don't log query strings (the token
   can be there).
 - New events for subscribers go through `Bot.publish`. The SSE handler forwards `Message` (as `message`,
@@ -127,6 +130,9 @@ There's no test suite. To check TUI layout without a terminal or a WhatsApp logi
 - The DB and its `-wal`/`-shm` files are chmod 0600 at startup; files saved from the TUI are 0600 and never
   overwrite existing ones.
 - Never log the webhook URL (it may carry a secret) or the request query string.
+- `/docs` loads `swagger-ui-dist` from jsDelivr with Subresource Integrity hashes (`docsPage` in `api.go`).
+  Bumping the version means recomputing both `integrity` attributes, e.g.
+  `curl -fsSL URL | openssl dgst -sha384 -binary | openssl base64 -A`, otherwise the page won't load.
 - Webhook signing is HMAC-SHA256 over `"<timestamp>.<body>"`. Changing that breaks every receiver; if it
   must change, add a new header version instead.
 
