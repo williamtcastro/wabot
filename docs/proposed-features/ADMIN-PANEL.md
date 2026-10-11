@@ -63,18 +63,22 @@ logging and audit groundwork that already exists for it.
    `GET /admin/logs?level=&after=`. Attributes are already safe to show (see conventions below).
 5. **Audit filters.** `GET /audit` only has `limit` and `before`. Add `actor`, `action`, `target`,
    `ok`, `from`, `to` query parameters, and an index on `(action, at)` if it gets slow.
-6. **Admin auth, separate from the API token.** The API token is meant for scripts and is
-   accepted in the query string. The panel should instead use:
+6. **Admin auth, separate from the API tokens.** API tokens are meant for scripts and agents (and
+   `?token=` is only accepted on a few GET routes). The panel should instead use:
    - a login form (password from `-admin-password` / `WABOT_ADMIN_PASSWORD`, stored hashed if
      persisted), creating a server-side session with an `HttpOnly`, `SameSite=Strict`,
      `Secure`-when-TLS cookie;
    - a CSRF token on every state-changing request (double-submit or per-session token);
    - session expiry and a logout button;
-   - the API token keeps working for `/` routes; panel routes live under `/admin/` and accept
-     only the session cookie.
+   - API tokens keep working for `/` routes; panel routes live under `/admin/` and accept
+     only the session cookie. Today's `admin` scope (see [API.md](../API.md#tokens-and-scopes)) is the
+     natural mapping for a full panel user.
 7. **Read-only role.** A second password (or user list) for viewers who can see status, chats and
    audit but can't send, delete, pair or log out. Enforced server-side per route, and recorded as
-   the audit `actor` (e.g. `admin:maria`, `viewer:john`).
+   the audit `actor`. Today the actor for API calls is the plain token name (e.g. `support-bot`), so a
+   panel user could be audited the same way, by a name that can't collide with a token name (e.g.
+   `maria` for a panel login, with token names and panel names sharing one namespace). Current scopes are
+   `read`, `send` and `admin`; a viewer maps to `read`.
 8. **Settings persistence.** If runtime-editable settings are added (rate limit, chat gap,
    auto-reply on/off, webhook filter), store them in a `wabot_settings` key/value table that
    overrides flags on startup, and audit every change (`action=settings`, `detail` = key names,
@@ -110,6 +114,7 @@ Configured by `-log-format text|json`, `-log-file PATH` (stderr otherwise) and `
 | `cache groups failed` | warn | `err` |
 | `API has no token: only local, same-origin requests are accepted` | warn | `addr` |
 | `HTTP API listening` | info | `addr`, `docs` |
+| `MCP server on stdio` | info | `as` (principal name), `scopes` (`wabot mcp` only) |
 | `HTTP API stopped` | error | `err` (`tui -addr` only) |
 
 whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
@@ -120,7 +125,7 @@ whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 |---|---|
 | `id` | autoincrement; cursor for `before` |
 | `at` | Unix milliseconds |
-| `actor` | who: `api`, `tui`, `cli`, `autoreply`, `whatsapp` |
+| `actor` | who: the token name for API/MCP calls (`api` = owner secret or token-less, `mcp` = stdio without a token), `tui`, `cli`, `autoreply`, `whatsapp` |
 | `action` | what (below) |
 | `target` | chat JID, when there is one. For failed attempts, the recipient or chat as given (`5511999999999`) |
 | `detail` | short, non-sensitive description |
@@ -138,6 +143,8 @@ whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 | `pair` | `Bot.PairPhone`: `POST /pair`, TUI `/pair`, `wabot login -phone` | |
 | `logout` | `POST /logout`, `wabot logout` | |
 | `logged_out` | WhatsApp event (actor `whatsapp`) | reason code |
+| `token_create` | `POST /tokens`, `wabot token create` | requested scopes (target = token name) |
+| `token_revoke` | `DELETE /tokens/{name}`, `wabot token revoke` | (target = token name) |
 
 `send`, `send_file`, `react`, `edit` and `delete` run through `Bot.audited`, which records every
 attempt exactly once, whatever the outcome. Failures (`ok` = 0) include input errors such as empty
@@ -156,8 +163,9 @@ the table agree.
   shape (pair, logout, read).
   Add the new `action` name to the tables in this file and to the `AuditEntry` enum in
   [`docs/openapi.yaml`](../openapi.yaml).
-- `actor` is who asked: `api`, `tui`, `cli`, `autoreply`, `whatsapp`, and later
-  `admin:<user>`. Pass it into `Bot` methods; don't infer it.
+- `actor` is who asked: the token name for API and MCP calls (`api` for the owner secret, `mcp` for
+  stdio without a token), or `tui`, `cli`, `autoreply`, `whatsapp`; later, panel users. Pass it into
+  `Bot` methods; don't infer it.
 - `target` is the chat JID. `detail` is short and safe: ids, counts, sizes, file names.
 - **Never log or audit** message text, captions, tokens, webhook secrets, passwords, session
   cookies or QR/pairing codes.
@@ -171,13 +179,13 @@ the table agree.
 **Phase 1: read-only panel.** A new `internal/admin` package with static HTML, a little CSS and
 [htmx](https://htmx.org) (vendored, not from a CDN), embedded with `//go:embed` and mounted by
 `internal/api` at `/admin/`. Pages: status & QR, chats & messages (live via `EventSource`), audit log.
-Auth: the existing API token, entered once and kept in `sessionStorage`; without a token the
+Auth: an API token (ideally a `read`-only one for this phase), entered once and kept in `sessionStorage`; without a token the
 panel works only from a browser on the same machine, because the API already rejects non-local
 and cross-site requests (403). Serve the panel from the same origin as the API so those checks
 pass. No new tables.
 
 **Phase 2: admin auth and actions.** Session login, CSRF, read-only role. Send form,
-react/delete buttons, pair/logout. Panel actions audited as `admin:<user>`.
+react/delete buttons, pair/logout. Panel actions audited under the panel user's name.
 
 **Phase 3: operational views.** Webhook delivery table and page, limiter snapshot, config
 snapshot, audit filters, optional log ring buffer.

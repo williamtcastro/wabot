@@ -9,3 +9,6 @@ user-facing parts move into the regular docs (`docs/*.md`) and the proposal is d
 |---|---|
 | [ADMIN-PANEL.md](ADMIN-PANEL.md) | A small web admin panel served by `wabot serve`: status and QR login, chats, send form, audit log, webhook and rate-limit health. Also documents the logging and audit structure that exists today |
 | [IMAGE-PREVIEWS.md](IMAGE-PREVIEWS.md) | Inline photo and sticker previews in the TUI using the Kitty graphics protocol (and fallbacks), instead of text labels |
+| [LLM-CONTEXT.md](LLM-CONTEXT.md) | `GET /chats/{jid}/context`: a chat as a compact, prompt-ready transcript (names, inline replies, media described, reactions folded) with a size budget and a "what's new" cursor; also backs an MCP tool/resource |
+| [DRAFTS-APPROVAL.md](DRAFTS-APPROVAL.md) | Agents propose replies with `POST /drafts`; a human approves, edits or rejects them in the TUI or API. Per-chat and per-token policy, expiry, staleness checks, no self-approval; sending reuses `Bot.SendText` |
+| [RULES-AND-STATE.md](RULES-AND-STATE.md) | Declarative routing rules (match chat, sender, type, regex, mentions, voice notes → webhook, agent stream, react, drop) with dry runs, plus per-chat key-value state with TTL and CAS; SQLite by default, Redis optional |
