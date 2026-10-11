@@ -1,8 +1,9 @@
 # TUI
 
 ```sh
-./wabot tui              # terminal only
-./wabot tui -addr :8080  # also serve the HTTP API from the same process
+./wabot tui                                    # terminal only
+./wabot tui -addr 127.0.0.1:8080               # also serve the HTTP API from the same process
+WABOT_TOKEN=change-me ./wabot tui -addr :8080  # other addresses need a token
 ```
 
 Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea),
@@ -16,64 +17,145 @@ If the session isn't logged in yet, the main pane shows a QR code. Scan it, or t
 ## Layout
 
 ```
- wabot · 5511988887777@s.whatsapp.net · connected
-  All activity                  │Maria Silva 552187654321@s.whatsapp.net
-  3 chats                       │Oct 10 19:46 Maria Silva: oi, tudo bem?
-  👥 Family               22:16 │Oct 10 20:46 me: tudo e vc
-  [image] foto da festa         │
-▌ Maria Silva             20:46 │
-  you: tudo e vc                │
-  ~John                      2  │
-  a very long message that sho… │
-> _
+╭────────────────────────────────╮╭─────────────────────────────────────────────────────────╮
+│ Chats  3                       ││ Maria   +5511999999999                                  │
+│                                ││ ─────────────────────────────────────────────────────── │
+│   All activity                 ││ ──────────────────── Yesterday ────────────────────     │
+│   1 chat with new messages     ││                                                         │
+│ ▌ Maria                  14:05 ││   oi, tudo bem?  21:40                                  │
+│   bem também!                  ││                                                         │
+│   👥 Family                  2 ││                                 tudo, e você?  21:41 ✓  │
+│   📷 foto da festa             ││                                                         │
+│   ~John              Yesterday ││ ────────────────────── Today ──────────────────────     │
+│   ok, até amanhã               ││                                                         │
+│                                ││   ┃ you: tudo, e você?                                  │
+│                                ││   bem também!  👍  14:05                                │
+│                                ││                                                         │
+│                                ││                    📄 notes.pdf · 84 KB  edited 14:06 ✓ │
+╰────────────────────────────────╯╰─────────────────────────────────────────────────────────╯
+╭───────────────────────────────────────────────────────────────────────────────────────────╮
+│ › _                                                                                       │
+╰───────────────────────────────────────────────────────────────────────────────────────────╯
+ tab chats  ·  ↑ select msg  ·  ^N/^P switch  ·  /help commands          ● +5511988887777
 ```
 
-- **Header**: your account and the connection state.
+The focused panel has a green border.
+
 - **Chat list** (left): every conversation the bot has stored, most recent first, with the
-  last message and its time. A green badge counts messages that arrived while you were looking
-  at another chat. `▌` marks the chat that's open. `~Name` means the person isn't in your
-  address book and that's their WhatsApp profile name.
-- **Main pane** (right): the open chat's history (last 300 messages), updating live.
-  **All activity** is a live feed of every chat plus command output.
-- **Input** (bottom): plain text goes to the open chat; lines starting with `/` are commands.
+  last message and a relative time (`14:05`, `Yesterday`, `Mon`, `02/10/26`). A green badge
+  counts messages that arrived while you were looking at another chat; badges reset when you
+  restart. `▌` marks the open chat, `👥` a group, and `~Name` means the person isn't in your
+  address book and that's their WhatsApp profile name. **All activity** at the top is a live
+  feed of every chat. Group names are refreshed from WhatsApp every 10 minutes.
+- **Conversation** (right): the open chat's last 400 messages, updating live, with day
+  separators. Only that chat's messages are shown, not the same person's messages in groups.
+  Your messages are right-aligned and green, others on the left. In groups each sender's name
+  is shown in its own color. Replies show the quoted message above them (`┃`), or
+  `┃ ↩ reply to an earlier message` when the quoted message isn't among the loaded ones.
+  Reactions appear next to the time of the message they're on, and edited or deleted messages
+  are marked. Media shows as a label: `📷 Photo`, `🎥 Video`, `🎤 Voice message`, `💟 Sticker`,
+  `📄 file name · size`, `📍 location`.
+- **Context bar** (only while replying or editing): `↩ Replying to Maria …` or `✎ Editing …`.
+- **Input**: plain text goes to the open chat; lines starting with `/` are commands.
+- Text from other people (messages, names, file names) is shown with terminal escape codes,
+  control characters and bidi overrides removed, so a message can't redraw your screen or
+  disguise its text.
+- **Footer**: key hints for the focused panel, or the last notice (`✓ saved …`, `✗ error`)
+  for 5 seconds. On the right, a dot shows the connection: green with your number when
+  connected and logged in, red with the state otherwise.
 
 The chat list comes from messages stored in `wabot.db`, so it fills up as you use the bot.
 Right after a fresh `wabot login`, WhatsApp also sends a batch of recent conversations, which
 are imported automatically.
 
+**Read receipts.** Opening a chat sends read receipts for its latest incoming messages (up to
+20), and new messages that arrive in the open chat are marked as read right away. Your contacts
+see blue ticks as if you'd read them on the phone.
+
 ## Keys
 
-| Key | |
-|---|---|
-| `Tab` | move focus between the chat list and the input |
-| `↑` `↓` / `k` `j` | (chat list focused) move the highlight |
-| `Enter` | (chat list focused) open the highlighted chat |
-| `Ctrl+N` / `Ctrl+P` | open the next / previous chat without leaving the input |
-| `Esc` | go back to **All activity** |
-| `↑` `↓`, `PgUp` `PgDn` | (input focused) scroll messages |
-| `Ctrl+C` | quit |
+This is the `/help` panel, word for word:
+
+```
+Moving around
+  Tab / Shift+Tab     cycle focus: input → chats → messages
+  Ctrl+N / Ctrl+P     next / previous chat
+  ↑ (empty input)     select messages
+  PgUp / PgDn         scroll
+  Esc                 cancel / close / back to the input
+
+Chat list (focused)
+  type                filter chats by name
+  ↑ ↓  Enter          pick and open
+
+Selected message
+  r  reply           e  edit (yours, 20 min)
+  d d  delete        s  save media to ~/Downloads
+  1-6  react 👍 ❤️ 😂 😮 😢 🙏     0  remove reaction
+  other letters      back to typing
+
+Commands
+  /to <name|number|jid>     open a chat
+  /all                      live feed of every chat
+  /contacts [search]        your address book
+  /groups                   your groups
+  /send <number|jid> <msg>  one-off message
+  /file <path> [caption]    send a file to the open chat
+  /read                     mark the open chat as read
+  /pair <phone>             log in with a pairing code
+  /help  /quit
+```
+
+Details:
+
+- **Focus.** `Tab` cycles input → chats → messages, `Shift+Tab` goes backwards. The messages
+  panel is skipped when no chat is open or it has no messages.
+- **Chat list.** Typing filters by name (or part of the JID); `Backspace` edits the filter, the
+  first `Esc` clears it and the second goes back to the input. `Enter` opens the highlighted
+  chat. `Ctrl+N` / `Ctrl+P` open the chat after / before the open one (or the highlighted one when
+  the chat list is focused), without changing focus.
+- **Selecting messages.** `↑` in an empty input selects the newest message. Move with `↑` `↓`
+  (or `k` `j`); `↓` past the newest message returns to the input. `Enter` also starts a reply.
+  Any other letter jumps back to the input and is typed there, so you can just start writing.
+- **Reply / edit.** `r` or `e` puts you back in the input with a context bar. For an edit the
+  input is pre-filled with the current text. `Enter` sends, `Esc` cancels. Deleted messages
+  can't be replied to. Only your own text messages can be edited, and only within 20 minutes of
+  sending (WhatsApp's limit).
+- **Delete.** Press `d` twice on the same message. It's deleted for everyone.
+- **React.** `1`–`6` react with 👍 ❤️ 😂 😮 😢 🙏, `0` removes your reaction.
+- **Save.** `s` downloads the photo, video, voice message, sticker or document to
+  `~/Downloads` (or the current directory if that doesn't exist), readable only by you (mode
+  0600). Existing files are never overwritten: the copy is saved as `name (1).ext`,
+  `name (2).ext` and so on.
+- **Panels.** `/help`, `/contacts` and `/groups` open in the right-hand pane. `↑` `↓` and
+  `PgUp` `PgDn` scroll them, `Esc` closes them.
+- `Ctrl+C` quits, as do `/quit` and `/q`.
+
+Everything you send from the TUI goes through the same rate limiter as the API and is recorded
+in the audit log with actor `tui` (including `/pair`).
 
 ## Commands
 
 | Command | |
 |---|---|
-| `/contacts [search]` | list your contacts, optionally filtered by name or part of the number |
 | `/to <number, JID or name>` | open a chat. A name works if exactly one contact matches; otherwise you get the matches |
 | `/all` | go back to **All activity** |
-| `/send <number or JID> <text>` | one-off message without switching chats |
-| `/file <path> [caption]` | send a file to the open chat (images go as photos) |
+| `/contacts [search]` | list your contacts, optionally filtered by name or part of the number |
 | `/groups` | list your groups with their JIDs |
+| `/send <number or JID> <text>` | one-off message without switching chats |
+| `/file <path> [caption]` | send a file to the open chat (images go as photos, the rest as documents) |
+| `/read` | mark the latest 50 incoming messages in the open chat as read |
 | `/pair <phone>` | pairing-code login |
-| `/clear` | clear the current pane (the chat history is still in the database) |
 | `/help` | keys and commands |
-| `/quit` | exit |
+| `/quit`, `/q` | exit |
 
 ## Notes
 
 - Only one process can use a session at a time. Stop `wabot serve` before starting the TUI,
-  or run `wabot tui -addr :8080` to get both.
-- whatsmeow logs are silenced in the TUI so they don't mess up the screen. If something
-  isn't working, run `wabot serve -debug` with the same `-db` to see them.
+  or run `wabot tui -addr 127.0.0.1:8080` to get both.
+- Logs are silenced in the TUI so they don't mess up the screen. Pass `-log-file wabot.log` to
+  keep the app logs (HTTP requests, actions, webhook deliveries). whatsmeow's own logs stay off;
+  to see them, run `wabot serve -debug` with the same `-db` instead.
 - File paths in `/file` can't contain spaces.
 - WhatsApp sometimes identifies people by a hidden ID (`…@lid`) instead of their number,
   e.g. for messages you type on your phone. Until WhatsApp reveals which number that ID

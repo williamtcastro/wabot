@@ -1,16 +1,27 @@
 openapi: 3.0.3
 info:
   title: wabot HTTP API
-  version: "1.0"
+  version: "2.0"
   description: |
     A small WhatsApp bot built on [whatsmeow](https://github.com/tulir/whatsmeow).
 
     **Auth:** when the server runs with `-token` / `WABOT_TOKEN`, send `Authorization: Bearer <token>`
     (or `?token=<token>`). Click **Authorize** above to set it for the "Try it out" buttons.
+    Without a token the server only listens on loopback and only accepts same-origin requests whose
+    `Host` is loopback; anything else gets 403.
 
     **Recipients** (`to`, `chat`): a phone number with country code in any format
     (`5511999999999`, `+55 (11) 99999-9999`) or a full JID (`…@s.whatsapp.net`, `…@g.us`, `…@lid`).
     Phone numbers are looked up on WhatsApp first, so variants like Brazil's 9th digit just work.
+    A number that isn't on WhatsApp is a 400.
+
+    **Rate limiting:** everything that sends a message (text, file, reaction, edit, delete) is spaced out
+    by the server (`-rate`, `-chat-gap`). A request waits for its slot up to `-max-wait`; beyond that it gets
+    429 with `Retry-After`. Number lookups (uncached phone numbers, `/check`, `/typing`) have a separate
+    limit of 3 × `-rate` per minute with the same 429 behaviour.
+
+    **Errors** are always `{"error": "..."}`: 400 bad input, 401 bad token, 403 not local (no token set), 404 not found, 410 media expired,
+    429 rate limited, 502 WhatsApp failure or not logged in, 504 timeout.
 servers:
   - url: /
 security:
@@ -20,6 +31,8 @@ tags:
   - name: Messaging
   - name: Reading
   - name: Directory
+  - name: Admin
+  - name: Docs
 
 paths:
   /status:
@@ -33,6 +46,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Status" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /qr:
     get:
@@ -45,7 +59,9 @@ paths:
           content:
             image/png:
               schema: { type: string, format: binary }
-        "404": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /pair:
     post:
@@ -70,27 +86,31 @@ paths:
                 type: object
                 properties:
                   code: { type: string, example: "ABCD-EFGH" }
-        "400": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/BadGateway" }
 
   /logout:
     post:
       tags: [Session]
       summary: Unlink this device and delete the session
       responses:
-        "200":
-          description: Logged out
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  ok: { type: boolean }
-        "502": { $ref: "#/components/responses/Error" }
+        "200": { $ref: "#/components/responses/OK" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/BadGateway" }
 
   /send:
     post:
       tags: [Messaging]
       summary: Send a text message
+      description: |
+        Optionally quote a stored message with `reply_to` (not a deleted one; an edited one is quoted with its
+        current text). With an idempotency key, a repeat within 24 h returns the first result instead of
+        sending again; failed sends aren't remembered.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -101,20 +121,24 @@ paths:
               properties:
                 to: { type: string, example: "5511999999999" }
                 text: { type: string, example: "Hello from *wabot* 👋" }
+                reply_to: { type: string, description: "id of a stored message in the same chat to quote", example: "3EB0C767D26A1D0F5E2A" }
+                idempotency_key: { type: string, maxLength: 200, description: "Same as the Idempotency-Key header; the header wins." }
       responses:
-        "200":
-          description: The sent message
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Message" }
-        "400": { $ref: "#/components/responses/Error" }
-        "502": { $ref: "#/components/responses/Error" }
+        "200": { $ref: "#/components/responses/MessageResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "504": { $ref: "#/components/responses/Timeout" }
 
   /send/file:
     post:
       tags: [Messaging]
       summary: Send an image or document
       description: Images (detected from the content) go as photos, anything else as a document. Max 64 MB.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -124,25 +148,165 @@ paths:
               required: [to, file]
               properties:
                 to: { type: string, example: "5511999999999" }
-                caption: { type: string }
                 file: { type: string, format: binary }
+                caption: { type: string }
+                reply_to: { type: string, description: "id of a stored message in the same chat to quote" }
+                idempotency_key: { type: string, maxLength: 200 }
+      responses:
+        "200": { $ref: "#/components/responses/MessageResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "504": { $ref: "#/components/responses/Timeout" }
+
+  /react:
+    post:
+      tags: [Messaging]
+      summary: React to a message
+      description: An empty `emoji` removes your reaction. Returns the reaction as a Message (`type` reaction).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chat, id]
+              properties:
+                chat: { type: string, example: "5511999999999" }
+                id: { type: string, example: "3EB0C767D26A1D0F5E2A" }
+                emoji: { type: string, example: "👍" }
+      responses:
+        "200": { $ref: "#/components/responses/MessageResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "504": { $ref: "#/components/responses/Timeout" }
+
+  /edit:
+    post:
+      tags: [Messaging]
+      summary: Edit one of your text messages
+      description: Only your own text messages, within 20 minutes of sending (WhatsApp's edit window); otherwise 400. Returns the updated Message.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chat, id, text]
+              properties:
+                chat: { type: string, example: "5511999999999" }
+                id: { type: string, example: "3EB0C767D26A1D0F5E2A" }
+                text: { type: string, example: "fixed typo" }
+      responses:
+        "200": { $ref: "#/components/responses/MessageResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "504": { $ref: "#/components/responses/Timeout" }
+
+  /delete:
+    post:
+      tags: [Messaging]
+      summary: Delete a message for everyone
+      description: Your own messages, or other people's in groups where you're an admin. Returns the updated Message (`deleted` true, empty `text`). The stored copy of the original is dropped, so its media can no longer be downloaded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chat, id]
+              properties:
+                chat: { type: string, example: "5511999999999" }
+                id: { type: string, example: "3EB0C767D26A1D0F5E2A" }
+      responses:
+        "200": { $ref: "#/components/responses/MessageResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "504": { $ref: "#/components/responses/Timeout" }
+
+  /read:
+    post:
+      tags: [Messaging]
+      summary: Send read receipts
+      description: Marks the given incoming messages as read, or the latest 50 incoming messages in the chat when no ids are given. Own messages, reactions and unknown ids are skipped.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chat]
+              properties:
+                chat: { type: string, example: "5511999999999" }
+                id: { type: string }
+                ids:
+                  type: array
+                  items: { type: string }
       responses:
         "200":
-          description: The sent message
+          description: Number of messages marked
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Message" }
-        "400": { $ref: "#/components/responses/Error" }
-        "502": { $ref: "#/components/responses/Error" }
+              schema:
+                type: object
+                properties:
+                  marked: { type: integer, example: 3 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /typing:
+    post:
+      tags: [Messaging]
+      summary: Show a typing or recording indicator
+      description: Counts against the number-lookup limit. Without `-online`, the account goes "available" for `typing`/`recording` and back to unavailable on `paused`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chat]
+              properties:
+                chat: { type: string, example: "5511999999999" }
+                state: { type: string, enum: [typing, recording, paused], default: typing }
+      responses:
+        "200": { $ref: "#/components/responses/OK" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/BadGateway" }
 
   /messages:
     get:
       tags: [Reading]
-      summary: Stored messages, newest first
-      description: Every message the bot has seen or sent is kept in the session database, so this survives restarts.
+      summary: Stored messages
+      description: |
+        Without `since`: newest first by timestamp. With `since`: oldest first by `seq`, starting after
+        `since` (cursor paging: pass the last `seq` you got as the next `since`).
       parameters:
-        - { name: chat, in: query, schema: { type: string }, description: "Phone number or JID; matches the chat or the sender." }
-        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - $ref: "#/components/parameters/Chat"
+        - $ref: "#/components/parameters/Type"
+        - $ref: "#/components/parameters/FromMe"
+        - $ref: "#/components/parameters/IsGroup"
+        - $ref: "#/components/parameters/Since"
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 1000 } }
       responses:
         "200":
           description: Messages
@@ -151,13 +315,112 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Message" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /messages/wait:
+    get:
+      tags: [Reading]
+      summary: Long-poll for new messages
+      description: |
+        Returns as soon as at least one message matching the filters exists after `since`, or after `timeout`
+        seconds with an empty list. Without `since` it waits for messages that arrive after the request.
+        Pass `next_since` as `since` on the next call.
+      parameters:
+        - $ref: "#/components/parameters/Chat"
+        - $ref: "#/components/parameters/Type"
+        - $ref: "#/components/parameters/FromMe"
+        - $ref: "#/components/parameters/IsGroup"
+        - $ref: "#/components/parameters/Since"
+        - { name: timeout, in: query, description: "Seconds to wait.", schema: { type: integer, default: 30, maximum: 120 } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+      responses:
+        "200":
+          description: New messages (possibly none) and the cursor for the next call
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/Message" }
+                  next_since: { type: integer, format: int64, example: 1043 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /events:
+    get:
+      tags: [Reading]
+      summary: Live Server-Sent Events stream
+      description: |
+        Events: `message` (a Message, with `id: <seq>`), `update` (the Message after an edit or delete) and
+        `status` (a Status). Stored messages after a starting seq are replayed first: a numeric `Last-Event-ID`
+        header (sent by `EventSource` on reconnect) wins, then `since`, otherwise only new messages. Messages
+        imported by a history sync are streamed too. Filters apply to `message` and `update`. A `: ping` comment is sent every 25 s. Swagger can't display streams; use
+        `curl -N` or `EventSource`.
+      parameters:
+        - $ref: "#/components/parameters/Chat"
+        - $ref: "#/components/parameters/Type"
+        - $ref: "#/components/parameters/FromMe"
+        - $ref: "#/components/parameters/IsGroup"
+        - $ref: "#/components/parameters/Since"
+        - name: events
+          in: query
+          description: "Comma-separated subset of message,update,status. Default: all."
+          schema: { type: string, example: "message,update" }
+        - name: Last-Event-ID
+          in: header
+          description: "Resume after this seq. Takes precedence over `since`; a non-numeric value is ignored."
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+              example: "id: 1043\nevent: message\ndata: {\"seq\":1043,\"text\":\"oi!\"}\n\n"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /media/{seq}:
+    get:
+      tags: [Reading]
+      summary: Download the media of a stored message
+      description: |
+        Fetched from WhatsApp and decrypted on each request. Capped at 100 MB of actual data. Images (not SVG),
+        audio, video and PDF are served inline with their own Content-Type; anything else as
+        `application/octet-stream` with `Content-Disposition: attachment`. Responses carry
+        `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'` and
+        `Referrer-Policy: no-referrer`. A deleted message's media is a 404.
+      parameters:
+        - { name: seq, in: path, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        "200":
+          description: The file, with a Content-Disposition file name
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410":
+          description: Media expired on WhatsApp's servers (WhatsApp answered 403, 404 or 410)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502": { $ref: "#/components/responses/BadGateway" }
 
   /chats:
     get:
       tags: [Reading]
       summary: Conversations by most recent activity
       parameters:
-        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 1000 } }
       responses:
         "200":
           description: Chats
@@ -166,20 +429,8 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Chat" }
-
-  /events:
-    get:
-      tags: [Reading]
-      summary: Live Server-Sent Events stream
-      description: |
-        Emits `event: message` (a Message) and `event: status` (a Status). A `: ping` comment is sent
-        every 25 s. Swagger can't display streams; use `curl -N` or `EventSource`.
-      responses:
-        "200":
-          description: SSE stream
-          content:
-            text/event-stream:
-              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /contacts:
     get:
@@ -195,6 +446,8 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Contact" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /groups:
     get:
@@ -213,6 +466,9 @@ paths:
                     jid: { type: string, example: "120363012345678901@g.us" }
                     name: { type: string, example: "Family" }
                     members: { type: integer, example: 12 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { $ref: "#/components/responses/BadGateway" }
 
   /check:
     post:
@@ -224,9 +480,12 @@ paths:
           application/json:
             schema:
               type: object
+              required: [phones]
               properties:
                 phones:
                   type: array
+                  minItems: 1
+                  maxItems: 50
                   items: { type: string }
                   example: ["+5511999999999", "15551234567"]
       responses:
@@ -242,15 +501,107 @@ paths:
                     query: { type: string }
                     on_whatsapp: { type: boolean }
                     jid: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /audit:
+    get:
+      tags: [Admin]
+      summary: Control actions, newest first
+      description: Sends, files, reactions, edits, deletes (including failed attempts), read receipts, pairing and logout. Message text is never stored.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+        - { name: before, in: query, description: "Only entries with a lower id (cursor).", schema: { type: integer, format: int64 } }
+      responses:
+        "200":
+          description: Audit entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AuditEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /docs:
+    get:
+      tags: [Docs]
+      summary: This Swagger UI page
+      security: []
+      responses:
+        "200":
+          description: HTML
+          content:
+            text/html:
+              schema: { type: string }
+
+  /openapi.yaml:
+    get:
+      tags: [Docs]
+      summary: This OpenAPI spec
+      security: []
+      responses:
+        "200":
+          description: YAML
+          content:
+            application/yaml:
+              schema: { type: string }
 
 components:
   securitySchemes:
     bearer:
       type: http
       scheme: bearer
+
+  parameters:
+    Chat:
+      name: chat
+      in: query
+      description: "Phone number or JID; matches the chat or the sender."
+      schema: { type: string, example: "5511999999999" }
+    Type:
+      name: type
+      in: query
+      description: "Comma-separated message types, e.g. text,image."
+      schema: { type: string, example: "text,image" }
+    FromMe:
+      name: from_me
+      in: query
+      schema: { type: boolean }
+    IsGroup:
+      name: is_group
+      in: query
+      schema: { type: boolean }
+    Since:
+      name: since
+      in: query
+      description: "Only messages with a higher seq."
+      schema: { type: integer, format: int64, minimum: 0 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: "A repeat with the same key within 24 h returns the first result instead of sending again. Failures aren't cached. Max 200 characters."
+      schema: { type: string, maxLength: 200, example: "order-1234-shipped" }
+
   responses:
-    Error:
-      description: Error
+    OK:
+      description: Done
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean, example: true }
+    MessageResult:
+      description: The resulting message
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Message" }
+    BadRequest:
+      description: Bad input
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -259,6 +610,36 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: No token is configured and the request isn't a same-origin request to localhost
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: The send would have to wait longer than -max-wait
+      headers:
+        Retry-After:
+          description: Seconds until a retry can succeed
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadGateway:
+      description: WhatsApp rejected or failed the request, or not logged in
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Timeout:
+      description: Timed out or cancelled
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
   schemas:
     Error:
       type: object
@@ -276,17 +657,29 @@ components:
           type: string
           example: connected
           description: "starting, connecting, waiting_for_qr_scan, paired, connected, disconnected, qr_timeout, logged_out, login_error: …"
+    Media:
+      type: object
+      properties:
+        mimetype: { type: string, example: "image/jpeg" }
+        file_name: { type: string, description: "Documents only" }
+        size: { type: integer, format: int64, example: 183204 }
+        path: { type: string, description: "Download path relative to the API base", example: "/media/1042" }
     Message:
       type: object
       properties:
+        seq: { type: integer, format: int64, description: "Monotonic cursor assigned when stored", example: 1042 }
         id: { type: string, example: "3EB0C767D26A1D0F5E2A" }
         chat: { type: string, example: "5511999999999@s.whatsapp.net" }
         sender: { type: string, example: "5511999999999@s.whatsapp.net" }
         push_name: { type: string, example: "Maria" }
         from_me: { type: boolean }
         is_group: { type: boolean }
-        type: { type: string, enum: [text, image, video, document, audio, sticker, reaction, location] }
-        text: { type: string, description: "Body, caption, or file name for documents" }
+        type: { type: string, enum: [text, image, video, document, audio, sticker, reaction, location], description: "video includes round video notes" }
+        text: { type: string, description: "Body, caption, file name for documents, emoji for reactions; empty after delete" }
+        reply_to: { type: string, description: "Quoted message id, or the target of a reaction" }
+        media: { $ref: "#/components/schemas/Media" }
+        edited: { type: boolean }
+        deleted: { type: boolean }
         timestamp: { type: string, format: date-time }
     Chat:
       type: object
@@ -305,3 +698,14 @@ components:
         phone: { type: string, example: "+5511999999999" }
         name: { type: string }
         push_name: { type: string }
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        at: { type: string, format: date-time }
+        actor: { type: string, enum: [api, tui, cli, autoreply, whatsapp] }
+        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out] }
+        target: { type: string, description: "Chat JID, when there is one" }
+        detail: { type: string, example: "text, 6 chars" }
+        ok: { type: boolean }
+        error: { type: string }
