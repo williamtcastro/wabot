@@ -1,4 +1,4 @@
-module github.com/williamtcastro/whatsmeow-bot
+module github.com/williamtcastro/wabot
 
 go 1.26.7
 
