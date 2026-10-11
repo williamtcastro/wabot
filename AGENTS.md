@@ -14,13 +14,15 @@ Go's "server project" layout: the `wabot` command at the root, everything else u
 
 | Path | Package | Responsibility |
 |---|---|---|
-| `main.go` | `main` | subcommands (`login`, `serve`, `tui`, `send`, `logout`), flags, env vars, `usage`, the default DB path (`defaultDB`, `legacyDBNotice`), `newLogger` (slog setup), wiring of limiters/webhook, the loopback-without-token check (`isLoopbackAddr`), resolving a `-webhook-filter` chat number after login (`resolveWebhookChat`) |
+| `main.go` | `main` | subcommands (`login`, `serve`, `tui`, `send`, `token`, `mcp`, `version`, `logout`), flags, env vars, `usage`, the default DB path (`defaultDB`, `legacyDBNotice`), `newLogger` (slog setup), wiring of limiters/webhook, the startup guard `guardPublicAddr` (owner secret ≥ 16 chars; non-loopback needs an owner secret or any token ever created; `isLoopbackAddr`), `tokenCommand`, `mcpCommand` (stdio MCP), resolving a `-webhook-filter` chat number after login (`resolveWebhookChat`) |
 | `docs/docs.go` | `docs` | `//go:embed openapi.yaml` as `docs.OpenAPI` (embed can't reach a parent directory, so it lives next to the file) |
 | `internal/store/store.go` | `store` | `Store` (wraps `*sql.DB`, owns the LID relink cache key), `Open`, `wabot_messages` table and its migration from the old rowid schema, `Save`, `Import` (history sync, incl. edits), `Query`/`Messages`/`Get`/`GetBySeq`/`LastSeq`, `MarkEdited`/`MarkDeleted`, `RelinkLIDs`, `Chats` |
 | `internal/store/message.go` | `store` | `Message` (raw fields exported but `json:"-"`), `Media`, `MessageUpdate`, `Chat`, `ChatsChanged`, `ErrNotFound`, `Message.MediaFileName` |
 | `internal/store/filter.go` | `store` | `Filter`, `ParseFilter`, `Match` and its SQL twin `where` (shared by `/messages`, `/messages/wait`, `/events`, webhook), including the `q` text search (`textMatches` in Go mirrors the FTS query) |
 | `internal/store/state.go` | `store` | `migrateState`: `wabot_chat_state` (read positions, `MarkReadUpTo`/`MarkChatRead`/`ReadSeq`), `wabot_groups` (`SaveGroups`/`Groups`), the `wabot_messages_fts` index and its triggers, `ftsQuery`; the `ChatRead` event |
 | `internal/store/audit.go` | `store` | `wabot_audit` table, `AuditEntry`, `Store.Audit`, `Store.AuditLog` |
+| `internal/store/tokens.go` | `store` | `wabot_tokens` table, `Token`, `InsertToken` (`ErrTokenName` / `ErrTokenID`), `TokenByID`, `Tokens`, `RevokeToken` (cascades to tokens it created), `TouchToken`, `HasTokens` (any row ever) |
+| `internal/auth/auth.go` | `auth` | `Scope` (`read`/`send`/`admin`), `Principal` (`Has`, `Restricted`), `Owner()`, `Issue` (token format, reserved names, `DefaultRate`, child expiry), `Authenticator` (`Required` fails closed, `Authenticate`), `CheckOwnerSecret` (`MinOwnerSecret` = 16) |
 | `internal/bot/bot.go` | `bot` | `Bot` type, `New`, `Start`, `PairPhone`, `Status`, pub/sub (`Subscribe`, `publish`), `InputError`/`BadInput`, `SleepUntil`, DB file permissions |
 | `internal/bot/events.go` | `bot` | whatsmeow event handler, incoming edits/deletes (`handleProtocol`), history import, auto-replies |
 | `internal/bot/message.go` | `bot` | `classify`, `toMessage`, `PhoneJID`, `save` (store + publish) |
@@ -30,10 +32,14 @@ Go's "server project" layout: the `wabot` command at the root, everything else u
 | `internal/bot/media.go` | `bot` | `DownloadMedia`, `limitedTransport` / `cappedBody` (100 MB cap) |
 | `internal/bot/presence.go` | `bot` | presence (`-online`) and typing indicators |
 | `internal/bot/audit.go` | `bot` | `Bot.Audit`, `Bot.audited` |
+| `internal/bot/allow.go` | `bot` | chat allowlists for restricted tokens: `LocalChat` (no network), `ChatAllowed`, `ExpandAllowlist` (resolves the list's own phone entries, cached 10 min), `CanonicalChat` (unrestricted callers) |
 | `internal/bot/limit.go` | `bot` | `Limiter`: per-minute and per-chat spacing, `RateLimitError` (429). Three instances: `Bot.Limiter` (sends), `Bot.Lookups` (number checks, presence; 3 × rate), `autoLimit` (auto-replies, drop instead of queue) |
 | `internal/bot/webhook.go` | `bot` | webhook queue and workers, retries with backoff, HMAC signing (`Sign`) |
-| `internal/api/api.go` | `api` | `NewHandler`, routes and handlers, long-poll, SSE, `/media`, the `/docs` page |
-| `internal/api/middleware.go` | `api` | bearer auth, `localOnly` (token-less mode: loopback Host, no cross-site), request logging |
+| `internal/api/api.go` | `api` | `NewHandler` (the route table: every route wrapped in `need(scope, …)`), handlers, long-poll, SSE (with token re-checks), `/media`, `/mcp` mount, the `/docs` page |
+| `internal/api/authz.go` | `api` | `withAuth` (header/`?token=` rules, failed-login throttle), `need`, `unrestricted`, `visibleStatus`, `authorizeChat`, `restrictFilter`, `sendGuard` (allowlist + per-token rate), stream cap and `stillValid`, `/tokens` handlers, `NormalizeChats` |
+| `internal/api/mcp.go` | `api` | `/mcp`: streamable HTTP MCP handler; bearer verification puts the `Principal` in the SDK's `TokenInfo`; token-less mode via `localOnly` |
+| `internal/api/middleware.go` | `api` | `localOnly` (token-less mode: loopback RemoteAddr and Host, no cross-site), request logging |
+| `internal/mcpserver/server.go` | `mcpserver` | MCP tools (`status`, `list_chats`, `read_messages`, `search_messages`, `find_contact`, `send_message`, `react`, `mark_read`), server instructions, `require`/`chat` checks, `clean()` of untrusted text |
 | `internal/api/idempotency.go` | `api` | idempotency keys (bound to a request fingerprint; reuse for a different request → 409 `errConflict`) |
 | `internal/api/respond.go` | `api` | `readJSON`, `writeJSON`, error mapping (`writeError`) |
 | `internal/tui/model.go` | `tui` | `Run`, the Bubble Tea model, `Update`, loading chats and messages |
@@ -43,13 +49,15 @@ Go's "server project" layout: the `wabot` command at the root, everything else u
 | `internal/tui/view.go` | `tui` | rendering: panes, sidebar, context bar, footer, styles |
 | `internal/tui/format.go` | `tui` | text helpers and `safe()` sanitizing of untrusted text |
 | `docs/openapi.yaml` | | OpenAPI 3 spec, embedded into the binary (rebuild after editing) |
-| `docs/*.md` | | user docs: CLI, API, TUI, writing bot logic |
+| `docs/*.md` | | user docs: CLI, API, TUI, MCP, writing bot logic |
+| `docs/security/` | | security reviews (`SCOPED-TOKENS.md`: token system threat model, findings and fixes) |
 | `docs/proposed-features/` | | deferred proposals (admin panel, TUI image previews); nothing there is built |
 | `.github/workflows/ci.yml` | | CI on every push to `main` and every PR: gofmt, `go vet`, `go test -race` on Ubuntu and macOS, `CGO_ENABLED=0` build |
 | `.github/workflows/release.yml`, `.goreleaser.yaml` | | on a `v*` tag: tests, then GoReleaser builds linux/darwin × amd64/arm64 `tar.gz` archives plus `checksums.txt` on the GitHub release, stamping `main.version` via `-ldflags` |
 
-**Dependency direction:** `main` → `api`, `tui`, `bot`, `store`; `api` → `bot`, `store`, `docs`;
-`tui` → `bot`, `store`; `bot` → `store`; `store` → nothing internal. Never import upwards (Go
+**Dependency direction:** `main` → `api`, `mcpserver`, `auth`, `tui`, `bot`, `store`; `api` → `mcpserver`,
+`auth`, `bot`, `store`, `docs`; `mcpserver` → `auth`, `bot`, `store`; `tui` → `bot`, `store`; `auth` →
+`store`; `bot` → `store`; `store` → nothing internal. Never import upwards (Go
 rejects cycles anyway). `store` knows nothing about whatsmeow's client: it deals in plain strings.
 
 **Where new code goes:**
@@ -57,8 +65,9 @@ rejects cycles anyway). `store` knows nothing about whatsmeow's client: it deals
 - SQL, schema, filters, anything that reads or writes `wabot_*` tables: `internal/store`.
 - Anything that talks to WhatsApp, enforces limits, audits or publishes events: `internal/bot`,
   in the file that matches (a new action goes in `actions.go`, a new event in `events.go`).
-- HTTP concerns (parsing requests, status codes, headers): `internal/api`. Handlers stay thin and
-  call `Bot` methods.
+- HTTP concerns (parsing requests, status codes, headers, scopes per route): `internal/api`. Handlers
+  stay thin and call `Bot` methods.
+- Token issuing and verification: `internal/auth`. MCP tools: `internal/mcpserver`.
 - Screen and keys: `internal/tui`.
 - Helpers that both `api` and `tui` need belong in the lowest package that makes sense (e.g.
   `store.Message.MediaFileName`), never copied.
@@ -92,7 +101,11 @@ numbers and names below.
   ignoring forged edits and non-admin revokes, `audited`, `cappedBody` / `limitedTransport`, media
   checks, webhook signing and filtering.
 - `internal/api`: token auth, token-less `localOnly`, idempotency (replay, 409, panic), error
-  mapping, `/messages` cursors, `/events` `Last-Event-ID` replay.
+  mapping, `/messages` cursors, `/events` `Last-Event-ID` replay, scoped tokens and allowlists
+  (`TestScopedTokens`, `TestPerTokenRate`, `TestTokenAdminEndpointsAndRevocation`), MCP over HTTP with
+  token scopes, and one regression test per security finding in `security_test.go` (`TestF1…`–`TestF10…`).
+- `internal/auth`: token issuing/parsing, `TestF2RequiredFailsClosed`.
+- `internal/mcpserver`: read-only and restricted callers, cleaning of untrusted text.
 - `internal/tui`: 110×24 renders exactly 24 lines (with and without the context bar), autocomplete,
   reaction divider, vim-style keys, half-page scroll, `safe()`.
 - `main`: default DB path, `isLoopbackAddr`.
@@ -141,8 +154,11 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
 - **Wrap every control action in `Bot.audited(actor, action, target, detail, fn)`.** It runs `fn` and calls
   `Bot.Audit` exactly once with the outcome, so input-validation failures (empty text, not your message,
   edit window) are recorded too. Put the validation inside `fn`, not before it. Call `Bot.Audit` directly
-  only for actions that don't return a `Message` (pair, logout, read). `actor` is `api`, `tui`, `cli`,
-  `autoreply` or `whatsapp`; pass it into `Bot` methods rather than guessing. Never put message text,
+  only for actions that don't return a `Message` (pair, logout, read, token_create, token_revoke). `actor`
+  is the caller's token name for API and MCP calls (`principal(r).Name`; `api` for the owner secret and
+  token-less mode, `mcp` for stdio without a token), or `tui`, `cli`, `autoreply`, `whatsapp`. Those
+  fixed names (plus `owner`, `local`) are reserved so no token can impersonate them. Pass the actor into
+  `Bot` methods rather than guessing. Never put message text,
   tokens or secrets in `detail` or in log attributes. New actions go in the tables in
   `docs/proposed-features/ADMIN-PANEL.md` and the `AuditEntry` enum in `docs/openapi.yaml`.
 - Logging is `log/slog` via `b.Log`. Errors go in an `err` attribute. Don't log query strings (the token
@@ -209,9 +225,29 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
   directory to inspect it, and treat message contents as private.
 - The bot can message real people. Don't send test messages to anyone except the account owner's own
   number, and only when asked.
-- The API must stay token-protected when `-token` is set. Only `/docs` and `/openapi.yaml` are public.
-  Without a token, keep both guards: `serve` refuses non-loopback addresses, and `localOnly` rejects
-  non-loopback `Host` and cross-site requests (403).
+- **Every new route is wrapped in `need(scope, …)`** in `NewHandler`, and must handle tokens limited to
+  chats: check targets with `authorizeChat` / `sendGuard` (sends also get the per-token rate), limit
+  queries with `restrictFilter`, or wrap the route in `unrestricted` if it can reveal data beyond the
+  allowlist. Add it to the route table in `docs/API.md` and to `docs/openapi.yaml`.
+- **Never resolve a restricted caller's input on WhatsApp.** Use `Bot.LocalChat` + `Bot.ChatAllowed`
+  (or `ExpandAllowlist`); `Resolve` / `CanonicalChat` are for unrestricted callers only. Error text for
+  chats outside the list stays fixed ("this token can't access that chat") so it can't be used as an
+  oracle.
+- Tokens are required forever once any row exists in `wabot_tokens`, and `Required()` fails closed. Don't
+  add any path back to token-less mode. Token-less `localOnly` checks loopback `RemoteAddr`, loopback
+  `Host` and same-origin; keep all three. Only `/docs` and `/openapi.yaml` are public.
+- Tokens can't mint `admin` tokens over the API; children carry `created_by`, can't outlive the parent and
+  are revoked with it. Long-lived handlers (`/events`, `/messages/wait`) must re-check `stillValid` and
+  respect the per-token stream cap. `?token=` is accepted only on `GET /events`, `/qr`, `/media/{seq}`.
+- **New MCP tools** call `require(req, scope)` (which also re-checks the token is still valid) and, for
+  any chat argument, `chat()` (allowlist, no lookup for restricted callers); send-type tools use
+  `sendTarget`, which adds the per-token rate (`Bot.ThrottleToken`, shared with the HTTP API). Anything written by third parties (text, names, captions, file names) goes
+  under an `untrusted` field and through `clean()`. Mark read-only tools `ReadOnlyHint` and sending ones
+  open-world / destructive.
+- `wabot mcp` speaks the protocol on **stdout**: never print to stdout in that mode (logs go to stderr,
+  whatsmeow logging stays off).
+- See [docs/security/SCOPED-TOKENS.md](docs/security/SCOPED-TOKENS.md) for the threat model and the
+  findings these rules come from; add a regression test for any new auth behaviour.
 - `/media/{seq}` serves files received from other people: keep the inline allow-list (`inlineSafe`: images
   except SVG, audio, video, PDF; everything else as an `attachment`), `nosniff`, `CSP: sandbox;
   default-src 'none'` and `Referrer-Policy: no-referrer`. The 100 MB cap counts actual bytes.

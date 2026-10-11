@@ -3,7 +3,7 @@
 ```sh
 ./wabot tui                                    # terminal only
 ./wabot tui -addr 127.0.0.1:8080               # also serve the HTTP API from the same process
-WABOT_TOKEN=change-me ./wabot tui -addr :8080  # other addresses need a token
+WABOT_TOKEN=change-me-to-a-long-secret ./wabot tui -addr :8080  # other addresses need a token
 ```
 
 Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea),

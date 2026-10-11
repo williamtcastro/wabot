@@ -7,10 +7,13 @@ One Go binary, one SQLite file, no cgo. Use it three ways:
 
 - **HTTP API**: send texts and files, reply, react, edit, delete, mark as read; read the stored
   history with filters and full-text search; unread counts per chat; long-poll or stream new messages with resumable cursors; download media;
-  receive signed webhooks
+  receive signed webhooks; **scoped API tokens** per agent or bot (read/send/admin, chat allowlists,
+  per-token rate, expiry, revocation)
+- **MCP server** for AI agents (Claude Code, Claude Desktop…): over HTTP at `/mcp` or `wabot mcp` on
+  stdio, with the same scopes, limits and audit log
 - **TUI**: chat from your terminal, with replies, reactions, edits, media saving, search across all
   chats, unread badges that survive restarts, and command autocomplete
-- **CLI**: `wabot send 5511999999999 "hello"` from scripts and cron jobs
+- **CLI**: `wabot send 5511999999999 "hello"` from scripts and cron jobs; `wabot token` to manage API tokens
 
 It links to your account as a "Linked device", the same way WhatsApp Web does. Outgoing messages
 are rate limited by default, and every control action is written to an audit log.
@@ -62,16 +65,28 @@ keep using it (`-db wabot.db`).
 ## 2a. Run the HTTP API
 
 ```sh
-WABOT_TOKEN=change-me ./wabot serve          # listens on 127.0.0.1:8080
+export WABOT_TOKEN=$(openssl rand -hex 24)   # owner secret, at least 16 characters; keep it safe
+./wabot serve                                # listens on 127.0.0.1:8080
 ```
 
-`serve` listens on `127.0.0.1:8080` by default. Without a token it only accepts same-origin
-requests to localhost, and it refuses to listen on any other address (`-addr :8080`, a LAN IP)
-unless a token is set. Pass secrets through environment variables rather than flags, since flags
-show up in `ps`.
+`serve` listens on `127.0.0.1:8080` by default. The owner secret must be at least 16 characters.
+Without any token it only accepts same-origin requests from and to localhost, and it refuses to
+listen on any other address (`-addr :8080`, a LAN IP). Pass secrets through environment variables
+rather than flags, since flags show up in `ps`.
+
+**Give each agent or bot its own token** instead of sharing the owner secret:
 
 ```sh
-H="Authorization: Bearer change-me"
+./wabot token create support-bot -scopes read,send -chats 5511999999999 -expires 720h
+./wabot token list
+./wabot token revoke support-bot
+```
+
+Once a token exists, every request needs one, from localhost too. See
+[docs/API.md → Tokens and scopes](docs/API.md#tokens-and-scopes).
+
+```sh
+H="Authorization: Bearer $WABOT_TOKEN"
 
 curl -H "$H" localhost:8080/status
 
@@ -96,7 +111,7 @@ curl -N -H "$H" localhost:8080/events   # live stream (SSE)
 ```
 
 You can also skip `wabot login` and do it over HTTP: start `serve`, then open
-`http://localhost:8080/qr?token=change-me` in a browser and scan it.
+`http://localhost:8080/qr?token=<your owner secret>` in a browser and scan it.
 
 While the server runs, **`http://localhost:8080/docs`** has interactive API docs where you
 can try every endpoint from the browser. Full reference: [docs/API.md](docs/API.md).
@@ -104,7 +119,7 @@ can try every endpoint from the browser. Full reference: [docs/API.md](docs/API.
 ### Webhooks
 
 ```sh
-export WABOT_TOKEN=change-me WABOT_WEBHOOK_SECRET=another-secret
+export WABOT_TOKEN=change-me-to-a-long-secret WABOT_WEBHOOK_SECRET=another-long-webhook-secret
 ./wabot serve -webhook https://example.com/hook -webhook-filter "type=text&from_me=false"
 ```
 
@@ -138,6 +153,16 @@ jumps to them. `/help` lists everything. See [docs/TUI.md](docs/TUI.md).
 
 Don't run `send` while `serve` or `tui` is running with the same database. Only one
 connection per session is allowed, so use the HTTP API in that case.
+
+## 2d. Connect an AI agent (MCP)
+
+```sh
+./wabot token create claude -scopes read -chats 5511999999999 -expires 720h
+claude mcp add --transport http wabot http://127.0.0.1:8080/mcp --header "Authorization: Bearer wabot_…"
+```
+
+Or, without a running server, `claude mcp add wabot -- wabot mcp` (read-only; `-allow-send` to send).
+See [docs/MCP.md](docs/MCP.md).
 
 ## Bot behaviour
 
@@ -174,7 +199,7 @@ account shows as offline so your phone keeps getting notifications; `-online` ch
 |---|---|---|---|
 | `-db` | `WABOT_DB` | `~/.config/wabot/wabot.db` | session database |
 | `-addr` | `WABOT_ADDR` | `127.0.0.1:8080` for `serve` | HTTP listen address; non-loopback needs a token |
-| `-token` | `WABOT_TOKEN` | none | API bearer token (strongly recommended) |
+| `-token` | `WABOT_TOKEN` | none | owner secret for the API, at least 16 characters (prefer per-agent tokens from `wabot token create`) |
 | `-webhook` | `WABOT_WEBHOOK` | none | URL that gets new messages as JSON |
 | `-webhook-secret` | `WABOT_WEBHOOK_SECRET` | none | HMAC-SHA256 signing secret for the webhook |
 | `-webhook-filter` | `WABOT_WEBHOOK_FILTER` | none | only deliver matching messages, e.g. `type=text&from_me=false` |
@@ -210,6 +235,8 @@ with a 400. Find group JIDs with `GET /groups` or `/groups` in the TUI.
 | [docs/openapi.yaml](docs/openapi.yaml) | OpenAPI 3 spec (import into Postman/Insomnia/Bruno); served live at `/docs` |
 | [docs/TUI.md](docs/TUI.md) | terminal UI layout, keys and commands |
 | [docs/BOT.md](docs/BOT.md) | writing your own bot logic (webhook, polling or Go), verifying signatures, running as a service |
+| [docs/MCP.md](docs/MCP.md) | MCP server for AI agents: HTTP and stdio, tools, safety, client setup |
+| [docs/security/SCOPED-TOKENS.md](docs/security/SCOPED-TOKENS.md) | security review of the token system, findings and fixes, operational guidance |
 | [docs/proposed-features/](docs/proposed-features/README.md) | ideas not built yet: [web admin panel](docs/proposed-features/ADMIN-PANEL.md) (also documents today's logging and audit structure), [image previews in the TUI](docs/proposed-features/IMAGE-PREVIEWS.md) |
 
 ## Files
@@ -218,8 +245,10 @@ with a 400. Find group JIDs with `GET /groups` or `/groups` in the TUI.
 |---|---|
 | `main.go` | CLI commands, flags, default database path, logger setup |
 | `internal/bot/` | whatsmeow client, events, sending, replies, reactions, edits, deletes, read receipts, media download, recipient lookup, contacts, auto-replies, rate limiter, webhook |
-| `internal/store/` | message history, filters and search, chat list with unread counts, group cache and audit log (SQLite) |
-| `internal/api/` | HTTP API, long-poll, SSE, idempotency, request logging and the `/docs` page |
+| `internal/store/` | message history, filters and search, chat list with unread counts, group cache, tokens and audit log (SQLite) |
+| `internal/api/` | HTTP API, scopes and chat allowlists per route, long-poll, SSE, idempotency, request logging, `/mcp` and the `/docs` page |
+| `internal/auth/` | API tokens: issuing, hashing, verifying, scopes |
+| `internal/mcpserver/` | MCP tools (used by `/mcp` and `wabot mcp`) |
 | `internal/tui/` | terminal UI (Bubble Tea + Bubbles + Lip Gloss) |
 | `docs/` | user docs and the OpenAPI spec (embedded into the binary by `docs/docs.go`) |
 | `.github/workflows/` | CI (`ci.yml`: gofmt, vet, race tests on Linux and macOS, static build) and releases (`release.yml`) |

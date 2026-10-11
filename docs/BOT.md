@@ -17,8 +17,16 @@ through the API.
 Secrets go in environment variables rather than flags, so they don't show up in `ps`:
 
 ```sh
-export WABOT_TOKEN=change-me WABOT_WEBHOOK_SECRET=another-secret
+export WABOT_TOKEN=change-me-to-a-long-secret WABOT_WEBHOOK_SECRET=another-long-webhook-secret
 ./wabot serve -autoreply=false -webhook http://localhost:9000/hook -webhook-filter "type=text&from_me=false"
+```
+
+Give the bot its own token rather than the owner secret, so it can be limited and revoked on its
+own (and its sends show up under its name in the audit log):
+
+```sh
+./wabot token create echo-bot -scopes send -expires 720h   # add -chats 5511999999999 to limit it
+export WABOT_BOT_TOKEN=wabot_…                             # use this in the bot below instead of WABOT_TOKEN
 ```
 
 Python example (standard library only). It checks the signature, skips duplicate deliveries,
@@ -139,7 +147,7 @@ from it.
 ```python
 import json, urllib.request
 
-API, TOKEN = "http://localhost:8080", "change-me"
+API, TOKEN = "http://localhost:8080", "change-me-to-a-long-secret"
 since = 0  # load the last value you saved
 
 while True:
@@ -181,9 +189,9 @@ use systemd, launchd or Docker and point `-db` at a persistent path, e.g.:
 # /etc/systemd/system/wabot.service
 [Service]
 ExecStart=/opt/wabot/wabot serve -db /var/lib/wabot/wabot.db -addr 127.0.0.1:8080 -log-format json
-Environment=WABOT_TOKEN=change-me
+Environment=WABOT_TOKEN=change-me-to-a-long-secret
 Environment=WABOT_WEBHOOK=http://127.0.0.1:9000/hook
-Environment=WABOT_WEBHOOK_SECRET=another-secret
+Environment=WABOT_WEBHOOK_SECRET=another-long-webhook-secret
 Restart=always
 
 [Install]

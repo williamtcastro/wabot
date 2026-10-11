@@ -5,7 +5,7 @@ wabot <command> [flags] [args]
 ```
 
 Flags go right after the command and before any other arguments, e.g.
-`wabot serve -addr :9000 -token secret` or `wabot send -db other.db 5511999999999 hi`.
+`wabot serve -addr 127.0.0.1:9000 -debug` or `wabot send -db other.db 5511999999999 hi`.
 Boolean flags take `=`: `-autoreply=false`. Durations use Go syntax: `500ms`, `2s`, `1m`.
 
 Pass secrets (`WABOT_TOKEN`, `WABOT_WEBHOOK_SECRET`) as environment variables rather than flags:
@@ -31,14 +31,24 @@ and exits.
 Runs the [HTTP API](API.md) until Ctrl+C. If the session isn't logged in, it prints QR codes
 in the terminal and serves them at `/qr`, so you can log in from a browser.
 
-It listens on `127.0.0.1:8080` unless you pass `-addr`. Without a token it refuses to start on
-an address that isn't loopback (`127.0.0.1`, `::1`, `localhost`), and only accepts same-origin
-requests to localhost; see [API.md → Auth](API.md#auth).
+It listens on `127.0.0.1:8080` unless you pass `-addr`. It also serves the [MCP endpoint](MCP.md)
+at `/mcp`.
+
+It refuses to start when:
+
+- the owner secret (`WABOT_TOKEN` / `-token`) is shorter than 16 characters
+  (generate one with `openssl rand -hex 24`);
+- the address isn't loopback (`127.0.0.1`, `::1`, `localhost`) and there's neither an owner secret
+  nor any token ever created.
+
+Without any token it only accepts same-origin requests from and to localhost; see
+[API.md → Auth](API.md#auth).
 
 ### `wabot tui [-addr ADDR]`
 
 Interactive terminal UI. See [TUI.md](TUI.md). With `-addr` it also runs the HTTP API in the
-same process, under the same rule: a non-loopback address needs a token.
+same process, under the same rules (a non-loopback address needs a token; the owner secret must be
+at least 16 characters).
 
 ### `wabot send NUMBER|JID TEXT...`
 
@@ -51,6 +61,51 @@ Sends one message and exits. Handy for scripts and cron:
 
 Needs an existing login. Auto-replies are disabled for this command. Prints
 `sent <id> to <chat>` on success.
+
+### `wabot token create NAME [-scopes read,send] [-chats N,...] [-rate N] [-expires 720h]`
+
+Creates an API token for an agent, bot or script and prints it **once**:
+
+```sh
+./wabot token create support-bot -scopes read,send -chats 5511999999999,120363012345678901@g.us -expires 720h
+```
+
+| Flag | Default | |
+|---|---|---|
+| `-scopes` | `read` | comma-separated: `read`, `send`, `admin` (admin implies the others) |
+| `-chats` | all chats | comma-separated phone numbers or JIDs the token is limited to. Not allowed with `admin` |
+| `-rate` | `10` | the token's own sends per minute, on top of the global `-rate`; `0` = global limit only |
+| `-expires` | never | lifetime as a Go duration, e.g. `720h` |
+
+Names are 1–40 of `a-z 0-9 . _ -`, unique forever (revoked names stay taken). `api`, `owner`,
+`local`, `tui`, `cli`, `autoreply` and `whatsapp` are reserved. This is the only way to create an
+`admin` token besides the owner secret: tokens can't create admin tokens over the API.
+
+**From the first token on, the API requires a token on every request, from localhost too, forever**
+(even after every token is revoked). Prefer one token per agent over sharing the owner secret. See
+[API.md → Tokens and scopes](API.md#tokens-and-scopes).
+
+The command only touches the database; it doesn't connect to WhatsApp, so it can run while `serve`
+is running.
+
+### `wabot token list`
+
+Prints every token: name, scopes, rate, status (active, revoked, expired), expiry, last use, the token
+that created it (`-` for the CLI or owner; revoking that one revokes this one too) and chats.
+Secrets are never shown.
+
+### `wabot token revoke NAME`
+
+Revokes the token and every token it created over the API. Open streams using it close within
+10 seconds. Fails if there's no active token with that name.
+
+### `wabot mcp [-allow-send] [-mcp-token TOKEN]`
+
+Runs an [MCP](MCP.md) server on stdio for AI agents. Read-only by default; `-allow-send` adds
+`send_message`, `react` and `mark_read`. `-mcp-token TOKEN` (or `WABOT_MCP_TOKEN`) makes it act as
+that API token, with its scopes and chat allowlist. It needs an existing login and opens its own
+WhatsApp connection, so don't run it alongside `serve` or `tui` on the same database; connect the
+agent to `http://127.0.0.1:8080/mcp` instead. stdout carries the protocol; logs go to stderr.
 
 ### `wabot logout`
 
@@ -72,7 +127,7 @@ Prints usage (also `-h` / `--help`).
 |---|---|---|---|
 | `-db PATH` | `WABOT_DB` | `~/.config/wabot/wabot.db` | session and message database (SQLite). See [The database](#the-database) |
 | `-addr ADDR` | `WABOT_ADDR` | `127.0.0.1:8080` for `serve`, off for `tui` | HTTP listen address. A non-loopback address requires a token |
-| `-token TOKEN` | `WABOT_TOKEN` | none | require `Authorization: Bearer TOKEN` on the API |
+| `-token TOKEN` | `WABOT_TOKEN` | none | owner secret: full access with `Authorization: Bearer TOKEN`. At least 16 characters. Prefer per-agent tokens from `wabot token create` |
 | `-webhook URL` | `WABOT_WEBHOOK` | none | POST incoming messages as JSON to this http(s) URL |
 | `-webhook-secret S` | `WABOT_WEBHOOK_SECRET` | none | sign webhook bodies with HMAC-SHA256 ([how to verify](BOT.md#verifying-webhook-signatures)) |
 | `-webhook-filter Q` | `WABOT_WEBHOOK_FILTER` | none | only deliver matching messages, e.g. `type=text&from_me=false` ([syntax](API.md#filters)). A `chat=<number>` is resolved on WhatsApp after login |
@@ -145,6 +200,7 @@ wabot's own tables:
 | `wabot_chat_state` | per chat, `read_seq`: the read position behind `unread` in `/chats` and the TUI badges |
 | `wabot_groups` | cached group names and admin lists (`jid`, `name`, `admins` as JSON, `updated`), so names show before connecting |
 | `wabot_audit` | one row per control action (send, react, edit, delete, read, pair, logout…), served by `GET /audit` |
+| `wabot_tokens` | API tokens: id, name, SHA-256 hash of the token (never the token itself), scopes, chats, rate, created/expires/last-used times, revoked flag, `created_by`. Rows are never deleted |
 
 `wabot_messages` columns:
 
