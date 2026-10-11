@@ -135,3 +135,8 @@ Find group JIDs with `GET /groups` or `/groups` in the TUI.
 | `store.go` | message history and chat list (SQLite) |
 | `api.go` | HTTP API and the `/docs` page |
 | `tui.go` | terminal UI (Bubble Tea + Bubbles + Lip Gloss) |
+
+## License
+
+[MIT](LICENSE): free to use, modify and redistribute, including commercially.
+The [whatsmeow](https://github.com/tulir/whatsmeow) library it builds on is MPL-2.0.
