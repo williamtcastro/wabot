@@ -1,0 +1,307 @@
+openapi: 3.0.3
+info:
+  title: wabot HTTP API
+  version: "1.0"
+  description: |
+    A small WhatsApp bot built on [whatsmeow](https://github.com/tulir/whatsmeow).
+
+    **Auth:** when the server runs with `-token` / `WABOT_TOKEN`, send `Authorization: Bearer <token>`
+    (or `?token=<token>`). Click **Authorize** above to set it for the "Try it out" buttons.
+
+    **Recipients** (`to`, `chat`): a phone number with country code in any format
+    (`5511999999999`, `+55 (11) 99999-9999`) or a full JID (`…@s.whatsapp.net`, `…@g.us`, `…@lid`).
+    Phone numbers are looked up on WhatsApp first, so variants like Brazil's 9th digit just work.
+servers:
+  - url: /
+security:
+  - bearer: []
+tags:
+  - name: Session
+  - name: Messaging
+  - name: Reading
+  - name: Directory
+
+paths:
+  /status:
+    get:
+      tags: [Session]
+      summary: Connection and login state
+      responses:
+        "200":
+          description: Current status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Status" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /qr:
+    get:
+      tags: [Session]
+      summary: Login QR code as PNG
+      description: Only available while not logged in. Codes rotate about every 20 s; a new round starts by itself when they run out.
+      responses:
+        "200":
+          description: QR image
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /pair:
+    post:
+      tags: [Session]
+      summary: Log in with a pairing code instead of a QR
+      description: "On the phone: Linked devices → Link a device → Link with phone number instead."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { type: string, example: "+5511988887777" }
+      responses:
+        "200":
+          description: Pairing code
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: { type: string, example: "ABCD-EFGH" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /logout:
+    post:
+      tags: [Session]
+      summary: Unlink this device and delete the session
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "502": { $ref: "#/components/responses/Error" }
+
+  /send:
+    post:
+      tags: [Messaging]
+      summary: Send a text message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to, text]
+              properties:
+                to: { type: string, example: "5511999999999" }
+                text: { type: string, example: "Hello from *wabot* 👋" }
+      responses:
+        "200":
+          description: The sent message
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "400": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+
+  /send/file:
+    post:
+      tags: [Messaging]
+      summary: Send an image or document
+      description: Images (detected from the content) go as photos, anything else as a document. Max 64 MB.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [to, file]
+              properties:
+                to: { type: string, example: "5511999999999" }
+                caption: { type: string }
+                file: { type: string, format: binary }
+      responses:
+        "200":
+          description: The sent message
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "400": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+
+  /messages:
+    get:
+      tags: [Reading]
+      summary: Stored messages, newest first
+      description: Every message the bot has seen or sent is kept in the session database, so this survives restarts.
+      parameters:
+        - { name: chat, in: query, schema: { type: string }, description: "Phone number or JID; matches the chat or the sender." }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        "200":
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Message" }
+
+  /chats:
+    get:
+      tags: [Reading]
+      summary: Conversations by most recent activity
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        "200":
+          description: Chats
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Chat" }
+
+  /events:
+    get:
+      tags: [Reading]
+      summary: Live Server-Sent Events stream
+      description: |
+        Emits `event: message` (a Message) and `event: status` (a Status). A `: ping` comment is sent
+        every 25 s. Swagger can't display streams; use `curl -N` or `EventSource`.
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+  /contacts:
+    get:
+      tags: [Directory]
+      summary: Address-book contacts synced from the phone
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: "Filter by name or part of the number." }
+      responses:
+        "200":
+          description: Contacts sorted by name
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Contact" }
+
+  /groups:
+    get:
+      tags: [Directory]
+      summary: Groups you're in
+      responses:
+        "200":
+          description: Groups
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    jid: { type: string, example: "120363012345678901@g.us" }
+                    name: { type: string, example: "Family" }
+                    members: { type: integer, example: 12 }
+
+  /check:
+    post:
+      tags: [Directory]
+      summary: Which phone numbers have WhatsApp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phones:
+                  type: array
+                  items: { type: string }
+                  example: ["+5511999999999", "15551234567"]
+      responses:
+        "200":
+          description: One result per number
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    query: { type: string }
+                    on_whatsapp: { type: boolean }
+                    jid: { type: string }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or wrong token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string, example: "not logged in" }
+    Status:
+      type: object
+      properties:
+        connected: { type: boolean }
+        logged_in: { type: boolean }
+        jid: { type: string, example: "5511988887777@s.whatsapp.net" }
+        push_name: { type: string }
+        qr: { type: string, description: "Raw QR data while waiting for a scan" }
+        state:
+          type: string
+          example: connected
+          description: "starting, connecting, waiting_for_qr_scan, paired, connected, disconnected, qr_timeout, logged_out, login_error: …"
+    Message:
+      type: object
+      properties:
+        id: { type: string, example: "3EB0C767D26A1D0F5E2A" }
+        chat: { type: string, example: "5511999999999@s.whatsapp.net" }
+        sender: { type: string, example: "5511999999999@s.whatsapp.net" }
+        push_name: { type: string, example: "Maria" }
+        from_me: { type: boolean }
+        is_group: { type: boolean }
+        type: { type: string, enum: [text, image, video, document, audio, sticker, reaction, location] }
+        text: { type: string, description: "Body, caption, or file name for documents" }
+        timestamp: { type: string, format: date-time }
+    Chat:
+      type: object
+      properties:
+        jid: { type: string }
+        name: { type: string, description: "Contact or group name; ~Name is the person's WhatsApp profile name" }
+        is_group: { type: boolean }
+        last_text: { type: string }
+        last_type: { type: string }
+        last_from_me: { type: boolean }
+        last_at: { type: string, format: date-time }
+    Contact:
+      type: object
+      properties:
+        jid: { type: string }
+        phone: { type: string, example: "+5511999999999" }
+        name: { type: string }
+        push_name: { type: string }

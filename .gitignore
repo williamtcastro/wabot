@@ -1,0 +1,4 @@
+wabot
+*.db
+*.db-shm
+*.db-wal
