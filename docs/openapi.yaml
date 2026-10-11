@@ -249,7 +249,7 @@ paths:
     post:
       tags: [Messaging]
       summary: Send read receipts
-      description: Marks the given incoming messages as read, or the latest 50 incoming messages in the chat when no ids are given. Own messages, reactions and unknown ids are skipped.
+      description: Marks the given incoming messages as read, or the latest 50 incoming messages in the chat when no ids are given. Own messages, reactions and unknown ids are skipped. Also moves the chat's read position (used for `unread` in /chats) to the whole chat, or up to the newest of the given ids.
       requestBody:
         required: true
         content:
@@ -313,6 +313,7 @@ paths:
         - $ref: "#/components/parameters/FromMe"
         - $ref: "#/components/parameters/IsGroup"
         - $ref: "#/components/parameters/Since"
+        - $ref: "#/components/parameters/Q"
         - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 1000 } }
       responses:
         "200":
@@ -340,6 +341,7 @@ paths:
         - $ref: "#/components/parameters/FromMe"
         - $ref: "#/components/parameters/IsGroup"
         - $ref: "#/components/parameters/Since"
+        - $ref: "#/components/parameters/Q"
         - { name: timeout, in: query, description: "Seconds to wait.", schema: { type: integer, default: 30, maximum: 120 } }
         - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
       responses:
@@ -374,6 +376,7 @@ paths:
         - $ref: "#/components/parameters/FromMe"
         - $ref: "#/components/parameters/IsGroup"
         - $ref: "#/components/parameters/Since"
+        - $ref: "#/components/parameters/Q"
         - name: events
           in: query
           description: "Comma-separated subset of message,update,status. Default: all."
@@ -588,6 +591,14 @@ components:
       in: query
       description: "Only messages with a higher seq."
       schema: { type: integer, format: int64, minimum: 0 }
+    Q:
+      name: q
+      in: query
+      description: |
+        Text search. Every word must match a whole word of the message text, the last one as a prefix
+        ("bom di" finds "bom dia"). Case and accents are ignored ("cafe" finds "café"). Deleted messages
+        aren't found; edited messages are found by their current text.
+      schema: { type: string, example: "bom dia" }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -705,6 +716,12 @@ components:
         last_type: { type: string }
         last_from_me: { type: boolean }
         last_at: { type: string, format: date-time }
+        unread:
+          type: integer
+          description: >-
+            Incoming messages (not reactions, not deleted) after the chat's read position. The position moves when
+            you send in the chat, open it in the TUI, call /read, or read it on another device.
+          example: 2
     Contact:
       type: object
       properties:

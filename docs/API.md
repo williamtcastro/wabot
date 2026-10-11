@@ -146,8 +146,21 @@ filter (`-webhook-filter`) uses the same syntax.
 | `from_me` | `true` or `false` |
 | `is_group` | `true` or `false` |
 | `since` | a `seq`; only messages with a higher `seq` match |
+| `q` | text search: words that must all appear in the message text (see below) |
 
 Unknown types or non-boolean values are a 400.
+
+**Text search (`q`).** Every word must match a whole word of the message text, except the last one,
+which matches as a prefix, so `q=bom di` finds "bom dia" while you're still typing. Case and accents
+are ignored (`cafe` finds "café"). Punctuation is ignored. Captions and document file names are
+searched too, since they're stored as the message text. Deleted messages aren't found (their text
+is cleared), and edited messages are found by their current text. In SQL this uses an FTS5 index
+(`wabot_messages_fts`); for live `/events`, `/messages/wait` wake-ups and the webhook the same rule
+is applied in Go.
+
+```sh
+curl -H "Authorization: Bearer $T" "localhost:8080/messages?q=bom%20dia&chat=5511999999999"
+```
 
 ---
 
@@ -312,6 +325,9 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/read \
 
 Your own messages, reactions and unknown ids are skipped. Returns `{"marked": 3}`.
 
+It also moves the chat's **read position** used for `unread` in [`/chats`](#get-chats): without
+ids, the whole chat counts as read; with ids, everything up to the newest of those messages.
+
 ## `POST /typing`
 
 ```sh
@@ -339,10 +355,13 @@ Stored messages (incoming and sent), filtered with the [shared filters](#filters
 | Query | Default | |
 |---|---|---|
 | `limit` | 50 | max items (up to 1000) |
-| `chat`, `type`, `from_me`, `is_group`, `since` | | see [Filters](#filters) |
+| `chat`, `type`, `from_me`, `is_group`, `since`, `q` | | see [Filters](#filters) |
 
 ```sh
 curl -H "Authorization: Bearer $T" "localhost:8080/messages?chat=5511999999999&limit=20"
+
+# search every chat, newest first
+curl -H "Authorization: Bearer $T" "localhost:8080/messages?q=invoice"
 
 # page through every incoming text, oldest first
 curl -H "Authorization: Bearer $T" "localhost:8080/messages?since=0&type=text&from_me=false&limit=500"
@@ -358,7 +377,7 @@ or after `timeout` seconds with an empty list.
 | `since` | the newest stored `seq` | start after this `seq`. Leave it out to wait only for messages that arrive after the request |
 | `timeout` | 30 | seconds, max 120 |
 | `limit` | 100 | max items (up to 1000) |
-| `chat`, `type`, `from_me`, `is_group` | | see [Filters](#filters) |
+| `chat`, `type`, `from_me`, `is_group`, `q` | | see [Filters](#filters) |
 
 ```json
 { "messages": [ { "seq": 1043, "...": "..." } ], "next_since": 1043 }
@@ -403,7 +422,7 @@ data: {"connected":true,"logged_in":true,"state":"connected", …}
 | Query | |
 |---|---|
 | `events` | comma-separated subset of `message,update,status`. Default: all three |
-| `chat`, `type`, `from_me`, `is_group`, `since` | see [Filters](#filters) |
+| `chat`, `type`, `from_me`, `is_group`, `since`, `q` | see [Filters](#filters) |
 
 **Resuming.** The stream first replays every stored matching message after a starting `seq`,
 then continues live. The starting point is, in order:
@@ -477,13 +496,29 @@ curl -H "Authorization: Bearer $T" "localhost:8080/chats?limit=10"
     "last_text": "tudo e vc",
     "last_type": "text",
     "last_from_me": true,
-    "last_at": "2026-10-10T20:45:50-03:00"
+    "last_at": "2026-10-10T20:45:50-03:00",
+    "unread": 2
   }
 ]
 ```
 
 `name` is the address-book name, the group subject, `Me` for your own chat, or `~ProfileName`
-when the person isn't in your contacts.
+when the person isn't in your contacts. Group names and admin lists are cached in the database
+(`wabot_groups`), so they're available right away at startup, even offline; they're refreshed
+in the background on connect and when older than 10 minutes. A group that was never fetched
+shows as `group <id>` until then.
+
+`unread` counts incoming messages (not reactions, not deleted) stored after the chat's read
+position. The read position moves forward when:
+
+- you send a message in the chat (through wabot),
+- you open the chat in the TUI (locally, even when offline),
+- you call `POST /read` (without ids, the whole chat),
+- you read the chat on your phone or another linked device (WhatsApp's "read-self" receipts).
+
+It's kept in `wabot_chat_state`, so it survives restarts. When a database is upgraded to this
+version, everything already stored counts as read, and so does history imported after a fresh
+login.
 
 ## `GET /contacts`
 
@@ -559,7 +594,7 @@ input (`ok: false` with the error). Message text is never stored here.
 
 `actor` is `api`, `tui`, `cli`, `autoreply` or `whatsapp`. `action` is `send`, `send_file`,
 `react`, `edit`, `delete`, `read`, `pair`, `logout` or `logged_out`. See
-[ADMIN-PANEL.md](ADMIN-PANEL.md#logging-today) for what each one records.
+[proposed-features/ADMIN-PANEL.md](proposed-features/ADMIN-PANEL.md#logging-today) for what each one records.
 
 ---
 

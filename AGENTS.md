@@ -18,14 +18,15 @@ Go's "server project" layout: the `wabot` command at the root, everything else u
 | `docs/docs.go` | `docs` | `//go:embed openapi.yaml` as `docs.OpenAPI` (embed can't reach a parent directory, so it lives next to the file) |
 | `internal/store/store.go` | `store` | `Store` (wraps `*sql.DB`, owns the LID relink cache key), `Open`, `wabot_messages` table and its migration from the old rowid schema, `Save`, `Import` (history sync, incl. edits), `Query`/`Messages`/`Get`/`GetBySeq`/`LastSeq`, `MarkEdited`/`MarkDeleted`, `RelinkLIDs`, `Chats` |
 | `internal/store/message.go` | `store` | `Message` (raw fields exported but `json:"-"`), `Media`, `MessageUpdate`, `Chat`, `ChatsChanged`, `ErrNotFound`, `Message.MediaFileName` |
-| `internal/store/filter.go` | `store` | `Filter`, `ParseFilter`, `Match` and its SQL twin `where` (shared by `/messages`, `/messages/wait`, `/events`, webhook) |
+| `internal/store/filter.go` | `store` | `Filter`, `ParseFilter`, `Match` and its SQL twin `where` (shared by `/messages`, `/messages/wait`, `/events`, webhook), including the `q` text search (`textMatches` in Go mirrors the FTS query) |
+| `internal/store/state.go` | `store` | `migrateState`: `wabot_chat_state` (read positions, `MarkReadUpTo`/`MarkChatRead`/`ReadSeq`), `wabot_groups` (`SaveGroups`/`Groups`), the `wabot_messages_fts` index and its triggers, `ftsQuery`; the `ChatRead` event |
 | `internal/store/audit.go` | `store` | `wabot_audit` table, `AuditEntry`, `Store.Audit`, `Store.AuditLog` |
 | `internal/bot/bot.go` | `bot` | `Bot` type, `New`, `Start`, `PairPhone`, `Status`, pub/sub (`Subscribe`, `publish`), `InputError`/`BadInput`, `SleepUntil`, DB file permissions |
 | `internal/bot/events.go` | `bot` | whatsmeow event handler, incoming edits/deletes (`handleProtocol`), history import, auto-replies |
 | `internal/bot/message.go` | `bot` | `classify`, `toMessage`, `PhoneJID`, `save` (store + publish) |
 | `internal/bot/send.go` | `bot` | `SendText`, `SendFile`, replies (`prepare`, `quote`), `deliver`, `sendControl`, throttling |
 | `internal/bot/actions.go` | `bot` | `React`, `Edit`, `Delete`, `MarkRead`, `SetTyping` |
-| `internal/bot/contacts.go` | `bot` | `Contacts`, `Check`, `Resolve`, `ParseRecipient`, the lookup limiter, `Chats`/`ChatName`, the group cache and admin list |
+| `internal/bot/contacts.go` | `bot` | `Contacts`, `Check`, `Resolve`, `ParseRecipient`, the lookup limiter, `Chats`/`ChatName`, the group cache and admin list (`refreshGroups`, `loadCachedGroups`, the `NamesChanged` event) |
 | `internal/bot/media.go` | `bot` | `DownloadMedia`, `limitedTransport` / `cappedBody` (100 MB cap) |
 | `internal/bot/presence.go` | `bot` | presence (`-online`) and typing indicators |
 | `internal/bot/audit.go` | `bot` | `Bot.Audit`, `Bot.audited` |
@@ -42,7 +43,10 @@ Go's "server project" layout: the `wabot` command at the root, everything else u
 | `internal/tui/view.go` | `tui` | rendering: panes, sidebar, context bar, footer, styles |
 | `internal/tui/format.go` | `tui` | text helpers and `safe()` sanitizing of untrusted text |
 | `docs/openapi.yaml` | | OpenAPI 3 spec, embedded into the binary (rebuild after editing) |
-| `docs/*.md` | | user docs: CLI, API, TUI, writing bot logic, admin panel plan |
+| `docs/*.md` | | user docs: CLI, API, TUI, writing bot logic |
+| `docs/proposed-features/` | | deferred proposals (admin panel, TUI image previews); nothing there is built |
+| `.github/workflows/ci.yml` | | CI on every push to `main` and every PR: gofmt, `go vet`, `go test -race` on Ubuntu and macOS, `CGO_ENABLED=0` build |
+| `.github/workflows/release.yml`, `.goreleaser.yaml` | | on a `v*` tag: tests, then GoReleaser builds linux/darwin × amd64/arm64 `tar.gz` archives plus `checksums.txt` on the GitHub release, stamping `main.version` via `-ldflags` |
 
 **Dependency direction:** `main` → `api`, `tui`, `bot`, `store`; `api` → `bot`, `store`, `docs`;
 `tui` → `bot`, `store`; `bot` → `store`; `store` → nothing internal. Never import upwards (Go
@@ -92,6 +96,22 @@ numbers and names below.
 - `internal/tui`: 110×24 renders exactly 24 lines (with and without the context bar), autocomplete,
   reaction divider, vim-style keys, half-page scroll, `safe()`.
 - `main`: default DB path, `isLoopbackAddr`.
+- Also: `internal/store/state_test.go` (read positions, upgrade marks history read, FTS search incl.
+  accents/prefix/deleted/edited, group cache) and `internal/bot/state_test.go` (read-self receipts,
+  group cache loading); the TUI tests cover the new-messages divider, search jump and badges.
+
+**CI must stay green.** Run `gofmt -l .`, `go vet ./...` and `go test -race ./...` before pushing;
+CI runs the same on Linux and macOS.
+
+## Releases
+
+```sh
+git tag v0.x.y && git push --tags
+```
+
+The `release` workflow runs the tests and then GoReleaser, which publishes the archives and
+`checksums.txt` to a GitHub release. The version printed by `wabot version` comes from the tag
+(without the `v`); local builds print `dev`. Don't edit `version` in `main.go` by hand.
 
 Add a test with every behavior change. To eyeball the TUI, print `ansi.Strip(m.View())` from a
 throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `internal/tui/tui_test.go`.
@@ -124,9 +144,13 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
   only for actions that don't return a `Message` (pair, logout, read). `actor` is `api`, `tui`, `cli`,
   `autoreply` or `whatsapp`; pass it into `Bot` methods rather than guessing. Never put message text,
   tokens or secrets in `detail` or in log attributes. New actions go in the tables in
-  `docs/ADMIN-PANEL.md` and the `AuditEntry` enum in `docs/openapi.yaml`.
+  `docs/proposed-features/ADMIN-PANEL.md` and the `AuditEntry` enum in `docs/openapi.yaml`.
 - Logging is `log/slog` via `b.Log`. Errors go in an `err` attribute. Don't log query strings (the token
   can be there).
+- Events published today: `store.Message`, `store.MessageUpdate`, `bot.Status`, `store.ChatsChanged`
+  (history import), `store.ChatRead` (a chat's read position moved: TUI open, `/read`, read-self
+  receipts) and `bot.NamesChanged` (group names refreshed). The TUI reloads the chat list on the
+  last two.
 - New events for subscribers go through `Bot.publish`. The SSE handler forwards `store.Message` (as `message`,
   read back from the DB so none are lost), `store.MessageUpdate` (as `update`) and `bot.Status` (as `status`).
   `store.ChatsChanged` isn't forwarded but triggers the same DB catch-up as `Message`; other types are dropped.
@@ -143,7 +167,14 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
 - Classify message variants in one place (`classify` in `internal/bot/message.go`).
 - Schema changes to `wabot_messages`: new columns only need to be added to `messagesTable` (`internal/store/store.go`)
   (`addMissingColumns` adds them to existing databases on startup, so give them a DEFAULT). Anything else
-  needs an upgrade step in `migrate` that keeps the `seq` numbers.
+  needs an upgrade step in `migrate` that keeps the `seq` numbers. Other tables go through
+  `migrateState` (`internal/store/state.go`) or `migrateAudit`: create them idempotently and handle the
+  first-run backfill there (as `wabot_chat_state` does: existing history counts as read). Upgrades must
+  run automatically on startup; there is no separate migrate command.
+- Tables: `wabot_messages`, `wabot_messages_fts` (FTS5 over `text`, external content, kept in sync by
+  the `wabot_messages_fts_insert/_delete/_update` triggers, so write `text` only through normal
+  UPDATE/INSERT), `wabot_chat_state`, `wabot_groups`, `wabot_audit`. Unread counts and search must
+  agree with `Filter.Match` / `textMatches`, which the live paths use.
 - The TUI is designed for desktop terminals (~100+ columns). Don't spend effort on narrow layouts.
 - **Don't block in `Update`.** Network and DB calls go in a `tea.Cmd` that returns a message. Capture the
   values a `Cmd` needs (chat, message) before returning it instead of reading or changing `m` inside the

@@ -1,7 +1,11 @@
-# Admin panel (plan)
+# Admin panel (proposal)
 
-Status: **not built**. This is a plan for a small web admin panel served by `wabot serve`, and a
-description of the logging and audit groundwork that already exists for it.
+> **Deferred proposal.** Nothing in this document is built yet, except what the
+> [Logging today](#logging-today) section describes. It's kept here as a plan we may pick up later;
+> see the [list of proposals](README.md).
+
+This is a plan for a small web admin panel served by `wabot serve`, and a description of the
+logging and audit groundwork that already exists for it.
 
 ## Goals
 
@@ -100,7 +104,10 @@ Configured by `-log-format text|json`, `-log-file PATH` (stderr otherwise) and `
 | `giving up on delivery` | error | `component=webhook`, `delivery`, `attempts` |
 | `queue full, dropping delivery` | error | `component=webhook`, `delivery` |
 | `webhook filter chat resolved` | info | `chat`, `jid` |
-| `webhook filter: could not resolve chat, keeping it as typed` | warn | `chat`, `err` |
+| `webhook filter: chat isn't on WhatsApp, keeping it as typed` | warn | `chat`, `err` |
+| `webhook filter: chat lookup failed, retrying` | warn | `chat`, `err`, `retry_in` |
+| `refresh groups failed` | warn | `err` |
+| `cache groups failed` | warn | `err` |
 | `API has no token: only local, same-origin requests are accepted` | warn | `addr` |
 | `HTTP API listening` | info | `addr`, `docs` |
 | `HTTP API stopped` | error | `err` (`tui -addr` only) |
@@ -127,7 +134,7 @@ whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 | `react` | `Bot.React` | `<emoji> on <id>` |
 | `edit` | `Bot.Edit` | message id |
 | `delete` | `Bot.Delete` | message id |
-| `read` | `Bot.MarkRead` | `N messages` (written when something was marked, or on any failure) |
+| `read` | `Bot.MarkRead` | `N messages` (every call, including failures and calls that marked nothing) |
 | `pair` | `Bot.PairPhone`: `POST /pair`, TUI `/pair`, `wabot login -phone` | |
 | `logout` | `POST /logout`, `wabot logout` | |
 | `logged_out` | WhatsApp event (actor `whatsapp`) | reason code |
@@ -148,7 +155,7 @@ the table agree.
   including validation failures. Use `Bot.Audit` directly only where the action doesn't fit that
   shape (pair, logout, read).
   Add the new `action` name to the tables in this file and to the `AuditEntry` enum in
-  `openapi.yaml`.
+  [`docs/openapi.yaml`](../openapi.yaml).
 - `actor` is who asked: `api`, `tui`, `cli`, `autoreply`, `whatsapp`, and later
   `admin:<user>`. Pass it into `Bot` methods; don't infer it.
 - `target` is the chat JID. `detail` is short and safe: ids, counts, sizes, file names.
@@ -161,9 +168,9 @@ the table agree.
 
 ## Implementation phases
 
-**Phase 1: read-only panel.** `admin/` folder with static HTML, a little CSS and
-[htmx](https://htmx.org) (vendored, not from a CDN), embedded with `//go:embed admin/*` and
-served at `/admin/`. Pages: status & QR, chats & messages (live via `EventSource`), audit log.
+**Phase 1: read-only panel.** A new `internal/admin` package with static HTML, a little CSS and
+[htmx](https://htmx.org) (vendored, not from a CDN), embedded with `//go:embed` and mounted by
+`internal/api` at `/admin/`. Pages: status & QR, chats & messages (live via `EventSource`), audit log.
 Auth: the existing API token, entered once and kept in `sessionStorage`; without a token the
 panel works only from a browser on the same machine, because the API already rejects non-local
 and cross-site requests (403). Serve the panel from the same origin as the API so those checks

@@ -43,10 +43,11 @@ The focused panel has a green border.
 
 - **Chat list** (left): every conversation the bot has stored, most recent first, with the
   last message and a relative time (`14:05`, `Yesterday`, `Mon`, `02/10/26`). A green badge
-  counts messages that arrived while you were looking at another chat; badges reset when you
-  restart. `▌` marks the open chat, `👥` a group, and `~Name` means the person isn't in your
+  counts unread messages (see [Unread](#unread)); it survives restarts, and **All activity**
+  shows how many chats have new messages. `▌` marks the open chat, `👥` a group, and `~Name` means the person isn't in your
   address book and that's their WhatsApp profile name. **All activity** at the top is a live
-  feed of every chat. Group names are refreshed from WhatsApp every 10 minutes.
+  feed of every chat. Group names come from a cache in the database, so they show right away at
+  startup (even offline); they're refreshed in the background on connect and every 10 minutes.
 - **Conversation** (right): the open chat's last 400 messages, updating live, with day
   separators. Only that chat's messages are shown, not the same person's messages in groups.
   Your messages are right-aligned and green, others on the left. In groups each sender's name
@@ -70,9 +71,25 @@ The chat list comes from messages stored in the database (`~/.config/wabot/wabot
 Right after a fresh `wabot login`, WhatsApp also sends a batch of recent conversations, which
 are imported automatically.
 
-**Read receipts.** Opening a chat sends read receipts for its latest incoming messages (up to
-20), and new messages that arrive in the open chat are marked as read right away. Your contacts
-see blue ticks as if you'd read them on the phone.
+## Unread
+
+Each chat has a read position stored in the database (`wabot_chat_state`). The sidebar badge
+counts incoming messages after it (reactions and deleted messages don't count). A chat becomes
+read when:
+
+- you open it in the TUI. This is saved locally right away, even when offline;
+- you send a message in it;
+- you run `/read` (or a client calls `POST /read`);
+- you read it on your phone or another linked device (WhatsApp tells wabot through "read-self"
+  receipts).
+
+When you open a chat that has unread messages, a `── 2 new messages ──` divider appears above the
+first one. After upgrading from a version without this feature, everything already stored counts as
+read, and so does history imported after a fresh login.
+
+**Read receipts.** Opening a chat also sends read receipts for its latest incoming messages (up
+to 20) when you're connected, and new messages that arrive in the open chat are marked as read
+right away. Your contacts see blue ticks as if you'd read them on the phone.
 
 ## Keys
 
@@ -101,6 +118,8 @@ Selected message
 
 Commands
   /to <name|number|jid>     open a chat
+  /search <words>           search every chat (↑↓ pick, Enter jumps to it, Esc closes)
+  /copy                     copy this chat's number (same as Ctrl+Y)
   /all                      live feed of every chat
   /contacts [search]        your address book
   /groups                   your groups
@@ -145,6 +164,12 @@ Details:
   `name (2).ext` and so on.
 - **Panels.** `/help`, `/contacts` and `/groups` open in the right-hand pane. `↑` `↓` and
   `PgUp` `PgDn` scroll them, `Esc` closes them.
+- **Search.** `/search <words>` replaces the right-hand pane with up to 200 matching messages
+  from every chat, newest first (date, chat, sender, text). `↑` `↓`, `j` `k` or `Ctrl+J` `Ctrl+K`
+  move, `g` / `G` jump to the first / last result, `Enter` opens that chat with the message
+  selected (loading further back if needed), and `Esc` or `q` closes the results. Matching follows
+  the API's [`q` rule](API.md#filters): every word must match a whole word, the last one as a
+  prefix (`bom di` finds "bom dia"); case and accents are ignored; deleted messages aren't found.
 - `Ctrl+C` quits, as do `/quit` and `/q`.
 
 ## Autocomplete
@@ -175,13 +200,14 @@ in the audit log with actor `tui` (including `/pair`).
 | Command | |
 |---|---|
 | `/to <number, JID or name>` | open a chat. A name works if exactly one contact matches; otherwise you get the matches |
+| `/search <words>` | search every chat; see **Search** above |
 | `/all` | go back to **All activity** |
 | `/contacts [search]` | list your contacts, optionally filtered by name or part of the number |
 | `/groups` | list your groups with their JIDs |
 | `/send <number or JID> <text>` | one-off message without switching chats |
 | `/file <path> [caption]` | send a file to the open chat (images go as photos, the rest as documents). `~/` expands to your home directory |
 | `/copy` | copy the open chat's number (`+5521987654321`), or the group ID for groups; same as `Ctrl+Y` |
-| `/read` | mark the latest 50 incoming messages in the open chat as read |
+| `/read` | mark the open chat as read (read receipts for the latest 50 incoming messages, and the whole chat locally) |
 | `/pair <phone>` | pairing-code login |
 | `/help` | keys and commands |
 | `/quit`, `/q` | exit |

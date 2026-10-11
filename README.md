@@ -1,12 +1,15 @@
 # wabot
 
+[![CI](https://github.com/williamtcastro/wabot/actions/workflows/ci.yml/badge.svg)](https://github.com/williamtcastro/wabot/actions/workflows/ci.yml)
+
 A small, self-contained WhatsApp bot built on [whatsmeow](https://github.com/tulir/whatsmeow).
 One Go binary, one SQLite file, no cgo. Use it three ways:
 
 - **HTTP API**: send texts and files, reply, react, edit, delete, mark as read; read the stored
-  history with filters; long-poll or stream new messages with resumable cursors; download media;
+  history with filters and full-text search; unread counts per chat; long-poll or stream new messages with resumable cursors; download media;
   receive signed webhooks
-- **TUI**: chat from your terminal, with replies, reactions, edits, media saving and command autocomplete
+- **TUI**: chat from your terminal, with replies, reactions, edits, media saving, search across all
+  chats, unread badges that survive restarts, and command autocomplete
 - **CLI**: `wabot send 5511999999999 "hello"` from scripts and cron jobs
 
 It links to your account as a "Linked device", the same way WhatsApp Web does. Outgoing messages
@@ -15,16 +18,33 @@ are rate limited by default, and every control action is written to an audit log
 > ⚠️ whatsmeow is unofficial. Automated or bulk messaging can get a number banned.
 > Use a number you can afford to lose, keep the rate limits on, and don't spam.
 
-## Build
+## Install
 
-Requires Go 1.26+.
+**Prebuilt binaries:** download the archive for your system (Linux or macOS, amd64 or arm64) from
+the [Releases page](https://github.com/williamtcastro/wabot/releases), check it against
+`checksums.txt`, and put `wabot` somewhere on your `PATH`:
+
+```sh
+tar xzf wabot_*_darwin_arm64.tar.gz
+shasum -a 256 -c checksums.txt --ignore-missing
+mv wabot /usr/local/bin/
+wabot version
+```
+
+**With Go** (1.26+):
+
+```sh
+go install github.com/williamtcastro/wabot@latest   # installs to $(go env GOPATH)/bin
+```
+
+**From source:**
 
 ```sh
 go build -o wabot .
 go test ./...          # optional: offline test suite
 ```
 
-Or `go install github.com/williamtcastro/wabot@latest` to put `wabot` in `$(go env GOPATH)/bin`.
+`wabot version` prints the release version, or `dev` for a local build.
 
 ## 1. Log in (once)
 
@@ -106,7 +126,8 @@ next / previous chat and `Ctrl+D` / `Ctrl+U` scroll half a page. With a message 
 `j` / `k` move, `g` / `G` go to the first / last, `r` replies, `e` edits, `d d` deletes, `1`–`6`
 react and `s` saves media. Typing `/` shows a
 hint bar of commands; `Tab` completes command names, chat and contact names after `/to`, numbers
-after `/send` and file paths after `/file`. `/help` lists everything. See [docs/TUI.md](docs/TUI.md).
+after `/send` and file paths after `/file`. `/search <words>` finds messages in every chat and
+jumps to them. `/help` lists everything. See [docs/TUI.md](docs/TUI.md).
 
 ## 2c. One-shot CLI
 
@@ -189,7 +210,7 @@ with a 400. Find group JIDs with `GET /groups` or `/groups` in the TUI.
 | [docs/openapi.yaml](docs/openapi.yaml) | OpenAPI 3 spec (import into Postman/Insomnia/Bruno); served live at `/docs` |
 | [docs/TUI.md](docs/TUI.md) | terminal UI layout, keys and commands |
 | [docs/BOT.md](docs/BOT.md) | writing your own bot logic (webhook, polling or Go), verifying signatures, running as a service |
-| [docs/ADMIN-PANEL.md](docs/ADMIN-PANEL.md) | plan for a web admin panel; current logging and audit structure |
+| [docs/proposed-features/](docs/proposed-features/README.md) | ideas not built yet: [web admin panel](docs/proposed-features/ADMIN-PANEL.md) (also documents today's logging and audit structure), [image previews in the TUI](docs/proposed-features/IMAGE-PREVIEWS.md) |
 
 ## Files
 
@@ -197,10 +218,12 @@ with a 400. Find group JIDs with `GET /groups` or `/groups` in the TUI.
 |---|---|
 | `main.go` | CLI commands, flags, default database path, logger setup |
 | `internal/bot/` | whatsmeow client, events, sending, replies, reactions, edits, deletes, read receipts, media download, recipient lookup, contacts, auto-replies, rate limiter, webhook |
-| `internal/store/` | message history, filters, chat list and audit log (SQLite) |
+| `internal/store/` | message history, filters and search, chat list with unread counts, group cache and audit log (SQLite) |
 | `internal/api/` | HTTP API, long-poll, SSE, idempotency, request logging and the `/docs` page |
 | `internal/tui/` | terminal UI (Bubble Tea + Bubbles + Lip Gloss) |
 | `docs/` | user docs and the OpenAPI spec (embedded into the binary by `docs/docs.go`) |
+| `.github/workflows/` | CI (`ci.yml`: gofmt, vet, race tests on Linux and macOS, static build) and releases (`release.yml`) |
+| `.goreleaser.yaml` | release builds: Linux/macOS × amd64/arm64 archives and checksums |
 
 ## License
 

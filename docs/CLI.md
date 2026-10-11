@@ -57,6 +57,11 @@ Needs an existing login. Auto-replies are disabled for this command. Prints
 Unlinks the device from your phone and deletes the session. Messages stored in the
 `wabot_messages` table and the audit log are kept; delete the database file to remove everything.
 
+### `wabot version`
+
+Prints `wabot <version>`. Release builds carry the tag (e.g. `wabot 0.3.0`); anything built
+locally prints `wabot dev`. `--version` works too.
+
 ### `wabot help`
 
 Prints usage (also `-h` / `--help`).
@@ -107,7 +112,7 @@ time=2026-10-10T22:41:03.119-03:00 level=INFO msg=action actor=api action=send t
 ```
 
 Message text, the token and the webhook URL are never logged. `*.log` files are in `.gitignore`. More on the log fields and the audit table in
-[ADMIN-PANEL.md](ADMIN-PANEL.md#logging-today).
+[proposed-features/ADMIN-PANEL.md](proposed-features/ADMIN-PANEL.md#logging-today).
 
 ## The database
 
@@ -131,10 +136,15 @@ The file holds:
 - whatsmeow's tables (`whatsmeow_*`): your encryption keys, session, contacts, and
   phone-number ↔ hidden-ID links. **Anyone with this file can act as your WhatsApp
   account.** Keep it private and out of git (the included `.gitignore` already excludes it).
-- `wabot_messages`: every message the bot has seen or sent, which powers `/messages`,
-  `/events`, `/chats` and the TUI.
-- `wabot_audit`: one row per control action (send, react, edit, delete, read, pair, logout…).
-  Served by `GET /audit`.
+wabot's own tables:
+
+| Table | Holds |
+|---|---|
+| `wabot_messages` | every message the bot has seen or sent, which powers `/messages`, `/events`, `/chats` and the TUI (columns below) |
+| `wabot_messages_fts` | full-text index of `wabot_messages.text` (SQLite FTS5, accents folded) for `q=` and `/search`. Kept in sync by triggers on insert, update of `text` and delete |
+| `wabot_chat_state` | per chat, `read_seq`: the read position behind `unread` in `/chats` and the TUI badges |
+| `wabot_groups` | cached group names and admin lists (`jid`, `name`, `admins` as JSON, `updated`), so names show before connecting |
+| `wabot_audit` | one row per control action (send, react, edit, delete, read, pair, logout…), served by `GET /audit` |
 
 `wabot_messages` columns:
 
@@ -149,8 +159,11 @@ The file holds:
 | `raw` | the original message protobuf. Needed to quote a message in a reply and to download its media. Cleared when the message is deleted |
 | `raw_chat`, `raw_sender` | the JIDs exactly as WhatsApp sent them (possibly `…@lid`), needed for replies, reactions, deletes and read receipts |
 
-Databases from older versions are upgraded automatically on startup: the table is rebuilt with
-the new columns and the explicit `seq` column, keeping every message's existing number.
+Databases from older versions are upgraded automatically on startup, with no command to run:
+`wabot_messages` is rebuilt with the new columns and the explicit `seq` column (keeping every
+message's existing number), missing tables are created, and the search index is built from the
+stored messages. When `wabot_chat_state` is first created, every chat's read position is set to
+its newest message, so nothing already stored shows as unread.
 
 When WhatsApp reveals which phone number a hidden `…@lid` ID belongs to, messages stored under
 the `@lid` chat are moved to the phone-number chat, and leftover duplicates are removed.
