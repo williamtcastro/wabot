@@ -19,6 +19,7 @@ import (
 	"rsc.io/qr"
 
 	"github.com/williamtcastro/wabot/docs"
+	"github.com/williamtcastro/wabot/internal/auth"
 	"github.com/williamtcastro/wabot/internal/bot"
 	"github.com/williamtcastro/wabot/internal/store"
 )
@@ -26,7 +27,6 @@ import (
 const (
 	maxUpload   = 64 << 20
 	maxPollWait = 120 * time.Second
-	actor       = "api"
 	maxPageSize = 1000
 )
 
@@ -42,41 +42,51 @@ const docsPage = `<!doctype html>
 </body></html>`
 
 type server struct {
-	b    *bot.Bot
-	idem idempotency
+	b       *bot.Bot
+	idem    idempotency
+	streams streams
 }
 
-// NewHandler returns the API. With an empty token only same-origin requests to a loopback Host are allowed.
-func NewHandler(b *bot.Bot, token string) http.Handler {
+// NewHandler serves the API. Every route requires a scope; see docs/API.md for the table.
+func NewHandler(b *bot.Bot, authn *auth.Authenticator, version string) http.Handler {
 	a := &server{b: b, idem: idempotency{entries: map[string]*idemEntry{}}}
 	mux := http.NewServeMux()
+	read, send, admin := auth.Read, auth.Send, auth.Admin
 
-	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, b.Status()) })
-	mux.HandleFunc("GET /qr", a.qr)
-	mux.HandleFunc("POST /pair", a.pair)
-	mux.HandleFunc("POST /logout", a.logout)
+	mux.HandleFunc("GET /status", need(read, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, visibleStatus(principal(r), b.Status()))
+	}))
+	mux.HandleFunc("GET /qr", need(admin, a.qr))
+	mux.HandleFunc("POST /pair", need(admin, a.pair))
+	mux.HandleFunc("POST /logout", need(admin, a.logout))
 
-	mux.HandleFunc("POST /send", a.sendText)
-	mux.HandleFunc("POST /send/file", a.sendFile)
-	mux.HandleFunc("POST /react", a.react)
-	mux.HandleFunc("POST /edit", a.edit)
-	mux.HandleFunc("POST /delete", a.delete)
-	mux.HandleFunc("POST /read", a.read)
-	mux.HandleFunc("POST /typing", a.typing)
+	mux.HandleFunc("POST /send", need(send, a.sendText))
+	mux.HandleFunc("POST /send/file", need(send, a.sendFile))
+	mux.HandleFunc("POST /react", need(send, a.react))
+	mux.HandleFunc("POST /edit", need(send, a.edit))
+	mux.HandleFunc("POST /delete", need(send, a.delete))
+	mux.HandleFunc("POST /read", need(send, a.read))
+	mux.HandleFunc("POST /typing", need(send, a.typing))
 
-	mux.HandleFunc("GET /messages", a.messages)
-	mux.HandleFunc("GET /messages/wait", a.wait)
-	mux.HandleFunc("GET /events", a.events)
-	mux.HandleFunc("GET /media/{seq}", a.media)
-	mux.HandleFunc("GET /chats", a.chats)
+	mux.HandleFunc("GET /messages", need(read, a.messages))
+	mux.HandleFunc("GET /messages/wait", need(read, a.wait))
+	mux.HandleFunc("GET /events", need(read, a.events))
+	mux.HandleFunc("GET /media/{seq}", need(read, a.media))
+	mux.HandleFunc("GET /chats", need(read, a.chats))
 
-	mux.HandleFunc("GET /contacts", a.contacts)
-	mux.HandleFunc("GET /groups", a.groups)
-	mux.HandleFunc("POST /check", a.check)
-	mux.HandleFunc("GET /audit", a.audit)
+	mux.HandleFunc("GET /contacts", need(read, unrestricted(a.contacts)))
+	mux.HandleFunc("GET /groups", need(read, unrestricted(a.groups)))
+	mux.HandleFunc("POST /check", need(send, unrestricted(a.check)))
+
+	mux.HandleFunc("GET /audit", need(admin, a.audit))
+	mux.HandleFunc("GET /tokens", need(admin, a.listTokens))
+	mux.HandleFunc("POST /tokens", need(admin, a.createToken))
+	mux.HandleFunc("DELETE /tokens/{name}", need(admin, a.revokeToken))
 
 	root := http.NewServeMux()
-	root.Handle("/", withAuth(token, mux))
+	fails := &failureLimiter{}
+	root.Handle("/", withAuth(authn, fails, mux))
+	root.Handle("/mcp", mcpHandler(b, authn, fails, version, b.Log))
 	root.HandleFunc("GET /docs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, docsPage)
@@ -112,13 +122,13 @@ func (a *server) pair(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	code, err := a.b.PairPhone(r.Context(), actor, req.Phone)
+	code, err := a.b.PairPhone(r.Context(), principal(r).Name, req.Phone)
 	respond(w, map[string]string{"code": code}, err)
 }
 
 func (a *server) logout(w http.ResponseWriter, r *http.Request) {
 	err := a.b.Client.Logout(r.Context())
-	a.b.Audit(actor, "logout", "", "", err)
+	a.b.Audit(principal(r).Name, "logout", "", "", err)
 	respond(w, map[string]bool{"ok": true}, err)
 }
 
@@ -136,9 +146,13 @@ func (a *server) sendText(w http.ResponseWriter, r *http.Request) {
 		writeError(w, bot.BadInput("'to' and 'text' are required"))
 		return
 	}
+	to, ok := a.sendGuard(w, r, req.To)
+	if !ok {
+		return
+	}
 	key := cmp.Or(r.Header.Get("Idempotency-Key"), req.IdempotencyKey)
-	m, err := a.idem.do(r.Context(), "send", key, fingerprint(req.To, req.Text, req.ReplyTo), func() (store.Message, error) {
-		return a.b.SendText(r.Context(), actor, req.To, req.Text, bot.SendOptions{ReplyTo: req.ReplyTo})
+	m, err := a.idem.do(r.Context(), principal(r).Name+":send", key, fingerprint(req.To, req.Text, req.ReplyTo), func() (store.Message, error) {
+		return a.b.SendText(r.Context(), principal(r).Name, to, req.Text, bot.SendOptions{ReplyTo: req.ReplyTo})
 	})
 	respond(w, m, err)
 }
@@ -169,10 +183,14 @@ func (a *server) sendFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, bot.BadInput("'to' is required"))
 		return
 	}
+	to, ok := a.sendGuard(w, r, to)
+	if !ok {
+		return
+	}
 	key := cmp.Or(r.Header.Get("Idempotency-Key"), r.FormValue("idempotency_key"))
 	sum := sha256.Sum256(data)
-	m, err := a.idem.do(r.Context(), "file", key, fingerprint(to, hdr.Filename, r.FormValue("caption"), r.FormValue("reply_to"), string(sum[:])), func() (store.Message, error) {
-		return a.b.SendFile(r.Context(), actor, to, data, hdr.Filename, r.FormValue("caption"), bot.SendOptions{ReplyTo: r.FormValue("reply_to")})
+	m, err := a.idem.do(r.Context(), principal(r).Name+":file", key, fingerprint(to, hdr.Filename, r.FormValue("caption"), r.FormValue("reply_to"), string(sum[:])), func() (store.Message, error) {
+		return a.b.SendFile(r.Context(), principal(r).Name, to, data, hdr.Filename, r.FormValue("caption"), bot.SendOptions{ReplyTo: r.FormValue("reply_to")})
 	})
 	respond(w, m, err)
 }
@@ -195,26 +213,28 @@ func (a *server) target(w http.ResponseWriter, r *http.Request) (targetReq, bool
 		writeError(w, bot.BadInput("'chat' is required"))
 		return req, false
 	}
-	return req, true
+	chat, ok := a.sendGuard(w, r, req.Chat)
+	req.Chat = chat
+	return req, ok
 }
 
 func (a *server) react(w http.ResponseWriter, r *http.Request) {
 	if req, ok := a.target(w, r); ok {
-		m, err := a.b.React(r.Context(), actor, req.Chat, req.ID, req.Emoji)
+		m, err := a.b.React(r.Context(), principal(r).Name, req.Chat, req.ID, req.Emoji)
 		respond(w, m, err)
 	}
 }
 
 func (a *server) edit(w http.ResponseWriter, r *http.Request) {
 	if req, ok := a.target(w, r); ok {
-		m, err := a.b.Edit(r.Context(), actor, req.Chat, req.ID, req.Text)
+		m, err := a.b.Edit(r.Context(), principal(r).Name, req.Chat, req.ID, req.Text)
 		respond(w, m, err)
 	}
 }
 
 func (a *server) delete(w http.ResponseWriter, r *http.Request) {
 	if req, ok := a.target(w, r); ok {
-		m, err := a.b.Delete(r.Context(), actor, req.Chat, req.ID)
+		m, err := a.b.Delete(r.Context(), principal(r).Name, req.Chat, req.ID)
 		respond(w, m, err)
 	}
 }
@@ -224,7 +244,7 @@ func (a *server) read(w http.ResponseWriter, r *http.Request) {
 		if req.ID != "" {
 			req.IDs = append(req.IDs, req.ID)
 		}
-		n, err := a.b.MarkRead(r.Context(), actor, req.Chat, req.IDs)
+		n, err := a.b.MarkRead(r.Context(), principal(r).Name, req.Chat, req.IDs)
 		respond(w, map[string]int{"marked": n}, err)
 	}
 }
@@ -237,6 +257,9 @@ func (a *server) typing(w http.ResponseWriter, r *http.Request) {
 
 func (a *server) filter(w http.ResponseWriter, r *http.Request) (store.Filter, bool) {
 	f, err := store.ParseFilter(r.URL.Query(), func(s string) (string, error) {
+		if principal(r).Restricted() {
+			return a.b.LocalChat(s)
+		}
 		jid, err := a.b.Resolve(r.Context(), s)
 		if err != nil {
 			if jid, err = bot.ParseRecipient(s); err != nil {
@@ -249,7 +272,7 @@ func (a *server) filter(w http.ResponseWriter, r *http.Request) (store.Filter, b
 		writeError(w, bot.BadInput("%v", err))
 		return f, false
 	}
-	return f, true
+	return f, a.restrictFilter(w, r, &f)
 }
 
 func intParam(r *http.Request, name string, def, maxVal int) int {
@@ -279,12 +302,23 @@ func (a *server) wait(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := intParam(r, "limit", 100, maxPageSize)
 	timeout := time.Duration(intParam(r, "timeout", 30, int(maxPollWait/time.Second))) * time.Second
+	p := principal(r)
+	release, ok := a.streams.acquire(p)
+	if !ok {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": errTooManyStreams.Error()})
+		return
+	}
+	defer release()
 
 	ch, unsub := a.b.Subscribe()
 	defer unsub()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	for {
+		if !a.stillValid(p) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "token revoked or expired"})
+			return
+		}
 		if msgs := a.b.Store.Query(f, limit, true); len(msgs) > 0 {
 			writeJSON(w, 200, map[string]any{"messages": msgs, "next_since": msgs[len(msgs)-1].Seq})
 			return
@@ -321,6 +355,13 @@ func (a *server) events(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	p := principal(r)
+	release, ok := a.streams.acquire(p)
+	if !ok {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": errTooManyStreams.Error()})
+		return
+	}
+	defer release()
 	ch, unsub := a.b.Subscribe()
 	defer unsub()
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -357,13 +398,23 @@ func (a *server) events(w http.ResponseWriter, r *http.Request) {
 	unfiltered.Since = 0
 	ping := time.NewTicker(25 * time.Second)
 	defer ping.Stop()
+	recheck := time.NewTicker(streamRecheck)
+	defer recheck.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-recheck.C:
+			if !a.stillValid(p) {
+				return
+			}
+			continue
 		case <-ping.C:
 			fmt.Fprint(w, ": ping\n\n")
 		case v := <-ch:
+			if !a.stillValid(p) {
+				return
+			}
 			switch v := v.(type) {
 			case store.Message, store.ChatsChanged:
 				catchUp()
@@ -373,7 +424,7 @@ func (a *server) events(w http.ResponseWriter, r *http.Request) {
 				}
 			case bot.Status:
 				if want["status"] {
-					send("status", "", v)
+					send("status", "", visibleStatus(p, v))
 				}
 			}
 		}
@@ -386,6 +437,12 @@ func (a *server) media(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, bot.BadInput("seq must be a number"))
 		return
+	}
+	if p := principal(r); p.Restricted() {
+		if m, err := a.b.Store.GetBySeq(seq); err != nil || !a.b.ChatAllowed(r.Context(), p.Chats, m.Chat) {
+			writeError(w, store.ErrNotFound)
+			return
+		}
 	}
 	data, m, err := a.b.DownloadMedia(r.Context(), seq)
 	var dl whatsmeow.DownloadHTTPError
@@ -424,6 +481,10 @@ func inlineSafe(mimetype string) bool {
 
 func (a *server) chats(w http.ResponseWriter, r *http.Request) {
 	chats, err := a.b.Chats(r.Context(), intParam(r, "limit", 50, maxPageSize))
+	if p := principal(r); err == nil && p.Restricted() {
+		allowed := a.b.ExpandAllowlist(r.Context(), p.Chats)
+		chats = slices.DeleteFunc(chats, func(c store.Chat) bool { return !slices.Contains(allowed, c.JID) })
+	}
 	respond(w, chats, err)
 }
 

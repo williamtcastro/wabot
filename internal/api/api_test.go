@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/williamtcastro/wabot/internal/auth"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/williamtcastro/wabot/docs"
@@ -56,6 +58,7 @@ func seed(t *testing.T, b *bot.Bot) {
 func do(h http.Handler, method, target string, hdr map[string]string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, target, nil)
 	r.Host = "127.0.0.1:8080"
+	r.RemoteAddr = "127.0.0.1:50000"
 	for k, v := range hdr {
 		if k == "Host" {
 			r.Host = v
@@ -69,7 +72,7 @@ func do(h http.Handler, method, target string, hdr map[string]string) *httptest.
 }
 
 func TestTokenAuth(t *testing.T) {
-	h := NewHandler(newTestBot(t), "s3cret")
+	h := newHandler(newTestBot(t), "s3cret")
 	for _, c := range []struct {
 		target string
 		hdr    map[string]string
@@ -78,8 +81,11 @@ func TestTokenAuth(t *testing.T) {
 		{"/status", nil, 401},
 		{"/status", map[string]string{"Authorization": "Bearer wrong"}, 401},
 		{"/status", map[string]string{"Authorization": "Bearer s3cret"}, 200},
-		{"/status?token=s3cret", nil, 200},
-		{"/status?token=s3cret", map[string]string{"Host": "wabot.example"}, 200},
+		{"/status", map[string]string{"Authorization": "bearer s3cret"}, 200},
+		{"/status", map[string]string{"Authorization": "s3cret"}, 401},
+		{"/status?token=s3cret", nil, 401},
+		{"/qr?token=s3cret", map[string]string{"Host": "wabot.example"}, 404},
+		{"/status?token=wrong", map[string]string{"Authorization": "Bearer s3cret"}, 200},
 		{"/messages", map[string]string{"Authorization": "Bearer s3cret"}, 200},
 		{"/docs", nil, 200},
 		{"/openapi.yaml", nil, 200},
@@ -94,7 +100,7 @@ func TestTokenAuth(t *testing.T) {
 }
 
 func TestLocalOnlyWithoutToken(t *testing.T) {
-	h := NewHandler(newTestBot(t), "")
+	h := newHandler(newTestBot(t), "")
 	for _, c := range []struct {
 		hdr  map[string]string
 		want int
@@ -199,7 +205,7 @@ func messageSeqs(t *testing.T, body []byte) []int64 {
 func TestMessagesSinceCursor(t *testing.T) {
 	b := newTestBot(t)
 	seed(t, b)
-	h := NewHandler(b, "")
+	h := newHandler(b, "")
 	for target, want := range map[string][]int64{
 		"/messages":                                 {3, 2, 1},
 		"/messages?since=1":                         {2, 3},
@@ -226,7 +232,7 @@ func TestMessagesSinceCursor(t *testing.T) {
 func TestMessagesWaitReturnsBacklog(t *testing.T) {
 	b := newTestBot(t)
 	seed(t, b)
-	w := do(NewHandler(b, ""), "GET", "/messages/wait?since=2&timeout=1", nil)
+	w := do(newHandler(b, ""), "GET", "/messages/wait?since=2&timeout=1", nil)
 	var got struct {
 		Messages  []store.Message `json:"messages"`
 		NextSince int64           `json:"next_since"`
@@ -249,12 +255,13 @@ func sseIDs(body string) []string {
 func TestEventsLastEventIDReplay(t *testing.T) {
 	b := newTestBot(t)
 	seed(t, b)
-	h := NewHandler(b, "")
+	h := newHandler(b, "")
 	stream := func(target string, hdr map[string]string) string {
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer cancel()
 		r := httptest.NewRequestWithContext(ctx, "GET", target, nil)
 		r.Host = "127.0.0.1:8080"
+		r.RemoteAddr = "127.0.0.1:50000"
 		for k, v := range hdr {
 			r.Header.Set(k, v)
 		}
@@ -289,7 +296,7 @@ func TestAuditEndpoint(t *testing.T) {
 	b := newTestBot(t)
 	b.Audit("api", "logout", "", "", nil)
 	b.Audit("tui", "send", maria, "text, 2 chars", errors.New("not logged in"))
-	w := do(NewHandler(b, ""), "GET", "/audit?limit=1", nil)
+	w := do(newHandler(b, ""), "GET", "/audit?limit=1", nil)
 	var got []store.AuditEntry
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || len(got) != 1 || got[0].Actor != "tui" || got[0].OK {
 		t.Fatalf("audit = %s (%v)", w.Body, err)
@@ -299,12 +306,179 @@ func TestAuditEndpoint(t *testing.T) {
 func TestMessagesSearch(t *testing.T) {
 	b := newTestBot(t)
 	seed(t, b)
-	h := NewHandler(b, "tok")
+	h := newHandler(b, "tok")
 	rec := do(h, "GET", "/messages?q=TUDO&from_me=true", map[string]string{"Authorization": "Bearer tok"})
 	if rec.Code != 200 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
 	if got := messageSeqs(t, rec.Body.Bytes()); len(got) != 1 || got[0] != 3 {
 		t.Fatalf("q=TUDO&from_me=true -> seqs %v, want [3]", got)
+	}
+}
+
+func newHandler(b *bot.Bot, owner string) http.Handler {
+	return NewHandler(b, &auth.Authenticator{Store: b.Store, Owner: owner}, "test")
+}
+
+func issue(t *testing.T, b *bot.Bot, name string, scopes []auth.Scope, chats []string, rate int) string {
+	t.Helper()
+	plain, _, err := auth.Issue(b.Store, auth.Request{Name: name, Scopes: scopes, Chats: chats, Rate: rate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plain
+}
+
+func bearer(tok string) map[string]string { return map[string]string{"Authorization": "Bearer " + tok} }
+
+func TestScopedTokens(t *testing.T) {
+	b := newTestBot(t)
+	seed(t, b)
+	reader := issue(t, b, "reader", []auth.Scope{auth.Read}, nil, 0)
+	mariaBot := issue(t, b, "maria-bot", []auth.Scope{auth.Read, auth.Send}, []string{maria}, 0)
+	h := newHandler(b, "")
+
+	if rec := do(h, "GET", "/status", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("once a token exists, no-token requests (even from localhost) must be 401, got %d", rec.Code)
+	}
+	if rec := do(h, "GET", "/messages", bearer(reader)); rec.Code != 200 {
+		t.Fatalf("reader GET /messages = %d", rec.Code)
+	}
+	for _, c := range []struct{ method, path string }{
+		{"POST", "/send"}, {"GET", "/audit"}, {"GET", "/tokens"}, {"POST", "/logout"},
+	} {
+		if rec := do(h, c.method, c.path, bearer(reader)); rec.Code != http.StatusForbidden {
+			t.Errorf("reader %s %s = %d, want 403", c.method, c.path, rec.Code)
+		}
+	}
+
+	rec := do(h, "GET", "/messages", bearer(mariaBot))
+	for _, s := range messageSeqs(t, rec.Body.Bytes()) {
+		m, _ := b.Store.GetBySeq(s)
+		if m.Chat != maria {
+			t.Fatalf("restricted token saw a message from %s", m.Chat)
+		}
+	}
+	if rec := do(h, "GET", "/messages?chat="+john, bearer(mariaBot)); rec.Code != http.StatusForbidden {
+		t.Errorf("restricted ?chat=other = %d, want 403", rec.Code)
+	}
+	for _, path := range []string{"/contacts", "/groups"} {
+		if rec := do(h, "GET", path, bearer(mariaBot)); rec.Code != http.StatusForbidden {
+			t.Errorf("restricted %s = %d, want 403", path, rec.Code)
+		}
+	}
+	var chats []store.Chat
+	_ = json.Unmarshal(do(h, "GET", "/chats", bearer(mariaBot)).Body.Bytes(), &chats)
+	if len(chats) != 1 || chats[0].JID != maria {
+		t.Errorf("restricted /chats = %+v", chats)
+	}
+	johnMsg := b.Store.Messages(john, 1)[0]
+	if rec := do(h, "GET", fmt.Sprintf("/media/%d", johnMsg.Seq), bearer(mariaBot)); rec.Code != http.StatusNotFound {
+		t.Errorf("restricted /media of another chat = %d, want 404", rec.Code)
+	}
+	if rec := doJSON(h, "POST", "/send", `{"to":"`+john+`","text":"hi"}`, bearer(mariaBot)); rec.Code != http.StatusForbidden {
+		t.Errorf("restricted send to another chat = %d, want 403", rec.Code)
+	}
+	if rec := doJSON(h, "POST", "/send", `{"to":"`+maria+`","text":"hi"}`, bearer(mariaBot)); rec.Code == http.StatusForbidden {
+		t.Errorf("send to the allowed chat must pass the token checks, got 403")
+	}
+	if rec := doJSON(h, "POST", "/react", `{"chat":"`+john+`","id":"M2","emoji":"👍"}`, bearer(mariaBot)); rec.Code != http.StatusForbidden {
+		t.Errorf("restricted react in another chat = %d, want 403", rec.Code)
+	}
+}
+
+func TestTokenAdminEndpointsAndRevocation(t *testing.T) {
+	b := newTestBot(t)
+	admin := issue(t, b, "boss", []auth.Scope{auth.Admin}, nil, 0)
+	h := newHandler(b, "")
+	rec := doJSON(h, "POST", "/tokens", `{"name":"helper","scopes":["read"],"expires_in":"24h"}`, bearer(admin))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	var created struct{ Token string }
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+	if rec := do(h, "GET", "/status", bearer(created.Token)); rec.Code != 200 {
+		t.Fatalf("new token = %d", rec.Code)
+	}
+	if strings.Contains(do(h, "GET", "/tokens", bearer(admin)).Body.String(), created.Token) {
+		t.Fatal("GET /tokens must never return secrets")
+	}
+	if rec := do(h, "DELETE", "/tokens/helper", bearer(admin)); rec.Code != 200 {
+		t.Fatalf("revoke = %d", rec.Code)
+	}
+	if rec := do(h, "GET", "/status", bearer(created.Token)); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked token = %d, want 401", rec.Code)
+	}
+}
+
+func TestPerTokenRate(t *testing.T) {
+	b := newTestBot(t)
+	slow := issue(t, b, "slow", []auth.Scope{auth.Send}, nil, 1)
+	h := newHandler(b, "")
+	body := `{"to":"` + maria + `","text":"hi"}`
+	if rec := doJSON(h, "POST", "/send", body, bearer(slow)); rec.Code == http.StatusTooManyRequests {
+		t.Fatal("first send must not be rate limited")
+	}
+	if rec := doJSON(h, "POST", "/send", body, bearer(slow)); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second send within a minute at rate 1 = %d, want 429", rec.Code)
+	}
+}
+
+func doJSON(h http.Handler, method, target, body string, hdr map[string]string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, target, strings.NewReader(body))
+	r.Host = "127.0.0.1:8080"
+	r.RemoteAddr = "127.0.0.1:50000"
+	r.Header.Set("Content-Type", "application/json")
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+type headerTransport struct{ token string }
+
+func (h headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	if h.token != "" {
+		r.Header.Set("Authorization", "Bearer "+h.token)
+	}
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+func TestMCPOverHTTPUsesTokenScopes(t *testing.T) {
+	b := newTestBot(t)
+	seed(t, b)
+	reader := issue(t, b, "reader", []auth.Scope{auth.Read}, nil, 0)
+	srv := httptest.NewServer(newHandler(b, ""))
+	defer srv.Close()
+	ctx := context.Background()
+
+	connect := func(token string) (*mcp.ClientSession, error) {
+		tr := &mcp.StreamableClientTransport{Endpoint: srv.URL + "/mcp", HTTPClient: &http.Client{Transport: headerTransport{token}}, MaxRetries: -1}
+		return mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(ctx, tr, nil)
+	}
+	if _, err := connect(""); err == nil {
+		t.Fatal("with tokens configured, /mcp without a token must be refused")
+	}
+	cs, err := connect(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "read_messages", Arguments: map[string]any{"chat": maria}})
+	if err != nil || res.IsError {
+		t.Fatalf("reader read_messages: %v %+v", err, res)
+	}
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "send_message", Arguments: map[string]any{"to": maria, "text": "hi"}})
+	if err != nil || !res.IsError {
+		t.Fatalf("reader must not send over MCP: %v %+v", err, res)
+	}
+	entries, _ := b.Store.AuditLog(10, 0)
+	for _, e := range entries {
+		if e.Action == "send" {
+			t.Fatalf("a refused send must not reach the bot: %+v", e)
+		}
 	}
 }

@@ -57,6 +57,9 @@ type Bot struct {
 	typingIn   map[string]*time.Timer
 	groupsAt   time.Time
 	groupsBusy atomic.Bool
+	allowlists map[string]expandedAllowlist
+	tokenMu    sync.Mutex
+	tokenRate  map[string]*Limiter
 }
 
 func New(ctx context.Context, dbPath string, waLogger waLog.Logger, log *slog.Logger) (*Bot, error) {

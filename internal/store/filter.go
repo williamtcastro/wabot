@@ -23,6 +23,8 @@ type Filter struct {
 	IsGroup  *bool
 	Since    int64
 	Text     string
+	// Chats, when set, limits results to these chats (a token's allowlist).
+	Chats []string
 }
 
 var messageTypes = map[string]bool{
@@ -86,6 +88,9 @@ func (f Filter) Match(m Message) bool {
 	if f.Text != "" && !textMatches(f.Text, m.Text) {
 		return false
 	}
+	if len(f.Chats) > 0 && !slices.Contains(f.Chats, m.Chat) {
+		return false
+	}
 	return m.Seq > f.Since
 }
 
@@ -113,6 +118,12 @@ func (f Filter) where() (string, []any) {
 	if f.IsGroup != nil {
 		conds = append(conds, "is_group = ?")
 		args = append(args, *f.IsGroup)
+	}
+	if len(f.Chats) > 0 {
+		conds = append(conds, "chat IN (?"+strings.Repeat(",?", len(f.Chats)-1)+")")
+		for _, c := range f.Chats {
+			args = append(args, c)
+		}
 	}
 	if q := ftsQuery(f.Text); q != "" {
 		conds = append(conds, "seq IN (SELECT rowid FROM wabot_messages_fts WHERE wabot_messages_fts MATCH ?)")

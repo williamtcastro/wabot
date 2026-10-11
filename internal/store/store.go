@@ -25,6 +25,9 @@ func Open(ctx context.Context, db *sql.DB) (*Store, error) {
 	if err := migrateAudit(ctx, db); err != nil {
 		return nil, fmt.Errorf("create audit table: %w", err)
 	}
+	if err := migrateTokens(ctx, db); err != nil {
+		return nil, fmt.Errorf("create tokens table: %w", err)
+	}
 	if err := migrateState(ctx, db); err != nil {
 		return nil, fmt.Errorf("create state and search tables: %w", err)
 	}

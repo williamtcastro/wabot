@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -20,11 +21,14 @@ import (
 	"time"
 
 	"github.com/mdp/qrterminal/v3"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/williamtcastro/wabot/internal/api"
+	"github.com/williamtcastro/wabot/internal/auth"
 	"github.com/williamtcastro/wabot/internal/bot"
+	"github.com/williamtcastro/wabot/internal/mcpserver"
 	"github.com/williamtcastro/wabot/internal/store"
 	"github.com/williamtcastro/wabot/internal/tui"
 )
@@ -39,6 +43,10 @@ Usage:
   wabot serve [-addr ADDR]             run the HTTP API
   wabot tui   [-addr ADDR]             interactive terminal UI (optionally also serves the API)
   wabot send  NUMBER|JID TEXT...       send one message and exit
+  wabot token create NAME [-scopes read,send] [-chats N,...] [-rate N] [-expires 720h]
+  wabot token list | revoke NAME       manage API tokens for agents and bots (see docs/API.md)
+  wabot mcp [-allow-send] [-mcp-token TOKEN]
+                                       MCP server over stdio for AI agents (see docs/MCP.md)
   wabot version                        print the version
   wabot logout                         unlink the device and delete the session
 
@@ -131,7 +139,8 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 	}
 	quiet := cmd == "tui" || cmd == "send"
 	var waLogger waLog.Logger = waLog.Stdout("whatsmeow", level, true)
-	if quiet {
+	// In mcp mode stdout carries the protocol, so whatsmeow stays silent and app logs go to stderr.
+	if quiet || cmd == "mcp" {
 		waLogger = waLog.Noop
 	}
 	log, closeLog, err := newLogger(c.logFormat, c.logFile, level, quiet)
@@ -192,9 +201,10 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 		return serve(ctx, b, c)
 
 	case "tui":
-		if c.addr != "" && c.token == "" && !isLoopbackAddr(c.addr) {
-			return fmt.Errorf("refusing to serve on %s without -token (set WABOT_TOKEN, or bind to 127.0.0.1)", c.addr)
+		if err := guardPublicAddr(b, c); c.addr != "" && err != nil {
+			return err
 		}
+
 		if err := b.Start(ctx); err != nil {
 			return err
 		}
@@ -226,6 +236,12 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 		}
 		fmt.Printf("sent %s to %s\n", m.ID, m.Chat)
 		return nil
+
+	case "token":
+		return tokenCommand(b, args)
+
+	case "mcp":
+		return mcpCommand(ctx, b, args)
 
 	case "logout":
 		if b.Client.Store.ID == nil {
@@ -324,12 +340,12 @@ func waitLoggedIn(ctx context.Context, b *bot.Bot, timeout time.Duration) error 
 }
 
 func serve(ctx context.Context, b *bot.Bot, c config) error {
-	if c.token == "" && !isLoopbackAddr(c.addr) {
-		return fmt.Errorf("refusing to serve on %s without -token: anyone on the network could send messages as you (set WABOT_TOKEN, or bind to 127.0.0.1)", c.addr)
+	if err := guardPublicAddr(b, c); err != nil {
+		return err
 	}
 	srv := &http.Server{
 		Addr:              c.addr,
-		Handler:           api.NewHandler(b, c.token),
+		Handler:           api.NewHandler(b, &auth.Authenticator{Store: b.Store, Owner: c.token}, version),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    64 << 10,
@@ -377,6 +393,25 @@ func resolveWebhookChat(ctx context.Context, b *bot.Bot, number string) {
 	}
 	b.Webhook.SetChat(b.PhoneJID(jid).String())
 	b.Log.Info("webhook filter chat resolved", "chat", number, "jid", b.PhoneJID(jid).String())
+}
+
+// guardPublicAddr refuses a non-loopback listener unless tokens are required (an owner secret, or any
+// token ever created), and rejects owner secrets short enough to guess.
+func guardPublicAddr(b *bot.Bot, c config) error {
+	if err := auth.CheckOwnerSecret(c.token); err != nil {
+		return err
+	}
+	if isLoopbackAddr(c.addr) || c.token != "" {
+		return nil
+	}
+	has, err := b.Store.HasTokens()
+	if err != nil {
+		return fmt.Errorf("check tokens: %w", err)
+	}
+	if !has {
+		return fmt.Errorf("refusing to serve on %s without a token: anyone on the network could send messages as you (create one with 'wabot token create', set WABOT_TOKEN, or bind to 127.0.0.1)", c.addr)
+	}
+	return nil
 }
 
 func isLoopbackAddr(addr string) bool {
@@ -456,4 +491,137 @@ func newLogger(format, file, level string, quiet bool) (*slog.Logger, io.Closer,
 		return slog.New(slog.NewJSONHandler(w, opts)), closer, nil
 	}
 	return slog.New(slog.NewTextHandler(w, opts)), closer, nil
+}
+
+// tokenCommand manages API tokens. It only touches the database, so it's safe to run while serve is up.
+func tokenCommand(b *bot.Bot, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: wabot token create NAME [flags] | list | revoke NAME")
+	}
+	switch args[0] {
+	case "list":
+		tokens, err := b.Store.Tokens()
+		if err != nil {
+			return err
+		}
+		if len(tokens) == 0 {
+			fmt.Println("no tokens yet; create one with 'wabot token create NAME'")
+			return nil
+		}
+		fmt.Printf("%-20s %-16s %-6s %-10s %-17s %-17s %-20s %s\n", "NAME", "SCOPES", "RATE", "STATUS", "EXPIRES", "LAST USED", "CREATED BY", "CHATS")
+		for _, t := range tokens {
+			status := "active"
+			switch {
+			case t.Revoked:
+				status = "revoked"
+			case !t.Expires.IsZero() && time.Now().After(t.Expires):
+				status = "expired"
+			}
+			fmt.Printf("%-20s %-16s %-6s %-10s %-17s %-17s %-20s %s\n", t.Name, strings.Join(t.Scopes, ","), rateLabel(t.Rate), status,
+				timeLabel(t.Expires, "never"), timeLabel(t.LastUsed, "never"), cmp.Or(t.CreatedBy, "-"), cmp.Or(strings.Join(t.Chats, ","), "all"))
+		}
+		return nil
+
+	case "revoke":
+		if len(args) != 2 {
+			return errors.New("usage: wabot token revoke NAME")
+		}
+		n, err := b.Store.RevokeToken(args[1])
+		b.Audit("cli", "token_revoke", args[1], "", err)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("no active token named %q", args[1])
+		}
+		fmt.Printf("revoked %s (%d token(s), including any it created)\n", args[1], n)
+		return nil
+
+	case "create":
+		rest := args[1:]
+		name := ""
+		if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+			name, rest = rest[0], rest[1:]
+		}
+		fs := flag.NewFlagSet("token create", flag.ContinueOnError)
+		scopes := fs.String("scopes", "read", "comma-separated: read, send, admin")
+		chats := fs.String("chats", "", "comma-separated phone numbers or JIDs this token may access (default all)")
+		rate := fs.Int("rate", auth.DefaultRate, "max sends per minute for this token, on top of the global limit (0 = global only)")
+		expires := fs.Duration("expires", 0, "lifetime, e.g. 720h (0 = never)")
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if name == "" && fs.NArg() == 1 {
+			name = fs.Arg(0)
+		}
+		if name == "" {
+			return errors.New("usage: wabot token create NAME [-scopes read,send] [-chats ...] [-rate N] [-expires 720h]")
+		}
+		sc, err := auth.ParseScopes(strings.Split(*scopes, ","))
+		if err != nil {
+			return err
+		}
+		list, err := api.NormalizeChats(strings.Split(*chats, ","))
+		if err != nil {
+			return err
+		}
+		plain, t, err := auth.Issue(b.Store, auth.Request{Name: name, Scopes: sc, Chats: list, Rate: *rate, TTL: *expires})
+		b.Audit("cli", "token_create", name, *scopes, err)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Created token %q (scopes: %s, chats: %s)\n\n  %s\n\nStore it now: it can't be shown again. Use it as 'Authorization: Bearer <token>'.\n",
+			t.Name, strings.Join(t.Scopes, ","), cmp.Or(strings.Join(t.Chats, ","), "all"), plain)
+		fmt.Println("From now on the API requires a token on every request, including from localhost, even after tokens are revoked.")
+		return nil
+	}
+	return fmt.Errorf("unknown token command %q (use create, list or revoke)", args[0])
+}
+
+func rateLabel(n int) string {
+	if n == 0 {
+		return "-"
+	}
+	return fmt.Sprint(n)
+}
+
+func timeLabel(t time.Time, zero string) string {
+	if t.IsZero() {
+		return zero
+	}
+	return t.Local().Format("2006-01-02 15:04")
+}
+
+// mcpCommand serves MCP over stdio. It's read-only unless -allow-send is given, or acts as an existing
+// token (its scopes and chat allowlist) with -mcp-token. It holds its own WhatsApp connection, so it
+// can't run alongside serve or tui on the same database; use http://.../mcp on a running server instead.
+func mcpCommand(ctx context.Context, b *bot.Bot, args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	allowSend := fs.Bool("allow-send", false, "let the agent send messages, react and mark chats read")
+	token := fs.String("mcp-token", os.Getenv("WABOT_MCP_TOKEN"), "act as this API token (its scopes and chat allowlist)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if b.Client.Store.ID == nil {
+		return errors.New("not logged in: run 'wabot login' first")
+	}
+	p := auth.Principal{Name: "mcp", Scopes: []auth.Scope{auth.Read}}
+	if *allowSend {
+		p.Scopes = append(p.Scopes, auth.Send)
+	}
+	if *token != "" {
+		var err error
+		if p, err = (&auth.Authenticator{Store: b.Store}).Authenticate(*token); err != nil {
+			return fmt.Errorf("-mcp-token: %w", err)
+		}
+	}
+	if err := b.Start(ctx); err != nil {
+		return err
+	}
+	if err := waitLoggedIn(ctx, b, 30*time.Second); err != nil {
+		return err
+	}
+	b.Log.Info("MCP server on stdio", "as", p.Name, "scopes", p.Scopes)
+	return mcpserver.New(b, version, &p).Run(ctx, &mcp.StdioTransport{})
 }

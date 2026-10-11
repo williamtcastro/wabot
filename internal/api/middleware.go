@@ -1,7 +1,6 @@
 package api
 
 import (
-	"crypto/subtle"
 	"log/slog"
 	"net"
 	"net/http"
@@ -9,24 +8,6 @@ import (
 	"strings"
 	"time"
 )
-
-func withAuth(token string, next http.Handler) http.Handler {
-	if token == "" {
-		return localOnly(next)
-	}
-	want := []byte("Bearer " + token)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := []byte(r.Header.Get("Authorization"))
-		if q := r.URL.Query().Get("token"); q != "" {
-			got = []byte("Bearer " + q)
-		}
-		if subtle.ConstantTimeCompare(got, want) != 1 {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
 
 // localOnly protects a token-less API from web pages the owner visits: it rejects cross-site
 // requests (CSRF) and any Host that isn't loopback (DNS rebinding).
@@ -43,7 +24,8 @@ func localOnly(next http.Handler) http.Handler {
 			u, err := url.Parse(origin)
 			crossSite = crossSite || err != nil || u.Host != r.Host
 		}
-		if !loopback || crossSite {
+		remote := net.ParseIP(clientIP(r))
+		if !loopback || crossSite || remote == nil || !remote.IsLoopback() {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "without -token only same-origin requests to localhost are allowed"})
 			return
 		}

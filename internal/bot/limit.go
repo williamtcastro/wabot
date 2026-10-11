@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"sync"
@@ -86,4 +87,27 @@ func later(a, b time.Time) time.Time {
 		return b
 	}
 	return a
+}
+
+// ThrottleToken applies a token's own send rate (per minute) on top of the global limiter. It is shared
+// by the HTTP API and the MCP server, so a token gets one budget however it connects.
+func (b *Bot) ThrottleToken(ctx context.Context, id string, rate int) error {
+	if rate <= 0 || id == "" {
+		return nil
+	}
+	b.tokenMu.Lock()
+	if b.tokenRate == nil {
+		b.tokenRate = map[string]*Limiter{}
+	}
+	l, ok := b.tokenRate[id]
+	if !ok || l.PerMinute != rate {
+		l = NewLimiter(rate, 0, 30*time.Second)
+		b.tokenRate[id] = l
+	}
+	b.tokenMu.Unlock()
+	slot, err := l.Reserve(id)
+	if err != nil {
+		return err
+	}
+	return SleepUntil(ctx, slot)
 }
