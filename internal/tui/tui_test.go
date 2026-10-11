@@ -325,3 +325,41 @@ func TestSafe(t *testing.T) {
 		t.Errorf("safeMessage = %+v %+v", x, x.Media)
 	}
 }
+
+func TestFeedShowsNamesOnceChatsLoad(t *testing.T) {
+	m := newTestModel(t, chatMessages()...)
+	m.chats = nil
+	m.render(true)
+	if !strings.Contains(m.View(), "+"+userOf(maria)) {
+		t.Fatal("expected a bare number before chats load")
+	}
+	run(m, m.loadChats())
+	if v := m.View(); !strings.Contains(v, "~Maria") || strings.Contains(v, "+"+userOf(maria)+"  ") {
+		t.Fatalf("feed not redrawn with names after chats loaded:\n%s", v)
+	}
+}
+
+func TestCopyTarget(t *testing.T) {
+	for jid, want := range map[string]string{
+		maria:                     "+" + userOf(maria),
+		"120363000000000000@g.us": "120363000000000000@g.us",
+		"12345@lid":               "",
+	} {
+		got, err := copyTarget(jid)
+		if got != want || (want == "") != (err != nil) {
+			t.Errorf("copyTarget(%s) = %q, %v; want %q", jid, got, err, want)
+		}
+	}
+	m := newTestModel(t, chatMessages()...)
+	run(m, m.open(maria))
+	if !strings.Contains(m.View(), "ctrl+y copy") {
+		t.Fatal("chat header should show the copy hint")
+	}
+}
+
+func TestOwnMessagesLabelledMe(t *testing.T) {
+	m := newTestModel(t, chatMessages()...)
+	if v := m.View(); !strings.Contains(v, "me → ") || strings.Contains(v, "you → ") {
+		t.Fatalf("feed should label own messages \"me\":\n%s", v)
+	}
+}

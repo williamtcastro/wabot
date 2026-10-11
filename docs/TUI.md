@@ -28,7 +28,7 @@ If the session isn't logged in yet, the main pane shows a QR code. Scan it, or t
 │   📷 foto da festa             ││                                                         │
 │   ~John              Yesterday ││ ────────────────────── Today ──────────────────────     │
 │   ok, até amanhã               ││                                                         │
-│                                ││   ┃ you: tudo, e você?                                  │
+│                                ││   ┃ me: tudo, e você?                                   │
 │                                ││   bem também!  │ 👍  14:05                              │
 │                                ││                                                         │
 │                                ││                    📄 notes.pdf · 84 KB  edited 14:06 ✓ │
@@ -84,6 +84,7 @@ Moving around
   Ctrl+J / Ctrl+K     next / previous chat (from anywhere)
   ↑ (empty input)     select messages
   Ctrl+D / Ctrl+U     scroll half a page down / up
+  Ctrl+Y              copy the open chat's number (group ID for groups)
   PgUp / PgDn         scroll
   Esc                 cancel / close / back to the input
 
@@ -179,6 +180,7 @@ in the audit log with actor `tui` (including `/pair`).
 | `/groups` | list your groups with their JIDs |
 | `/send <number or JID> <text>` | one-off message without switching chats |
 | `/file <path> [caption]` | send a file to the open chat (images go as photos, the rest as documents). `~/` expands to your home directory |
+| `/copy` | copy the open chat's number (`+5521987654321`), or the group ID for groups; same as `Ctrl+Y` |
 | `/read` | mark the latest 50 incoming messages in the open chat as read |
 | `/pair <phone>` | pairing-code login |
 | `/help` | keys and commands |

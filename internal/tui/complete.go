@@ -87,7 +87,7 @@ func chatTarget(c store.Chat) string {
 	switch {
 	case c.IsGroup:
 		return c.JID
-	case strings.HasPrefix(c.Name, "~"), strings.HasPrefix(c.Name, "+"), c.Name == "You":
+	case strings.HasPrefix(c.Name, "~"), strings.HasPrefix(c.Name, "+"), c.Name == "Me":
 		return userOf(c.JID)
 	}
 	return c.Name

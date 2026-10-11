@@ -109,7 +109,7 @@ func (m *model) renderFeed(width int) string {
 		}
 		who := styleBold.Foreground(colorFor(x.Chat)).Render(m.nameOf(x.Chat))
 		if x.FromMe {
-			who = styleMe.Render("you") + styleDim.Render(" → ") + who
+			who = styleMe.Render("me") + styleDim.Render(" → ") + who
 		} else if x.IsGroup {
 			who = styleDim.Render(cmp.Or(x.PushName, userOf(x.Sender))+" in ") + who
 		}
@@ -155,7 +155,7 @@ func (m *model) renderChat(width int) string {
 		}
 		lastSender = x.Sender
 		if q, ok := byID[x.ReplyTo]; ok && x.ReplyTo != "" {
-			who := "you"
+			who := "me"
 			if !q.FromMe {
 				who = cmp.Or(q.PushName, m.nameOf(q.Sender))
 			}
@@ -274,11 +274,9 @@ func (m *model) paneTitle() string {
 	case m.active == "":
 		return styleBold.Render("All activity") + styleDim.Render("   every chat, live")
 	}
-	sub := m.active
-	if strings.HasSuffix(sub, "@s.whatsapp.net") {
-		sub = "+" + userOf(sub)
-	}
-	return ansi.Truncate(styleBold.Render(m.activeName)+styleDim.Render("   "+sub), m.vp.Width, "…")
+	sub, _ := copyTarget(m.active)
+	hint := styleFaint.Render("   ctrl+y copy")
+	return ansi.Truncate(styleBold.Render(m.activeName)+styleDim.Render("   "+cmp.Or(sub, m.active))+hint, m.vp.Width, "…")
 }
 
 func (m *model) contextBar() string {
@@ -287,7 +285,7 @@ func (m *model) contextBar() string {
 	case m.editing != nil:
 		label = styleAccent.Render("✎ Editing") + styleDim.Render("  "+shortText(*m.editing))
 	case m.replyTo != nil:
-		who := "yourself"
+		who := "me"
 		if !m.replyTo.FromMe {
 			who = cmp.Or(m.replyTo.PushName, m.nameOf(m.replyTo.Sender))
 		}
@@ -373,7 +371,7 @@ func (m *model) renderSidebar(height int) string {
 		top += strings.Repeat(" ", max(1, inner-2-lipgloss.Width(top)-lipgloss.Width(right))) + right
 		preview := shortText(store.Message{Type: c.LastType, Text: c.LastText})
 		if c.LastFromMe {
-			preview = "you: " + preview
+			preview = "me: " + preview
 		}
 		rows = append(rows, row{top, ansi.Truncate(preview, inner-2, "…")})
 	}
@@ -405,7 +403,7 @@ func (m *model) nameOf(jid string) string {
 		return m.chats[i].Name
 	}
 	if m.status.JID != "" && jid == m.status.JID {
-		return "You"
+		return "Me"
 	}
 	return "+" + userOf(jid)
 }

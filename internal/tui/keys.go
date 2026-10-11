@@ -60,6 +60,8 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 		}
 		m.setFocus(next)
 		return nil
+	case "ctrl+y":
+		return m.copyNumber()
 	case "ctrl+d":
 		m.vp.HalfPageDown()
 		return nil

@@ -18,6 +18,7 @@ const tuiHelp = `Moving around
   Ctrl+J / Ctrl+K     next / previous chat (from anywhere)
   ↑ (empty input)     select messages
   Ctrl+D / Ctrl+U     scroll half a page down / up
+  Ctrl+Y              copy the open chat's number (group ID for groups)
   PgUp / PgDn         scroll
   Esc                 cancel / close / back to the input
 
@@ -53,6 +54,7 @@ var tuiCommands = []struct{ name, args, desc string }{
 	{"/groups", "", "your groups"},
 	{"/send", "<number> <text>", "one-off message"},
 	{"/file", "<path> [caption]", "send a file here"},
+	{"/copy", "", "copy this chat's number"},
 	{"/read", "", "mark this chat read"},
 	{"/pair", "<phone>", "pairing-code login"},
 	{"/help", "", "keys and commands"},
@@ -144,6 +146,8 @@ func (m *model) command(line string) tea.Cmd {
 			_, err = m.bot.SendFile(ctx, actor, chat, data, filepath.Base(path), caption, bot.SendOptions{})
 			return "", err
 		})
+	case "/copy":
+		return m.copyNumber()
 	case "/read":
 		if m.active == "" {
 			return m.setNotice("no chat open", true)

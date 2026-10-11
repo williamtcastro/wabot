@@ -482,7 +482,7 @@ curl -H "Authorization: Bearer $T" "localhost:8080/chats?limit=10"
 ]
 ```
 
-`name` is the address-book name, the group subject, `You` for your own chat, or `~ProfileName`
+`name` is the address-book name, the group subject, `Me` for your own chat, or `~ProfileName`
 when the person isn't in your contacts.
 
 ## `GET /contacts`

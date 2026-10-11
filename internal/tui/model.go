@@ -228,6 +228,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.syncCursor()
 		}
+		if i := chatIndex(m.chats, m.active); i >= 0 {
+			m.activeName = m.chats[i].Name
+		}
+		m.render(m.sel < 0 && m.vp.AtBottom())
 		return m, nil
 
 	case feedMsg:

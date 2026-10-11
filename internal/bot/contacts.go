@@ -165,7 +165,7 @@ func (b *Bot) Chats(ctx context.Context, limit int) ([]store.Chat, error) {
 	return b.Store.Chats(ctx, limit, func(chat, pushName string) string { return b.ChatName(ctx, chat, pushName) })
 }
 
-// ChatName is the best display name for a chat: group subject, "You", address-book name, ~push name, +number.
+// ChatName is the best display name for a chat: group subject, "Me", address-book name, ~push name, +number.
 func (b *Bot) ChatName(ctx context.Context, chat, pushName string) string {
 	jid, err := types.ParseJID(chat)
 	if err != nil {
@@ -178,7 +178,7 @@ func (b *Bot) ChatName(ctx context.Context, chat, pushName string) string {
 		return "group " + jid.User
 	}
 	if own := b.Client.Store.ID; own != nil && own.User == jid.User {
-		return "You"
+		return "Me"
 	}
 	if b.Client.Store.Contacts != nil {
 		if c, err := b.Client.Store.Contacts.GetContact(ctx, jid); err == nil {
