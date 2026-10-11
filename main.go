@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/mdp/qrterminal/v3"
+	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -151,6 +152,9 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 			return fmt.Errorf("-webhook-filter: %w", err)
 		}
 		b.Webhook = NewWebhook(ctx, c.webhook, c.webhookSecret, f, log)
+		if chat := q.Get("chat"); chat != "" && !strings.Contains(chat, "@") {
+			go resolveWebhookChat(ctx, b, chat)
+		}
 	}
 	defer b.Client.Disconnect()
 
@@ -329,6 +333,32 @@ func serve(ctx context.Context, b *Bot, c config) error {
 
 // lookupsPerMinute caps number checks and presence updates at 3× the send rate.
 func lookupsPerMinute(rate int) int { return rate * 3 }
+
+// resolveWebhookChat swaps a phone number in -webhook-filter for the JID WhatsApp uses
+// (e.g. with or without Brazil's 9th digit) once the bot is connected.
+func resolveWebhookChat(ctx context.Context, b *Bot, number string) {
+	if waitLoggedIn(ctx, b, 24*time.Hour) != nil {
+		return
+	}
+	var jid types.JID
+	var err error
+	for wait := 10 * time.Second; ; wait = min(wait*2, 10*time.Minute) {
+		if jid, err = b.Resolve(ctx, number); err == nil {
+			break
+		}
+		var in inputError
+		if errors.As(err, &in) {
+			b.Log.Warn("webhook filter: chat isn't on WhatsApp, keeping it as typed", "chat", number, "err", err)
+			return
+		}
+		b.Log.Warn("webhook filter: chat lookup failed, retrying", "chat", number, "err", err, "retry_in", wait)
+		if sleepUntil(ctx, time.Now().Add(wait)) != nil {
+			return
+		}
+	}
+	b.Webhook.SetChat(b.phoneJID(jid).String())
+	b.Log.Info("webhook filter chat resolved", "chat", number, "jid", b.phoneJID(jid).String())
+}
 
 func isLoopbackAddr(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)

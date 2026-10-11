@@ -409,36 +409,41 @@ type SendOptions struct {
 }
 
 func (b *Bot) SendText(ctx context.Context, actor, to, text string, opt SendOptions) (Message, error) {
-	if strings.TrimSpace(text) == "" {
-		return Message{}, badInput("text is empty")
-	}
-	jid, quote, err := b.prepare(ctx, to, opt)
-	if err != nil {
-		b.Audit(actor, "send", to, "", err)
-		return Message{}, err
-	}
-	msg := &waE2E.Message{Conversation: proto.String(text)}
-	if quote != nil {
-		msg = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(text), ContextInfo: quote}}
-	}
-	m, err := b.deliver(ctx, jid, msg, Message{Type: "text", Text: text, ReplyTo: opt.ReplyTo})
-	b.Audit(actor, "send", jid.String(), fmt.Sprintf("text, %d chars", len([]rune(text))), err)
+	return b.audited(actor, "send", to, fmt.Sprintf("text, %d chars", len([]rune(text))), func() (Message, error) {
+		if strings.TrimSpace(text) == "" {
+			return Message{}, badInput("text is empty")
+		}
+		jid, quote, err := b.prepare(ctx, to, opt)
+		if err != nil {
+			return Message{}, err
+		}
+		msg := &waE2E.Message{Conversation: proto.String(text)}
+		if quote != nil {
+			msg = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(text), ContextInfo: quote}}
+		}
+		return b.deliver(ctx, jid, msg, Message{Type: "text", Text: text, ReplyTo: opt.ReplyTo})
+	})
+}
+
+// audited runs one control action and records it in the audit log exactly once, whatever the outcome.
+func (b *Bot) audited(actor, action, target, detail string, fn func() (Message, error)) (Message, error) {
+	m, err := fn()
+	b.Audit(actor, action, cmp.Or(m.Chat, target), detail, err)
 	return m, err
 }
 
 // SendFile sends images as photos and everything else as a document.
 func (b *Bot) SendFile(ctx context.Context, actor, to string, data []byte, fileName, caption string, opt SendOptions) (Message, error) {
-	if len(data) == 0 {
-		return Message{}, badInput("file is empty")
-	}
-	jid, quote, err := b.prepare(ctx, to, opt)
-	if err != nil {
-		b.Audit(actor, "send_file", to, fileName, err)
-		return Message{}, err
-	}
-	m, err := b.sendFile(ctx, jid, quote, data, fileName, caption, opt)
-	b.Audit(actor, "send_file", jid.String(), fmt.Sprintf("%s, %d bytes", fileName, len(data)), err)
-	return m, err
+	return b.audited(actor, "send_file", to, fmt.Sprintf("%s, %d bytes", fileName, len(data)), func() (Message, error) {
+		if len(data) == 0 {
+			return Message{}, badInput("file is empty")
+		}
+		jid, quote, err := b.prepare(ctx, to, opt)
+		if err != nil {
+			return Message{}, err
+		}
+		return b.sendFile(ctx, jid, quote, data, fileName, caption, opt)
+	})
 }
 
 func (b *Bot) sendFile(ctx context.Context, jid types.JID, quote *waE2E.ContextInfo, data []byte, fileName, caption string, opt SendOptions) (Message, error) {
@@ -552,12 +557,11 @@ func (b *Bot) throttle(ctx context.Context, jid types.JID) error {
 }
 
 // sendControl sends an edit or revoke, which bypass deliver because they don't create a stored message.
-func (b *Bot) sendControl(ctx context.Context, actor, action string, jid types.JID, id string, msg *waE2E.Message) error {
+func (b *Bot) sendControl(ctx context.Context, jid types.JID, msg *waE2E.Message) error {
 	err := b.throttle(ctx, jid)
 	if err == nil {
 		_, err = b.Client.SendMessage(ctx, jid, msg)
 	}
-	b.Audit(actor, action, jid.String(), id, err)
 	return err
 }
 
@@ -605,62 +609,61 @@ func (m Message) senderJID() types.JID {
 }
 
 func (b *Bot) React(ctx context.Context, actor, chat, id, emoji string) (Message, error) {
-	target, jid, err := b.findTarget(ctx, chat, id)
-	if err != nil {
-		b.Audit(actor, "react", chat, id, err)
-		return Message{}, err
-	}
-	m, err := b.deliver(ctx, jid, b.Client.BuildReaction(jid, target.senderJID(), id, emoji), Message{Type: "reaction", Text: emoji, ReplyTo: id})
-	b.Audit(actor, "react", jid.String(), fmt.Sprintf("%s on %s", emoji, id), err)
-	return m, err
+	return b.audited(actor, "react", chat, fmt.Sprintf("%s on %s", emoji, id), func() (Message, error) {
+		target, jid, err := b.findTarget(ctx, chat, id)
+		if err != nil {
+			return Message{}, err
+		}
+		return b.deliver(ctx, jid, b.Client.BuildReaction(jid, target.senderJID(), id, emoji), Message{Type: "reaction", Text: emoji, ReplyTo: id})
+	})
 }
 
 func (b *Bot) Edit(ctx context.Context, actor, chat, id, text string) (Message, error) {
-	if strings.TrimSpace(text) == "" {
-		return Message{}, badInput("text is empty")
-	}
-	target, jid, err := b.findTarget(ctx, chat, id)
-	if err != nil {
-		b.Audit(actor, "edit", chat, id, err)
-		return Message{}, err
-	}
-	if !target.FromMe {
-		return Message{}, badInput("you can only edit your own messages")
-	}
-	if time.Since(target.Timestamp) > whatsmeow.EditWindow {
-		return Message{}, badInput("WhatsApp only allows edits within %s of sending", whatsmeow.EditWindow)
-	}
-	if target.Type != "text" {
-		return Message{}, badInput("only text messages can be edited")
-	}
-	edit := b.Client.BuildEdit(jid, id, &waE2E.Message{Conversation: proto.String(text)})
-	if err := b.sendControl(ctx, actor, "edit", jid, id, edit); err != nil {
-		return Message{}, err
-	}
-	b.applyEdit(target.Chat, id, text)
-	return b.getMessage(target.Chat, id)
+	return b.audited(actor, "edit", chat, id, func() (Message, error) {
+		if strings.TrimSpace(text) == "" {
+			return Message{}, badInput("text is empty")
+		}
+		target, jid, err := b.findTarget(ctx, chat, id)
+		switch {
+		case err != nil:
+			return Message{}, err
+		case !target.FromMe:
+			return Message{}, badInput("you can only edit your own messages")
+		case time.Since(target.Timestamp) > whatsmeow.EditWindow:
+			return Message{}, badInput("WhatsApp only allows edits within %s of sending", whatsmeow.EditWindow)
+		case target.Type != "text":
+			return Message{}, badInput("only text messages can be edited")
+		}
+		if err := b.sendControl(ctx, jid, b.Client.BuildEdit(jid, id, &waE2E.Message{Conversation: proto.String(text)})); err != nil {
+			return Message{}, err
+		}
+		b.applyEdit(target.Chat, id, text)
+		return b.getMessage(target.Chat, id)
+	})
 }
 
 func (b *Bot) Delete(ctx context.Context, actor, chat, id string) (Message, error) {
-	target, jid, err := b.findTarget(ctx, chat, id)
-	if err != nil {
-		b.Audit(actor, "delete", chat, id, err)
-		return Message{}, err
-	}
-	if !target.FromMe && !target.IsGroup {
-		return Message{}, badInput("you can only delete other people's messages in groups where you're an admin")
-	}
-	if err := b.sendControl(ctx, actor, "delete", jid, id, b.Client.BuildRevoke(jid, target.senderJID(), id)); err != nil {
-		return Message{}, err
-	}
-	b.applyDelete(target.Chat, id)
-	return b.getMessage(target.Chat, id)
+	return b.audited(actor, "delete", chat, id, func() (Message, error) {
+		target, jid, err := b.findTarget(ctx, chat, id)
+		if err != nil {
+			return Message{}, err
+		}
+		if !target.FromMe && !target.IsGroup {
+			return Message{}, badInput("you can only delete other people's messages in groups where you're an admin")
+		}
+		if err := b.sendControl(ctx, jid, b.Client.BuildRevoke(jid, target.senderJID(), id)); err != nil {
+			return Message{}, err
+		}
+		b.applyDelete(target.Chat, id)
+		return b.getMessage(target.Chat, id)
+	})
 }
 
 // MarkRead sends read receipts for the given incoming messages, or the latest 50 in the chat when ids is empty.
 func (b *Bot) MarkRead(ctx context.Context, actor, chat string, ids []string) (int, error) {
 	jid, err := b.resolveOnline(ctx, chat)
 	if err != nil {
+		b.Audit(actor, "read", chat, "", err)
 		return 0, err
 	}
 	key := b.phoneJID(jid).String()
@@ -697,9 +700,7 @@ func (b *Bot) MarkRead(ctx context.Context, actor, chat string, ids []string) (i
 		}
 		n += len(batch)
 	}
-	if n > 0 {
-		b.Audit(actor, "read", key, fmt.Sprintf("%d messages", n), nil)
-	}
+	b.Audit(actor, "read", key, fmt.Sprintf("%d messages", n), nil)
 	return n, nil
 }
 

@@ -82,7 +82,10 @@ Commands
   /file <path> [caption]    send a file to the open chat
   /read                     mark the open chat as read
   /pair <phone>             log in with a pairing code
-  /help  /quit`
+  /help  /quit
+
+Typing a command, Tab completes it (and names after /to, numbers after /send,
+paths after /file), ↑ ↓ cycle the matches.`
 
 type (
 	eventMsg  struct{ v any }
@@ -133,6 +136,151 @@ type model struct {
 	noticeErr bool
 	noticeID  int
 	openSeq   int
+
+	contactNames []string
+	dirCache     map[string][]string
+	dirLoading   string
+	loadingNames bool
+	barShown     bool
+}
+
+type contactNamesMsg []string
+
+var tuiCommands = []struct{ name, args, desc string }{
+	{"/to", "<name|number>", "open a chat"},
+	{"/all", "", "every chat, live"},
+	{"/contacts", "[search]", "address book"},
+	{"/groups", "", "your groups"},
+	{"/send", "<number> <text>", "one-off message"},
+	{"/file", "<path> [caption]", "send a file here"},
+	{"/read", "", "mark this chat read"},
+	{"/pair", "<phone>", "pairing-code login"},
+	{"/help", "", "keys and commands"},
+	{"/quit", "", "exit"},
+}
+
+// suggest refreshes the input's completions for the command being typed and resizes the layout
+// when the hint bar appears or disappears.
+func (m *model) suggest() tea.Cmd {
+	v := m.input.Value()
+	var list []string
+	var load tea.Cmd
+	cmd, arg, hasArg := strings.Cut(v, " ")
+	switch {
+	case !strings.HasPrefix(v, "/"):
+	case !hasArg:
+		for _, c := range tuiCommands {
+			if c.args != "" {
+				c.name += " "
+			}
+			list = append(list, c.name)
+		}
+	case cmd == "/to":
+		seen := map[string]bool{}
+		add := func(target string) {
+			if target != "" && !seen[target] {
+				seen[target] = true
+				list = append(list, "/to "+target)
+			}
+		}
+		for _, c := range m.chats {
+			add(chatTarget(c))
+		}
+		for _, name := range m.contactNames {
+			add(name)
+		}
+		if m.contactNames == nil && !m.loadingNames {
+			m.loadingNames = true
+			load = func() tea.Msg {
+				contacts, _ := m.bot.Contacts(context.Background(), "")
+				names := make([]string, 0, len(contacts))
+				for _, c := range contacts {
+					names = append(names, safeLine(c.Name))
+				}
+				return contactNamesMsg(names)
+			}
+		}
+	case cmd == "/send":
+		for _, c := range m.chats {
+			target := userOf(c.JID)
+			if c.IsGroup {
+				target = c.JID
+			}
+			list = append(list, "/send "+target+" ")
+		}
+	case cmd == "/file" && !strings.Contains(arg, " "):
+		dir, _ := filepath.Split(arg)
+		names, ok := m.dirCache[dir]
+		if ok {
+			list = pathSuggestions(arg, names)
+		} else if m.dirLoading != dir {
+			m.dirLoading = dir
+			load = func() tea.Msg { return dirMsg{dir, readDirNames(dir)} }
+		}
+	}
+	m.input.ShowSuggestions = true // SetSuggestions only refreshes the matches while this is on
+	m.input.SetSuggestions(list)
+	m.input.ShowSuggestions = len(list) > 0
+	if shown := m.contextBar() != ""; shown != m.barShown {
+		m.barShown = shown
+		m.layout()
+		m.render(m.sel < 0)
+	}
+	return load
+}
+
+// chatTarget is what /to needs to reopen a chat: its contact name if it has one, else its number or group JID.
+func chatTarget(c Chat) string {
+	switch {
+	case c.IsGroup:
+		return c.JID
+	case strings.HasPrefix(c.Name, "~"), strings.HasPrefix(c.Name, "+"), c.Name == "You":
+		return userOf(c.JID)
+	}
+	return c.Name
+}
+
+type dirMsg struct {
+	dir   string
+	names []string
+}
+
+// readDirNames lists a directory for /file completion (directories end in "/"); it runs off the UI loop.
+func readDirNames(dir string) []string {
+	entries, _ := os.ReadDir(cmp.Or(expandHome(dir), "."))
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name()+"/")
+		} else {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+func pathSuggestions(typed string, names []string) []string {
+	dir, base := filepath.Split(typed)
+	var out []string
+	for _, name := range names {
+		if strings.Contains(name, " ") || (strings.HasPrefix(name, ".") && !strings.HasPrefix(base, ".")) || !strings.HasPrefix(name, base) {
+			continue
+		}
+		out = append(out, "/file "+dir+name)
+		if len(out) == 200 {
+			break
+		}
+	}
+	return out
+}
+
+func expandHome(path string) string {
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, rest)
+		}
+	}
+	return path
 }
 
 func RunTUI(b *Bot) error {
@@ -243,6 +391,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vp.GotoTop()
 		return m, nil
 
+	case dirMsg:
+		if m.dirCache == nil {
+			m.dirCache = map[string][]string{}
+		}
+		m.dirCache[msg.dir], m.dirLoading = msg.names, ""
+		return m, m.suggest()
+
+	case contactNamesMsg:
+		m.contactNames, m.loadingNames = msg, false
+		return m, m.suggest()
+
 	case chatsMsg:
 		for i := range msg {
 			msg[i].Name, msg[i].LastText = safeLine(msg[i].Name), safeLine(msg[i].LastText)
@@ -334,6 +493,23 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) key(k tea.KeyMsg) tea.Cmd {
+	if m.focus == focusInput && strings.HasPrefix(m.input.Value(), "/") {
+		switch k.String() {
+		case "tab":
+			if len(m.input.MatchedSuggestions()) == 0 {
+				return nil
+			}
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(k)
+			return tea.Batch(cmd, m.suggest())
+		case "up", "down":
+			if len(m.input.MatchedSuggestions()) > 1 {
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(k)
+				return cmd
+			}
+		}
+	}
 	switch k.String() {
 	case "ctrl+c":
 		return tea.Quit
@@ -399,7 +575,7 @@ func (m *model) inputKey(k tea.KeyMsg) tea.Cmd {
 	case "enter":
 		line := strings.TrimSpace(m.input.Value())
 		m.input.SetValue("")
-		return m.submit(line)
+		return tea.Batch(m.submit(line), m.suggest())
 	case "esc":
 		switch {
 		case m.panelTitle != "":
@@ -426,7 +602,7 @@ func (m *model) inputKey(k tea.KeyMsg) tea.Cmd {
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(k)
-	return cmd
+	return tea.Batch(cmd, m.suggest())
 }
 
 func (m *model) chatsKey(k tea.KeyMsg) tea.Cmd {
@@ -651,7 +827,7 @@ func (m *model) command(line string) tea.Cmd {
 		if m.active == "" {
 			return m.setNotice("no chat open", true)
 		}
-		chat := m.active
+		chat, path := m.active, expandHome(path)
 		return m.do(func(ctx context.Context) (string, error) {
 			data, err := os.ReadFile(path)
 			if err != nil {
@@ -766,7 +942,7 @@ func (m *model) layout() {
 
 func (m *model) mainHeight() int {
 	h := m.h - 1 - 3
-	if m.replyTo != nil || m.editing != nil {
+	if m.contextBar() != "" {
 		h--
 	}
 	return h
@@ -891,8 +1067,8 @@ func (m *model) renderChat(width int) string {
 		if x.FromMe {
 			meta += " ✓"
 		}
-		if r := reacts[x.ID]; len(r) > 0 {
-			meta = joinReactions(r) + "  " + meta
+		if r := joinReactions(reacts[x.ID]); r != "" {
+			meta = "│ " + r + "  " + meta
 		}
 		wrapped := strings.Split(lipgloss.NewStyle().Width(bubbleW).Render(body), "\n")
 		for j := range wrapped {
@@ -1012,6 +1188,17 @@ func (m *model) contextBar() string {
 			who = cmp.Or(m.replyTo.PushName, m.nameOf(m.replyTo.Sender))
 		}
 		label = styleAccent.Render("↩ Replying to "+who) + styleDim.Render("  "+shortText(*m.replyTo))
+	case strings.HasPrefix(m.input.Value(), "/") && !strings.Contains(m.input.Value(), " "):
+		var hints []string
+		for _, c := range tuiCommands {
+			if strings.HasPrefix(c.name, m.input.Value()) {
+				hints = append(hints, styleKey.Render(c.name)+styleDim.Render(prefixed(" ", c.args)+"  "+c.desc))
+			}
+		}
+		if len(hints) == 0 {
+			return " " + styleErr.Render("no such command") + styleFaint.Render("  /help lists them")
+		}
+		return " " + ansi.Truncate(strings.Join(hints, styleFaint.Render("  ·  ")), m.w-24, "…") + styleFaint.Render("  tab complete · ↑↓ cycle")
 	default:
 		return ""
 	}

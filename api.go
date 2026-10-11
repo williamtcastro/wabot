@@ -3,8 +3,10 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,9 +40,11 @@ var openapiSpec []byte
 const docsPage = `<!doctype html>
 <html><head><meta charset="utf-8"><title>wabot API</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css"
+  integrity="sha384-wxLW6kwyHktdDGr6Pv1zgm/VGJh99lfUbzSn6HNHBENZlCN7W602k9VkGdxuFvPn" crossorigin="anonymous">
 </head><body><div id="ui"></div>
-<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui-bundle.js"
+  integrity="sha384-wmyclcVGX/WhUkdkATwhaK1X1JtiNrr2EoYJ+diV3vj4v6OC5yCeSu+yW13SYJep" crossorigin="anonymous"></script>
 <script>SwaggerUIBundle({url: "openapi.yaml", dom_id: "#ui"});</script>
 </body></html>`
 
@@ -139,11 +143,7 @@ func (a *api) sendText(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := cmp.Or(r.Header.Get("Idempotency-Key"), req.IdempotencyKey)
-	if len(key) > 200 {
-		writeError(w, badInput("idempotency key is longer than 200 characters"))
-		return
-	}
-	m, err := a.idem.do(r.Context(), "send:"+key, key == "", func() (Message, error) {
+	m, err := a.idem.do(r.Context(), "send", key, fingerprint(req.To, req.Text, req.ReplyTo), func() (Message, error) {
 		return a.b.SendText(r.Context(), apiActor, req.To, req.Text, SendOptions{ReplyTo: req.ReplyTo})
 	})
 	respond(w, m, err)
@@ -176,11 +176,8 @@ func (a *api) sendFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := cmp.Or(r.Header.Get("Idempotency-Key"), r.FormValue("idempotency_key"))
-	if len(key) > 200 {
-		writeError(w, badInput("idempotency key is longer than 200 characters"))
-		return
-	}
-	m, err := a.idem.do(r.Context(), "file:"+key, key == "", func() (Message, error) {
+	sum := sha256.Sum256(data)
+	m, err := a.idem.do(r.Context(), "file", key, fingerprint(to, hdr.Filename, r.FormValue("caption"), r.FormValue("reply_to"), string(sum[:])), func() (Message, error) {
 		return a.b.SendFile(r.Context(), apiActor, to, data, hdr.Filename, r.FormValue("caption"), SendOptions{ReplyTo: r.FormValue("reply_to")})
 	})
 	respond(w, m, err)
@@ -505,6 +502,13 @@ func (a *api) audit(w http.ResponseWriter, r *http.Request) {
 	respond(w, entries, err)
 }
 
+var errConflict = errors.New("idempotency key was already used for a different request")
+
+func fingerprint(parts ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
 // idempotency makes repeated requests with the same key return the first result instead of sending twice.
 type idempotency struct {
 	mu      sync.Mutex
@@ -515,16 +519,26 @@ type idemEntry struct {
 	done chan struct{}
 	msg  Message
 	err  error
+	fp   string
 	at   time.Time
 }
 
-func (s *idempotency) do(ctx context.Context, key string, skip bool, fn func() (Message, error)) (msg Message, err error) {
-	if skip {
+// do runs fn once per (scope, key). A repeat with the same request gets the first result; a repeat
+// with a different request is rejected, since silently returning the old message would hide a bug.
+func (s *idempotency) do(ctx context.Context, scope, key, fp string, fn func() (Message, error)) (msg Message, err error) {
+	if key == "" {
 		return fn()
 	}
+	if len(key) > 200 {
+		return Message{}, badInput("idempotency key is longer than 200 characters")
+	}
+	key = scope + ":" + key
 	s.mu.Lock()
 	if e, ok := s.entries[key]; ok && time.Since(e.at) < idemTTL {
 		s.mu.Unlock()
+		if e.fp != fp {
+			return Message{}, errConflict
+		}
 		select {
 		case <-e.done:
 			return e.msg, e.err
@@ -532,7 +546,7 @@ func (s *idempotency) do(ctx context.Context, key string, skip bool, fn func() (
 			return Message{}, ctx.Err()
 		}
 	}
-	e := &idemEntry{done: make(chan struct{}), at: time.Now()}
+	e := &idemEntry{done: make(chan struct{}), at: time.Now(), fp: fp}
 	s.entries[key] = e
 	if len(s.entries) > 10000 {
 		for k, old := range s.entries {
@@ -654,7 +668,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// writeError maps errors to status codes: bad input 400, missing 404, rate limit 429, anything else 502.
+// writeError maps errors to status codes: bad input 400, missing 404, key reuse 409, rate limit 429, anything else 502.
 func writeError(w http.ResponseWriter, err error) {
 	code := http.StatusBadGateway
 	var in inputError
@@ -664,6 +678,8 @@ func writeError(w http.ResponseWriter, err error) {
 		code = http.StatusBadRequest
 	case errors.Is(err, errNotFound):
 		code = http.StatusNotFound
+	case errors.Is(err, errConflict):
+		code = http.StatusConflict
 	case errors.As(err, &rl):
 		code = http.StatusTooManyRequests
 		w.Header().Set("Retry-After", strconv.Itoa(int(rl.RetryAfter.Seconds())+1))

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -39,6 +40,14 @@ type Webhook struct {
 	log    *slog.Logger
 	client *http.Client
 	queue  chan webhookJob
+	mu     sync.RWMutex
+}
+
+// SetChat replaces the filter's chat, e.g. once a phone number has been resolved to WhatsApp's JID.
+func (w *Webhook) SetChat(chat string) {
+	w.mu.Lock()
+	w.Filter.Chat = chat
+	w.mu.Unlock()
 }
 
 func NewWebhook(ctx context.Context, url, secret string, filter Filter, log *slog.Logger) *Webhook {
@@ -59,7 +68,9 @@ func NewWebhook(ctx context.Context, url, secret string, filter Filter, log *slo
 
 // Deliver queues m if it matches the filter. event is "message" or "update".
 func (w *Webhook) Deliver(event string, m Message) {
+	w.mu.RLock()
 	f := w.Filter
+	w.mu.RUnlock()
 	f.Since = 0
 	if !f.Match(m) {
 		return
