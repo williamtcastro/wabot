@@ -8,13 +8,63 @@ no shell, no package manager, just the static binary and CA certificates. The da
 docker build -t wame --build-arg VERSION=$(git describe --tags --always) .
 ```
 
-Inside the container, the API listens on `0.0.0.0:8080`, so wame refuses to start without a token
-(`WAME_TOKEN`, 16+ characters, or a token created with `wame token create`). Publish the port on
-`127.0.0.1` only and put HTTPS or an SSH tunnel in front of it (see [ADMIN.md](ADMIN.md#connecting-safely)).
+Inside the container, the API listens on `0.0.0.0:8080`, so wame refuses to start without a token:
+an owner secret in `WAME_TOKEN`, or a token created with `wame token create` (see [Tokens](#tokens)).
+Publish the port on `127.0.0.1` only and put HTTPS or an SSH tunnel in front of it (see [ADMIN.md](ADMIN.md#connecting-safely)).
 
 > [!IMPORTANT]
 > `/data` holds your WhatsApp session keys: whoever can read it can act as your account. Keep the
 > volume or folder private, and keep it out of images, git and shared backups.
+
+## Tokens
+
+There are two kinds, and both work for the API, `/mcp` and the [admin panel](ADMIN.md).
+
+### Owner secret
+
+A random string of 16+ characters that **you** make up; wame doesn't generate it. The same value
+goes to the server and to whoever connects to it:
+
+```sh
+openssl rand -hex 24                                    # prints e.g. 3f9c…e1a7
+echo "WAME_TOKEN=<that value>" > .env                   # Compose reads it from here
+docker run … -e WAME_TOKEN=<that value> … wame          # or pass it to docker run
+```
+
+It has full access and changes only when you change the server's setting, so keep it private.
+Anyone who can run `docker inspect` on the host can read it from the container's environment.
+
+### Named tokens
+
+wame generates these. They can be revoked on their own, expire, and carry narrower scopes. Create
+them on the running container (the command only touches the database, so it's safe while serving):
+
+```sh
+docker exec wame wame token create my-laptop -scopes admin -expires 720h
+docker exec wame wame token list
+docker exec wame wame token revoke my-laptop
+```
+
+The token (`wame_…`) is printed **once**; copy it right away. Then, on your laptop:
+
+```sh
+export WAME_TOKEN=wame_…
+wame admin -server https://your-server       # or through an SSH tunnel, see below
+```
+
+From the panel's Tokens tab (`n`) you can then create tokens for bots and agents, like `read` or
+`send` limited to some chats. Only the owner secret can create `admin` tokens from the panel.
+
+You can also skip the owner secret: create a named token before the first start, and the server
+starts without `WAME_TOKEN` because a token already exists.
+
+```sh
+docker run --rm -v wame-data:/data wame token create my-laptop -scopes admin -expires 720h
+docker run -d --name wame --restart unless-stopped -p 127.0.0.1:8080:8080 -v wame-data:/data wame
+```
+
+With Compose, remove the `WAME_TOKEN` line from `compose.yaml` for that (it's required there), and
+run `docker compose run --rm wame token create …` first.
 
 ## Choose where the database lives
 
