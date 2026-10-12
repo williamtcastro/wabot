@@ -1,0 +1,18 @@
+# docker compose up -d, after setting WAME_TOKEN (e.g. in a .env file next to this one).
+# First login: docker compose run --rm wame login   (or remotely: wame admin, see docs/DOCKER.md)
+services:
+  wame:
+    build: .
+    image: wame
+    restart: unless-stopped
+    environment:
+      WAME_TOKEN: ${WAME_TOKEN:?set WAME_TOKEN to an owner secret of 16+ characters}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Docker-managed volume (default). For a folder on the host instead, swap the line for
+      # "- ./data:/data" and see docs/DOCKER.md for its permissions.
+      - wame-data:/data
+
+volumes:
+  wame-data:

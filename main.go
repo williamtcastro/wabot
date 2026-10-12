@@ -204,6 +204,9 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 		if c.addr == "" {
 			c.addr = "127.0.0.1:8080"
 		}
+		if err := guardPublicAddr(b, c); err != nil {
+			return err
+		}
 		if err := b.Start(ctx); err != nil {
 			return err
 		}

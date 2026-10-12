@@ -27,3 +27,15 @@ jobs:
         run: go test -race -count=1 ./...
       - name: build
         run: CGO_ENABLED=0 go build -o /dev/null . && go build -o /dev/null ./_demo
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build image
+        run: docker build -t wame --build-arg VERSION=ci .
+      - name: smoke test
+        run: |
+          test "$(docker run --rm wame version)" = "wame ci"
+          if docker run --rm wame serve 2>err.txt; then echo "serve started without a token"; exit 1; fi
+          grep -q "without a token" err.txt

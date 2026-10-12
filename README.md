@@ -68,6 +68,9 @@ mv wame /usr/local/bin/
 
 `wame version` prints the release version, or `dev` for a local build.
 
+**Docker:** `docker compose up -d`, with the database in a Docker volume or a host folder. See
+[docs/DOCKER.md](docs/DOCKER.md).
+
 </details>
 
 ## The terminal UI
@@ -212,6 +215,7 @@ All flags and commands: [docs/CLI.md](docs/CLI.md).
 | [OpenAPI spec](docs/openapi.yaml) | for Postman, Insomnia or Bruno; also served live at `/docs` |
 | [TUI](docs/TUI.md) | layout, keys and commands |
 | [Bots](docs/BOT.md) | your own bot logic via webhook, polling or Go, verifying signatures, running as a service |
+| [Docker](docs/DOCKER.md) | the image, keeping the database in a Docker volume or a host folder, login, backups |
 | [Admin panel](docs/ADMIN.md) | `wame admin`: manage a remote server from the terminal, connecting safely |
 | [MCP](docs/MCP.md) | the MCP server: HTTP and stdio, tools, safety, client setup |
 | [Security review](docs/security/SCOPED-TOKENS.md) | the token system's threat model, findings and fixes, operational advice |
