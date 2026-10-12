@@ -8,7 +8,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 const maxMediaDownload = 100 << 20

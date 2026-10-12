@@ -1,6 +1,6 @@
 # MCP server
 
-wabot speaks the [Model Context Protocol](https://modelcontextprotocol.io), so AI agents (Claude Code,
+wame speaks the [Model Context Protocol](https://modelcontextprotocol.io), so AI agents (Claude Code,
 Claude Desktop, other MCP clients) can read and send WhatsApp messages through it. It's built on the
 official Go SDK, `github.com/modelcontextprotocol/go-sdk` v1.8.0.
 
@@ -12,11 +12,11 @@ isn't using a token.
 
 ### 1. HTTP at `/mcp` on a running server (recommended)
 
-`wabot serve` (and `wabot tui -addr …`) also serves MCP over streamable HTTP at `/mcp`:
+`wame serve` (and `wame tui -addr …`) also serves MCP over streamable HTTP at `/mcp`:
 
 ```sh
-WABOT_TOKEN=$(openssl rand -hex 24) ./wabot serve      # or use tokens only, see below
-./wabot token create claude -scopes read -chats 5511999999999 -expires 720h
+WAME_TOKEN=$(openssl rand -hex 24) ./wame serve      # or use tokens only, see below
+./wame token create claude -scopes read -chats 5511999999999 -expires 720h
 ```
 
 - Each request carries `Authorization: Bearer <token>`. That token's scopes and chat allowlist are
@@ -32,20 +32,20 @@ Failed logins on `/mcp` count toward the same per-IP block as the rest of the AP
 charge the token's own per-token rate (one budget shared with its HTTP calls). The global limits apply
 too.
 
-### 2. stdio: `wabot mcp`
+### 2. stdio: `wame mcp`
 
 ```sh
-wabot mcp                     # read-only: status, list_chats, read_messages, search_messages, find_contact
-wabot mcp -allow-send         # also send_message, react, mark_read
-wabot mcp -mcp-token wabot_…  # act as that API token (its scopes and chat allowlist)
+wame mcp                     # read-only: status, list_chats, read_messages, search_messages, find_contact
+wame mcp -allow-send         # also send_message, react, mark_read
+wame mcp -mcp-token wame_…  # act as that API token (its scopes and chat allowlist)
 ```
 
-- `-mcp-token` (or `WABOT_MCP_TOKEN`) must be a token created with `wabot token create` or `POST /tokens`.
+- `-mcp-token` (or `WAME_MCP_TOKEN`) must be a token created with `wame token create` or `POST /tokens`.
   The owner secret doesn't work there. Every tool call re-checks the token, so revoking it or letting it
-  expire takes effect at the next call, even in a `wabot mcp` that's already running.
-- It holds **its own WhatsApp connection**, so it can't run alongside `wabot serve` or `wabot tui` on the
+  expire takes effect at the next call, even in a `wame mcp` that's already running.
+- It holds **its own WhatsApp connection**, so it can't run alongside `wame serve` or `wame tui` on the
   same database: they'd kick each other off. If you already run the server, use `/mcp` instead.
-- It needs an existing login (`wabot login`).
+- It needs an existing login (`wame login`).
 - stdout carries the protocol. App logs go to stderr (or `-log-file`), and whatsmeow's logs are off.
 - All global flags apply (`-db`, `-rate`, …). Auto-replies stay on unless you pass `-autoreply=false`.
 
@@ -93,17 +93,17 @@ trying again".
 HTTP (server already running):
 
 ```sh
-claude mcp add --transport http wabot http://127.0.0.1:8080/mcp \
-  --header "Authorization: Bearer $WABOT_TOKEN"
+claude mcp add --transport http wame http://127.0.0.1:8080/mcp \
+  --header "Authorization: Bearer $WAME_TOKEN"
 ```
 
-Use a token made for the agent (`wabot token create claude …`) rather than the owner secret.
+Use a token made for the agent (`wame token create claude …`) rather than the owner secret.
 
 stdio:
 
 ```sh
-claude mcp add wabot -- wabot mcp                  # read-only
-claude mcp add wabot -- wabot mcp -allow-send
+claude mcp add wame -- wame mcp                  # read-only
+claude mcp add wame -- wame mcp -allow-send
 ```
 
 ### Claude Desktop
@@ -114,10 +114,10 @@ use your shell's `PATH`:
 ```json
 {
   "mcpServers": {
-    "wabot": {
-      "command": "/usr/local/bin/wabot",
+    "wame": {
+      "command": "/usr/local/bin/wame",
       "args": ["mcp"],
-      "env": { "WABOT_DB": "/Users/maria/.config/wabot/wabot.db" }
+      "env": { "WAME_DB": "/Users/maria/.config/wame/wame.db" }
     }
   }
 }
@@ -129,10 +129,10 @@ To reach `/mcp` on a running server from Desktop, bridge it with
 ```json
 {
   "mcpServers": {
-    "wabot": {
+    "wame": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "http://127.0.0.1:8080/mcp", "--header", "Authorization: Bearer ${WABOT_AGENT_TOKEN}"],
-      "env": { "WABOT_AGENT_TOKEN": "wabot_…" }
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:8080/mcp", "--header", "Authorization: Bearer ${WAME_AGENT_TOKEN}"],
+      "env": { "WAME_AGENT_TOKEN": "wame_…" }
     }
   }
 }

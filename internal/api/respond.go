@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/williamtcastro/wabot/internal/bot"
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {

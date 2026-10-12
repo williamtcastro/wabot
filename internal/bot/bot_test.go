@@ -19,7 +19,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 const (
@@ -31,7 +31,7 @@ const (
 
 func newTestBot(t *testing.T) *Bot {
 	t.Helper()
-	b, err := New(context.Background(), filepath.Join(t.TempDir(), "wabot.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	b, err := New(context.Background(), filepath.Join(t.TempDir(), "wame.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,8 +275,8 @@ func TestWebhookSignsAndFilters(t *testing.T) {
 		if !strings.Contains(body, `"id":"W1"`) || strings.Contains(body, "raw") {
 			t.Fatalf("body = %s", body)
 		}
-		want := "sha256=" + Sign("s3cret", r.Header.Get("X-Wabot-Timestamp"), []byte(body))
-		if r.Header.Get("X-Wabot-Signature") != want || r.Header.Get("X-Wabot-Event") != "message" {
+		want := "sha256=" + Sign("s3cret", r.Header.Get("X-Wame-Timestamp"), []byte(body))
+		if r.Header.Get("X-Wame-Signature") != want || r.Header.Get("X-Wame-Event") != "message" {
 			t.Fatalf("headers = %v", r.Header)
 		}
 	case <-time.After(5 * time.Second):

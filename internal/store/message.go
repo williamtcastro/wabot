@@ -68,7 +68,7 @@ func (m Message) MediaFileName() string {
 			ext = exts[0]
 		}
 	}
-	return fmt.Sprintf("wabot-%s-%d%s", m.Type, m.Seq, ext)
+	return fmt.Sprintf("wame-%s-%d%s", m.Type, m.Seq, ext)
 }
 
 var extByType = map[string]string{

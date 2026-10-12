@@ -13,7 +13,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 // findTarget looks up a stored message for react/edit/delete/read.

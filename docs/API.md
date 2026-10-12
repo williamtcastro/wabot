@@ -43,9 +43,9 @@ Base URL: whatever you passed to `-addr` (default `http://127.0.0.1:8080` for `s
 
 Every API route needs a scope (below). Who you are is decided by the request's token:
 
-- **API tokens** (recommended): created with `wabot token create` or `POST /tokens`, each with its own
+- **API tokens** (recommended): created with `wame token create` or `POST /tokens`, each with its own
   scopes, optional chat allowlist, send rate and expiry. Give every agent, script or bot its own.
-- **The owner secret**: `WABOT_TOKEN` (or `-token`), at least 16 characters. It has every scope and
+- **The owner secret**: `WAME_TOKEN` (or `-token`), at least 16 characters. It has every scope and
   no limits beyond the global ones. Generate it with `openssl rand -hex 24` and keep it for yourself.
 - **Token-less local mode**: only while there's no owner secret **and no token has ever been
   created**. See [below](#token-less-local-mode).
@@ -61,12 +61,12 @@ clients that can't set headers (a browser tab, `EventSource`, `<img>`), `?token=
 on **`GET /events`, `GET /qr` and `GET /media/{seq}` only**. Anywhere else a query token is rejected
 (401). Tokens in URLs end up in logs and history, so prefer the header.
 
-The examples below use `$T` for a token: `T=wabot_…` (or your owner secret).
+The examples below use `$T` for a token: `T=wame_…` (or your owner secret).
 
 `/docs` and `/openapi.yaml` are always public. `/mcp` serves the [MCP server](MCP.md) with the same
 tokens.
 
-Prefer the environment variables (`WABOT_TOKEN`, `WABOT_WEBHOOK_SECRET`) over the flags for
+Prefer the environment variables (`WAME_TOKEN`, `WAME_WEBHOOK_SECRET`) over the flags for
 secrets: command-line flags are visible to other users in `ps`.
 
 ### Token-less local mode
@@ -89,10 +89,10 @@ There's no way back to token-less mode short of deleting the rows in `wabot_toke
 
 ### Format and storage
 
-Tokens look like `wabot_<id>_<secret>`: an 8-character id and 43 characters of random secret (256
+Tokens look like `wame_<id>_<secret>`: an 8-character id and 43 characters of random secret (256
 bits). Only a SHA-256 hash is stored, in `wabot_tokens`. The plaintext is shown **once**, when the
-token is created; it can't be recovered. The `wabot_` prefix makes leaked tokens easy to scan for
-(`wabot_[a-z2-7]{8}_[A-Za-z0-9_-]{43}`).
+token is created; it can't be recovered. The `wame_` prefix makes leaked tokens easy to scan for
+(`wame_[a-z2-7]{8}_[A-Za-z0-9_-]{43}`).
 
 Names are 1–40 characters (`a-z`, `0-9`, `.`, `_`, `-`), unique, and never reused, even after
 revocation. `api`, `owner`, `local`, `tui`, `cli`, `autoreply` and `whatsapp` are reserved, because
@@ -145,10 +145,10 @@ A missing scope is 403 `this token lacks the <scope> scope`.
 
 - **Rate**: each token has its own send limit per minute, **10 by default**, on top of the global
   [limits](#rate-limiting). It counts sends, files, reactions, edits, deletes, read receipts and
-  typing. `wabot token create -rate 0`, or `"rate": 0` over the API, means global limit only.
+  typing. `wame token create -rate 0`, or `"rate": 0` over the API, means global limit only.
   Over the limit (more than 30 s wait) → 429.
 - **Expiry**: `-expires 720h` / `"expires_in": "720h"`. Expired tokens get 401 `token expired`.
-- **Revocation**: `wabot token revoke NAME` or `DELETE /tokens/{name}`. It takes effect on the next
+- **Revocation**: `wame token revoke NAME` or `DELETE /tokens/{name}`. It takes effect on the next
   request, and open `/events` and `/messages/wait` connections close within 10 seconds. Revoking a
   token also revokes every token it created, recursively. Revoked tokens get 401 `token revoked`.
 - **Streams**: at most 4 open `/events` + `/messages/wait` connections per token; more get 429.
@@ -208,7 +208,7 @@ the `message` and `update` SSE events and the webhook:
 
 | Field | |
 |---|---|
-| `seq` | monotonic number assigned when wabot stores the message. Use it as a cursor (`since`) |
+| `seq` | monotonic number assigned when wame stores the message. Use it as a cursor (`since`) |
 | `id` | WhatsApp message ID. Unique within a chat; use it with `reply_to`, `/react`, `/edit`, `/delete`, `/read` |
 | `chat` | the conversation: the person's JID in a 1:1 chat, the group JID in a group |
 | `sender` | who wrote it. In groups that's the person, not the group |
@@ -311,7 +311,7 @@ On the phone: **Linked devices → Link a device → Link with phone number inst
 
 ## `POST /logout`
 
-Unlinks the device from your phone and wipes the session from `wabot.db`. You'll need to
+Unlinks the device from your phone and wipes the session from `wame.db`. You'll need to
 log in again afterwards (restart the process to get a new QR). Returns `{"ok": true}`.
 
 ## `POST /send`
@@ -403,9 +403,9 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/delete \
 ```
 
 Deletes the message for everyone. You can delete your own messages, and other people's
-messages only in groups where you're an admin (wabot doesn't check admin rights; WhatsApp
+messages only in groups where you're an admin (wame doesn't check admin rights; WhatsApp
 does). Deleting someone else's message in a 1:1 chat is a 400. Returns the updated Message
-with `deleted: true` and empty `text`. wabot also drops its stored copy of the original message,
+with `deleted: true` and empty `text`. wame also drops its stored copy of the original message,
 so its media can't be downloaded afterwards (404) and it can't be quoted. Counts against the
 rate limit.
 
@@ -440,7 +440,7 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/typing \
 the indicator by itself after a while. Returns `{"ok": true}`. Each call counts against the
 number-lookup limit (see [Rate limiting](#rate-limiting)).
 
-WhatsApp only relays typing indicators while the account is "available". Unless wabot runs with
+WhatsApp only relays typing indicators while the account is "available". Unless wame runs with
 `-online`, it switches to available while any chat shows an indicator and back to unavailable
 once every indicator is `paused` or 25 seconds old, so a client that never sends `paused` can't
 leave you online.
@@ -516,7 +516,7 @@ data: {"connected":true,"logged_in":true,"state":"connected", …}
 
 | Event | When | Notes |
 |---|---|---|
-| `message` | a new message is stored (incoming, sent from your phone, or sent through wabot) | carries `id: <seq>`; filtered |
+| `message` | a new message is stored (incoming, sent from your phone, or sent through wame) | carries `id: <seq>`; filtered |
 | `update` | a stored message is edited or deleted, by you or by someone else | the whole updated Message; filtered (except `since`); no `id`, not replayed |
 | `status` | connection or login state changes | a Status object; not filtered |
 
@@ -563,7 +563,7 @@ curl -H "Authorization: Bearer $T" -OJ localhost:8080/media/1042
 Images (except SVG), audio, video and PDF are served `inline` with their original
 `Content-Type`. Everything else is served as `application/octet-stream` with
 `Content-Disposition: attachment`, so a browser downloads it instead of rendering it. The file
-name comes from the message, or is `wabot-<type>-<seq>.<ext>` when there isn't one. Every
+name comes from the message, or is `wame-<type>-<seq>.<ext>` when there isn't one. Every
 response also has `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox;
 default-src 'none'` and `Referrer-Policy: no-referrer`.
 
@@ -573,7 +573,7 @@ default-src 'none'` and `Referrer-Policy: no-referrer`.
 | 404 | unknown `seq`, the message has no media, or it was deleted |
 | 410 | WhatsApp no longer has the file (it answered 403, 404 or 410; media expires on their servers after a while) |
 
-Media is fetched from WhatsApp on each request; wabot doesn't keep a copy.
+Media is fetched from WhatsApp on each request; wame doesn't keep a copy.
 
 ## `GET /chats`
 
@@ -612,7 +612,7 @@ shows as `group <id>` until then.
 `unread` counts incoming messages (not reactions, not deleted) stored after the chat's read
 position. The read position moves forward when:
 
-- you send a message in the chat (through wabot),
+- you send a message in the chat (through wame),
 - you open the chat in the TUI (locally, even when offline),
 - you call `POST /read` (without ids, the whole chat),
 - you read the chat on your phone or another linked device (WhatsApp's "read-self" receipts).
@@ -659,7 +659,7 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/check \
 
 ## `GET /audit`
 
-Control actions taken through wabot, newest first: sends, files, reactions, edits, deletes,
+Control actions taken through wame, newest first: sends, files, reactions, edits, deletes,
 read receipts, pairing and logout, plus WhatsApp logging the device out. Every send, file,
 reaction, edit and delete attempt is recorded exactly once, including ones rejected for bad
 input (`ok: false` with the error). Message text is never stored here.
@@ -694,7 +694,7 @@ input (`ok: false` with the error). Message text is never stored here.
 ```
 
 `actor` is the token's name for API and MCP calls (`api` for the owner secret and token-less
-mode, `mcp` for `wabot mcp` without a token), or `tui`, `cli`, `autoreply` or `whatsapp`.
+mode, `mcp` for `wame mcp` without a token), or `tui`, `cli`, `autoreply` or `whatsapp`.
 `action` is `send`, `send_file`, `react`, `edit`, `delete`, `read`, `pair`, `logout`,
 `logged_out`, `token_create` or `token_revoke` (for the token ones, `target` is the token name and
 `detail` the requested scopes). See
@@ -744,7 +744,7 @@ Response `201`, the only time the plaintext token is shown:
 
 ```json
 {
-  "token": "wabot_k3x7q2ma_…",
+  "token": "wame_k3x7q2ma_…",
   "details": { "id": "k3x7q2ma", "name": "support-bot", "scopes": ["read", "send"], "…": "…" },
   "note": "store this token now; it can't be shown again"
 }
@@ -752,7 +752,7 @@ Response `201`, the only time the plaintext token is shown:
 
 When the caller is a **token** (not the owner secret or token-less mode):
 
-- it can't create `admin` tokens (403); use `wabot token create` or the owner secret for that;
+- it can't create `admin` tokens (403); use `wame token create` or the owner secret for that;
 - the new token gets `created_by: <caller's name>`, can't expire later than the caller, and is revoked
   when the caller is revoked.
 
@@ -774,9 +774,9 @@ the audit log stays readable. Requires `admin`.
 ## Rate limiting
 
 Sending many messages quickly is the most common way automated WhatsApp numbers get banned.
-wabot spaces out everything it sends: texts, files, reactions, edits, deletes and auto-replies.
+wame spaces out everything it sends: texts, files, reactions, edits, deletes and auto-replies.
 
-- `-rate N` (default 20, env `WABOT_RATE`): at most N messages in any rolling minute. `0` turns
+- `-rate N` (default 20, env `WAME_RATE`): at most N messages in any rolling minute. `0` turns
   this cap off.
 - `-chat-gap D` (default `1s`): at least this long between two messages to the same chat.
   `0` turns it off.
@@ -799,33 +799,33 @@ gets accounts flagged.
 10 s per chat. Replies over that budget are dropped, not queued, so a flood of `!ping` can't
 fill the send queue. They run in the background and don't hold up incoming messages.
 
-**Presence.** By default wabot tells WhatsApp the account is "unavailable", so your phone keeps
+**Presence.** By default wame tells WhatsApp the account is "unavailable", so your phone keeps
 showing notifications. `-online` marks it "available" while connected instead.
 
 ## Webhook
 
-With `-webhook URL`, wabot `POST`s each newly stored message to `URL` as a Message JSON body,
+With `-webhook URL`, wame `POST`s each newly stored message to `URL` as a Message JSON body,
 and each edit or delete of a stored message as an update.
 
 What gets delivered:
 
 - incoming messages, and messages you type on your phone (`from_me: true`)
-- **not** messages sent through wabot itself (API, TUI, CLI, auto-replies)
+- **not** messages sent through wame itself (API, TUI, CLI, auto-replies)
 - **not** duplicates WhatsApp sends again, protocol messages, or history-sync imports
-- edits and deletes, as `X-Wabot-Event: update` with the updated Message
+- edits and deletes, as `X-Wame-Event: update` with the updated Message
 
 Headers on every request:
 
 | Header | |
 |---|---|
 | `Content-Type` | `application/json` |
-| `X-Wabot-Event` | `message` or `update` |
-| `X-Wabot-Delivery` | unique ID for this delivery, the same on every retry. Use it to dedupe |
-| `X-Wabot-Timestamp` | Unix seconds when this attempt was sent |
-| `X-Wabot-Signature` | `sha256=<hex>`, only with `-webhook-secret` |
+| `X-Wame-Event` | `message` or `update` |
+| `X-Wame-Delivery` | unique ID for this delivery, the same on every retry. Use it to dedupe |
+| `X-Wame-Timestamp` | Unix seconds when this attempt was sent |
+| `X-Wame-Signature` | `sha256=<hex>`, only with `-webhook-secret` |
 
 **Signature.** With `-webhook-secret S`, the signature is
-`hex(HMAC-SHA256(S, "<X-Wabot-Timestamp>.<raw body>"))`. Verify it with a constant-time
+`hex(HMAC-SHA256(S, "<X-Wame-Timestamp>.<raw body>"))`. Verify it with a constant-time
 comparison and reject old timestamps. [BOT.md](BOT.md#verifying-webhook-signatures) has
 Python and Node code.
 
@@ -841,7 +841,7 @@ gaps, use `/messages/wait` or `/events` with a cursor instead, or as a backfill.
 **Filter.** `-webhook-filter` takes the [filter](#filters) syntax as a query string:
 
 ```sh
-./wabot serve -webhook https://example.com/hook -webhook-secret "$SECRET" \
+./wame serve -webhook https://example.com/hook -webhook-secret "$SECRET" \
   -webhook-filter "type=text,image&from_me=false"
 ```
 

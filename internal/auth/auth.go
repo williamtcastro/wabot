@@ -1,4 +1,4 @@
-// Package auth issues and verifies wabot API tokens and decides what each one may do.
+// Package auth issues and verifies wame API tokens and decides what each one may do.
 package auth
 
 import (
@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 type Scope string
@@ -27,7 +27,10 @@ const (
 )
 
 // Prefix starts every issued token, so leaked tokens are easy to spot and to scan for.
-const Prefix = "wabot_"
+const Prefix = "wame_"
+
+// legacyPrefix started tokens issued before the rename; they keep working.
+const legacyPrefix = "wabot_"
 
 var (
 	ErrUnauthorized = errors.New("unauthorized")
@@ -49,7 +52,7 @@ type Principal struct {
 	Expires time.Time
 }
 
-// Owner is the all-powerful principal for the -token / WABOT_TOKEN secret and token-less local use.
+// Owner is the all-powerful principal for the -token / WAME_TOKEN secret and token-less local use.
 func Owner() Principal { return Principal{Name: "api", Scopes: []Scope{Admin}} }
 
 // Has reports whether p holds scope s. Admin implies every scope.
@@ -96,7 +99,7 @@ type Request struct {
 // use up the whole global budget.
 const DefaultRate = 10
 
-// MinOwnerSecret is the shortest -token / WABOT_TOKEN accepted, since it can be guessed online.
+// MinOwnerSecret is the shortest -token / WAME_TOKEN accepted, since it can be guessed online.
 const MinOwnerSecret = 16
 
 // Issue creates a token and returns its plaintext, which is never stored and can't be shown again.
@@ -210,7 +213,9 @@ func (a *Authenticator) Authenticate(presented string) (Principal, error) {
 func tokenID(presented string) (string, bool) {
 	rest, ok := strings.CutPrefix(presented, Prefix)
 	if !ok {
-		return "", false
+		if rest, ok = strings.CutPrefix(presented, legacyPrefix); !ok {
+			return "", false
+		}
 	}
 	id, secret, ok := strings.Cut(rest, "_")
 	return id, ok && len(id) == 8 && secret != ""
@@ -236,7 +241,7 @@ func (a *Authenticator) touch(id string) {
 // CheckOwnerSecret rejects owner secrets short enough to guess over the network.
 func CheckOwnerSecret(s string) error {
 	if s != "" && len(s) < MinOwnerSecret {
-		return fmt.Errorf("the API token (-token / WABOT_TOKEN) must be at least %d characters; generate one with: openssl rand -hex 24", MinOwnerSecret)
+		return fmt.Errorf("the API token (-token / WAME_TOKEN) must be at least %d characters; generate one with: openssl rand -hex 24", MinOwnerSecret)
 	}
 	return nil
 }

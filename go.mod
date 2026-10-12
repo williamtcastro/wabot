@@ -1,4 +1,4 @@
-module github.com/williamtcastro/wabot
+module github.com/williamtcastro/wame
 
 go 1.26.7
 

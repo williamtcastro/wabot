@@ -11,7 +11,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 func newStore(t *testing.T) *store.Store {
@@ -130,5 +130,17 @@ func TestF2RequiredFailsClosed(t *testing.T) {
 	}
 	if !a.Required() {
 		t.Fatal("a database error must make tokens required (fail closed)")
+	}
+}
+
+func TestTokensFromBeforeTheRenameStillWork(t *testing.T) {
+	st := newStore(t)
+	plain := "wabot_abcdefgh_c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0"
+	if err := st.InsertToken(store.Token{ID: "abcdefgh", Name: "old-agent", Hash: hash(plain), Scopes: []string{"read"}, Created: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := (&Authenticator{Store: st}).Authenticate(plain)
+	if err != nil || p.Name != "old-agent" {
+		t.Fatalf("wabot_ token = %+v, %v", p, err)
 	}
 }

@@ -12,7 +12,7 @@ deletes already applied, day markers, a size budget, and a cursor so the next ca
 what's new.
 
 Non-goals: summarizing (that's the LLM's job), transcribing voice notes or describing images
-(no model calls inside wabot), cross-chat context, any change to `/messages`.
+(no model calls inside wame), cross-chat context, any change to `/messages`.
 
 ## Endpoint
 
@@ -42,9 +42,9 @@ a prompt as is:
 
 | Header | |
 |---|---|
-| `X-Wabot-Next-Since` | highest `seq` covered; pass it as `since` next time |
-| `X-Wabot-Truncated` | `0`, or how many messages were dropped to fit `budget` |
-| `X-Wabot-Chat` | the resolved chat JID |
+| `X-Wame-Next-Since` | highest `seq` covered; pass it as `since` next time |
+| `X-Wame-Truncated` | `0`, or how many messages were dropped to fit `budget` |
+| `X-Wame-Chat` | the resolved chat JID |
 
 ```
 Chat with Maria (+5511999999999). Times in America/Sao_Paulo.
@@ -130,7 +130,7 @@ Group "Family" (120363012345678901@g.us), 12 members. Times in America/Sao_Paulo
 - A single message longer than a quarter of the budget is clipped in the middle with
   `… [N chars cut] …`.
 - When anything is dropped, the transcript starts with `[… N earlier messages not shown]` and
-  `X-Wabot-Truncated` / `truncated` say how many.
+  `X-Wame-Truncated` / `truncated` say how many.
 - Reply excerpts stay at 80 characters regardless, since they're what keeps a clipped window
   understandable.
 - Without `budget`, `limit` is the only cap.
@@ -165,11 +165,11 @@ Group "Family" (120363012345678901@g.us), 12 members. Times in America/Sao_Paulo
 
 ## MCP
 
-An MCP server now exists ([MCP.md](../MCP.md)): `/mcp` on `serve` and `wabot mcp` on stdio, with
+An MCP server now exists ([MCP.md](../MCP.md)): `/mcp` on `serve` and `wame mcp` on stdio, with
 `list_chats`, `read_messages`, `search_messages` and send tools, using the same scopes and allowlists.
 `Bot.Context` would add to it:
 
-- **Resource** `wabot://chat/{jid}/context`: the plain-text transcript with default options.
+- **Resource** `wame://chat/{jid}/context`: the plain-text transcript with default options.
   Resource list = `GET /chats` filtered by the token's allowlist.
 - **Tool** `get_chat_context {chat, limit?, since?, budget?}` returning the text variant and
   `next_since`.
@@ -177,7 +177,7 @@ An MCP server now exists ([MCP.md](../MCP.md)): `/mcp` on `serve` and `wabot mcp
   draft-creating tool may be a safer default for agents than sending directly.
 
 Both the HTTP and stdio servers live in `internal/mcpserver`, so a new tool there is available on both.
-`wabot mcp` opens the DB and its own WhatsApp connection today; a thin stdio client of a running
+`wame mcp` opens the DB and its own WhatsApp connection today; a thin stdio client of a running
 `serve` remains an open idea.
 
 ## Privacy

@@ -1,9 +1,9 @@
 # TUI
 
 ```sh
-./wabot tui                                    # terminal only
-./wabot tui -addr 127.0.0.1:8080               # also serve the HTTP API from the same process
-WABOT_TOKEN=change-me-to-a-long-secret ./wabot tui -addr :8080  # other addresses need a token
+./wame tui                                    # terminal only
+./wame tui -addr 127.0.0.1:8080               # also serve the HTTP API from the same process
+WAME_TOKEN=change-me-to-a-long-secret ./wame tui -addr :8080  # other addresses need a token
 ```
 
 Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea),
@@ -67,8 +67,8 @@ The focused panel has a green border.
   for 5 seconds. On the right, a dot shows the connection: green with your number when
   connected and logged in, red with the state otherwise.
 
-The chat list comes from messages stored in the database (`~/.config/wabot/wabot.db` by default), so it fills up as you use the bot.
-Right after a fresh `wabot login`, WhatsApp also sends a batch of recent conversations, which
+The chat list comes from messages stored in the database (`~/.config/wame/wame.db` by default), so it fills up as you use the bot.
+Right after a fresh `wame login`, WhatsApp also sends a batch of recent conversations, which
 are imported automatically.
 
 ## Unread
@@ -80,7 +80,7 @@ read when:
 - you open it in the TUI. This is saved locally right away, even when offline;
 - you send a message in it;
 - you run `/read` (or a client calls `POST /read`);
-- you read it on your phone or another linked device (WhatsApp tells wabot through "read-self"
+- you read it on your phone or another linked device (WhatsApp tells wame through "read-self"
   receipts).
 
 When you open a chat that has unread messages, a `── 2 new messages ──` divider appears above the
@@ -144,7 +144,7 @@ Details:
   anywhere, without changing focus. When the chat list is focused they step from the highlighted
   chat instead (and move the highlight with it). Going up past the first chat opens **All
   activity**. While you're typing a command with completions, they cycle the completions instead
-  (see [Autocomplete](#autocomplete)). Many terminals send `Ctrl+J` as a line feed; wabot tells it
+  (see [Autocomplete](#autocomplete)). Many terminals send `Ctrl+J` as a line feed; wame tells it
   apart from `Enter`, so `Enter` still sends.
 - **Scrolling.** `Ctrl+D` / `Ctrl+U` scroll the conversation (or an open panel) half a page down /
   up whatever is focused; `PgDn` / `PgUp` scroll a full page. They don't edit the input.
@@ -214,11 +214,11 @@ in the audit log with actor `tui` (including `/pair`).
 
 ## Notes
 
-- Only one process can use a session at a time. Stop `wabot serve` before starting the TUI,
-  or run `wabot tui -addr 127.0.0.1:8080` to get both.
-- Logs are silenced in the TUI so they don't mess up the screen. Pass `-log-file wabot.log` to
+- Only one process can use a session at a time. Stop `wame serve` before starting the TUI,
+  or run `wame tui -addr 127.0.0.1:8080` to get both.
+- Logs are silenced in the TUI so they don't mess up the screen. Pass `-log-file wame.log` to
   keep the app logs (HTTP requests, actions, webhook deliveries). whatsmeow's own logs stay off;
-  to see them, run `wabot serve -debug` with the same `-db` instead.
+  to see them, run `wame serve -debug` with the same `-db` instead.
 - File paths in `/file` can't contain spaces.
 - New commands go in `tuiCommands`, `tuiHelp` (in `internal/tui/commands.go`) and this file, so autocomplete,
   the hint bar and `/help` stay in sync.

@@ -18,10 +18,10 @@ import (
 	"go.mau.fi/whatsmeow"
 	"rsc.io/qr"
 
-	"github.com/williamtcastro/wabot/docs"
-	"github.com/williamtcastro/wabot/internal/auth"
-	"github.com/williamtcastro/wabot/internal/bot"
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/docs"
+	"github.com/williamtcastro/wame/internal/auth"
+	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 const (
@@ -31,7 +31,7 @@ const (
 )
 
 const docsPage = `<!doctype html>
-<html><head><meta charset="utf-8"><title>wabot API</title>
+<html><head><meta charset="utf-8"><title>wame API</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.17.14/swagger-ui.css"
   integrity="sha384-wxLW6kwyHktdDGr6Pv1zgm/VGJh99lfUbzSn6HNHBENZlCN7W602k9VkGdxuFvPn" crossorigin="anonymous">

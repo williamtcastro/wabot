@@ -9,8 +9,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/williamtcastro/wabot/internal/bot"
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 const tuiHelp = `Moving around

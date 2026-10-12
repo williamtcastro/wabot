@@ -118,7 +118,7 @@ Chat allowlists apply everywhere: a token never sees drafts for chats outside it
 - SSE: new event types on `/events`, opt-in with `events=draft`: `draft` with the Draft object on
   every status change. Filtered by `chat`. Delivered to tokens with `approve`, or `drafts` for
   their own.
-- Webhook: `X-Wabot-Event: draft`, same body, signed like messages. Off unless
+- Webhook: `X-Wame-Event: draft`, same body, signed like messages. Off unless
   `-webhook-events` includes `draft` (so existing receivers don't get a new body shape).
 - In-process: `bot.DraftChanged{Draft}` through `Bot.publish`, which the TUI listens to.
 

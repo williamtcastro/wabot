@@ -4,7 +4,7 @@ import (
 	"cmp"
 	"time"
 
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 // Audit records a control action in the wabot_audit table and the log. Message text is never stored.

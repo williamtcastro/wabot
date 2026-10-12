@@ -17,12 +17,12 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/williamtcastro/wabot/internal/auth"
+	"github.com/williamtcastro/wame/internal/auth"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
-	"github.com/williamtcastro/wabot/docs"
-	"github.com/williamtcastro/wabot/internal/bot"
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/docs"
+	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 const (
@@ -33,7 +33,7 @@ const (
 
 func newTestBot(t *testing.T) *bot.Bot {
 	t.Helper()
-	b, err := bot.New(context.Background(), filepath.Join(t.TempDir(), "wabot.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	b, err := bot.New(context.Background(), filepath.Join(t.TempDir(), "wame.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestTokenAuth(t *testing.T) {
 		{"/status", map[string]string{"Authorization": "bearer s3cret"}, 200},
 		{"/status", map[string]string{"Authorization": "s3cret"}, 401},
 		{"/status?token=s3cret", nil, 401},
-		{"/qr?token=s3cret", map[string]string{"Host": "wabot.example"}, 404},
+		{"/qr?token=s3cret", map[string]string{"Host": "wame.example"}, 404},
 		{"/status?token=wrong", map[string]string{"Authorization": "Bearer s3cret"}, 200},
 		{"/messages", map[string]string{"Authorization": "Bearer s3cret"}, 200},
 		{"/docs", nil, 200},
@@ -109,7 +109,7 @@ func TestLocalOnlyWithoutToken(t *testing.T) {
 		{map[string]string{"Host": "localhost:8080"}, 200},
 		{map[string]string{"Host": "[::1]:8080"}, 200},
 		{map[string]string{"Host": "localhost:8080", "Origin": "http://localhost:8080"}, 200},
-		{map[string]string{"Host": "wabot.example:8080"}, 403},
+		{map[string]string{"Host": "wame.example:8080"}, 403},
 		{map[string]string{"Host": "192.168.0.10:8080"}, 403},
 		{map[string]string{"Origin": "http://evil.example"}, 403},
 		{map[string]string{"Origin": "null"}, 403},
@@ -123,7 +123,7 @@ func TestLocalOnlyWithoutToken(t *testing.T) {
 			t.Errorf("403 body = %s", w.Body)
 		}
 	}
-	if w := do(h, "GET", "/docs", map[string]string{"Host": "wabot.example"}); w.Code != 200 {
+	if w := do(h, "GET", "/docs", map[string]string{"Host": "wame.example"}); w.Code != 200 {
 		t.Errorf("/docs is public, got %d", w.Code)
 	}
 }

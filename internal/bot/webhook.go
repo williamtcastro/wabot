@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 const (
@@ -33,7 +33,7 @@ type webhookJob struct {
 }
 
 // Webhook POSTs messages to a URL with retries and an optional HMAC signature.
-// Delivery is at-least-once and unordered; receivers should dedupe on X-Wabot-Delivery.
+// Delivery is at-least-once and unordered; receivers should dedupe on X-Wame-Delivery.
 type Webhook struct {
 	URL    string
 	Secret string
@@ -130,12 +130,12 @@ func (w *Webhook) post(ctx context.Context, job webhookJob) (int, error) {
 	}
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "wabot-webhook/1")
-	req.Header.Set("X-Wabot-Event", job.event)
-	req.Header.Set("X-Wabot-Delivery", job.id)
-	req.Header.Set("X-Wabot-Timestamp", ts)
+	req.Header.Set("User-Agent", "wame-webhook/1")
+	req.Header.Set("X-Wame-Event", job.event)
+	req.Header.Set("X-Wame-Delivery", job.id)
+	req.Header.Set("X-Wame-Timestamp", ts)
 	if w.Secret != "" {
-		req.Header.Set("X-Wabot-Signature", "sha256="+Sign(w.Secret, ts, job.body))
+		req.Header.Set("X-Wame-Signature", "sha256="+Sign(w.Secret, ts, job.body))
 	}
 	resp, err := w.client.Do(req)
 	if uerr, ok := err.(*url.Error); ok {

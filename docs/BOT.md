@@ -2,7 +2,7 @@
 
 There are three ways to make the bot do things:
 
-1. a **webhook**: wabot POSTs messages to your service, which replies through the API
+1. a **webhook**: wame POSTs messages to your service, which replies through the API
 2. **polling**: your service pulls new messages with `GET /messages/wait` or `GET /events`
 3. **Go code** in `internal/bot/events.go`
 
@@ -11,22 +11,22 @@ or to people who never wrote to them are what get numbers banned.
 
 ## Option 1: webhook (any language)
 
-Run wabot with a webhook and a signing secret, handle messages in your own service, and reply
+Run wame with a webhook and a signing secret, handle messages in your own service, and reply
 through the API.
 
 Secrets go in environment variables rather than flags, so they don't show up in `ps`:
 
 ```sh
-export WABOT_TOKEN=change-me-to-a-long-secret WABOT_WEBHOOK_SECRET=another-long-webhook-secret
-./wabot serve -autoreply=false -webhook http://localhost:9000/hook -webhook-filter "type=text&from_me=false"
+export WAME_TOKEN=change-me-to-a-long-secret WAME_WEBHOOK_SECRET=another-long-webhook-secret
+./wame serve -autoreply=false -webhook http://localhost:9000/hook -webhook-filter "type=text&from_me=false"
 ```
 
 Give the bot its own token rather than the owner secret, so it can be limited and revoked on its
 own (and its sends show up under its name in the audit log):
 
 ```sh
-./wabot token create echo-bot -scopes send -expires 720h   # add -chats 5511999999999 to limit it
-export WABOT_BOT_TOKEN=wabot_…                             # use this in the bot below instead of WABOT_TOKEN
+./wame token create echo-bot -scopes send -expires 720h   # add -chats 5511999999999 to limit it
+export WAME_BOT_TOKEN=wame_…                             # use this in the bot below instead of WAME_TOKEN
 ```
 
 Python example (standard library only). It checks the signature, skips duplicate deliveries,
@@ -38,13 +38,13 @@ import hashlib, hmac, json, os, time, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 API = "http://localhost:8080"
-TOKEN = os.environ["WABOT_TOKEN"]
-SECRET = os.environ["WABOT_WEBHOOK_SECRET"].encode()
+TOKEN = os.environ["WAME_TOKEN"]
+SECRET = os.environ["WAME_WEBHOOK_SECRET"].encode()
 seen = set()  # delivery IDs; use a real store with expiry in production
 
 def verify(headers, body):
-    ts = headers.get("X-Wabot-Timestamp", "")
-    sig = headers.get("X-Wabot-Signature", "")
+    ts = headers.get("X-Wame-Timestamp", "")
+    sig = headers.get("X-Wame-Signature", "")
     if not ts.isdigit() or abs(time.time() - int(ts)) > 300:
         return False
     want = "sha256=" + hmac.new(SECRET, ts.encode() + b"." + body, hashlib.sha256).hexdigest()
@@ -66,8 +66,8 @@ class Hook(BaseHTTPRequestHandler):
             return
         self.send_response(204); self.end_headers()
 
-        delivery = self.headers["X-Wabot-Delivery"]
-        if self.headers["X-Wabot-Event"] != "message" or delivery in seen:
+        delivery = self.headers["X-Wame-Delivery"]
+        if self.headers["X-Wame-Event"] != "message" or delivery in seen:
             return
         seen.add(delivery)
         msg = json.loads(body)
@@ -80,7 +80,7 @@ HTTPServer(("127.0.0.1", 9000), Hook).serve_forever()
 ```
 
 Always reply to `msg["chat"]`, not `msg["sender"]`. That way group messages get answered in
-the group. Answer the webhook quickly (2xx) and do slow work afterwards: wabot waits at most
+the group. Answer the webhook quickly (2xx) and do slow work afterwards: wame waits at most
 10 s per attempt and retries on timeouts, which you'd see as duplicates.
 
 ### Verifying webhook signatures
@@ -88,8 +88,8 @@ the group. Answer the webhook quickly (2xx) and do slow work afterwards: wabot w
 With `-webhook-secret`, every request carries:
 
 ```
-X-Wabot-Timestamp: 1791680400
-X-Wabot-Signature: sha256=5d1c…
+X-Wame-Timestamp: 1791680400
+X-Wame-Signature: sha256=5d1c…
 ```
 
 The signature is `hex(HMAC-SHA256(secret, timestamp + "." + raw_body))`. To verify:
@@ -97,7 +97,7 @@ The signature is `hex(HMAC-SHA256(secret, timestamp + "." + raw_body))`. To veri
 1. Use the **raw** request body, before any JSON parsing.
 2. Recompute the HMAC and compare with a **constant-time** function.
 3. Reject timestamps more than a few minutes old, so a captured request can't be replayed later.
-4. Dedupe on `X-Wabot-Delivery`, since delivery is at-least-once.
+4. Dedupe on `X-Wame-Delivery`, since delivery is at-least-once.
 
 Python:
 
@@ -130,10 +130,10 @@ require("node:http").createServer((req, res) => {
   const chunks = [];
   req.on("data", c => chunks.push(c)).on("end", () => {
     const body = Buffer.concat(chunks);
-    const ok = verify(process.env.WABOT_WEBHOOK_SECRET, req.headers["x-wabot-timestamp"],
-                      req.headers["x-wabot-signature"], body);
+    const ok = verify(process.env.WAME_WEBHOOK_SECRET, req.headers["x-wame-timestamp"],
+                      req.headers["x-wame-signature"], body);
     res.writeHead(ok ? 204 : 401).end();
-    if (ok) console.log(req.headers["x-wabot-event"], JSON.parse(body));
+    if (ok) console.log(req.headers["x-wame-event"], JSON.parse(body));
   });
 }).listen(9000, "127.0.0.1");
 ```
@@ -186,12 +186,12 @@ The bot reconnects on its own after network drops. To keep it running across reb
 use systemd, launchd or Docker and point `-db` at a persistent path, e.g.:
 
 ```ini
-# /etc/systemd/system/wabot.service
+# /etc/systemd/system/wame.service
 [Service]
-ExecStart=/opt/wabot/wabot serve -db /var/lib/wabot/wabot.db -addr 127.0.0.1:8080 -log-format json
-Environment=WABOT_TOKEN=change-me-to-a-long-secret
-Environment=WABOT_WEBHOOK=http://127.0.0.1:9000/hook
-Environment=WABOT_WEBHOOK_SECRET=another-long-webhook-secret
+ExecStart=/opt/wame/wame serve -db /var/lib/wame/wame.db -addr 127.0.0.1:8080 -log-format json
+Environment=WAME_TOKEN=change-me-to-a-long-secret
+Environment=WAME_WEBHOOK=http://127.0.0.1:9000/hook
+Environment=WAME_WEBHOOK_SECRET=another-long-webhook-secret
 Restart=always
 
 [Install]

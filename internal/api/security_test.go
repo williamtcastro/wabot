@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/williamtcastro/wabot/internal/auth"
-	"github.com/williamtcastro/wabot/internal/bot"
+	"github.com/williamtcastro/wame/internal/auth"
+	"github.com/williamtcastro/wame/internal/bot"
 )
 
 // Regression tests for docs/security/SCOPED-TOKENS.md findings.

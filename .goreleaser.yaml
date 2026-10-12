@@ -2,7 +2,7 @@ version: 2
 
 builds:
   - main: .
-    binary: wabot
+    binary: wame
     env:
       - CGO_ENABLED=0
     goos: [linux, darwin]
@@ -12,7 +12,7 @@ builds:
 
 archives:
   - formats: [tar.gz]
-    name_template: "wabot_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "wame_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files: [LICENSE, README.md, "docs/**/*.md"]
 
 checksum:

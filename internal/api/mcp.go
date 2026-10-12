@@ -10,9 +10,9 @@ import (
 	sdkauth "github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/williamtcastro/wabot/internal/auth"
-	"github.com/williamtcastro/wabot/internal/bot"
-	"github.com/williamtcastro/wabot/internal/mcpserver"
+	"github.com/williamtcastro/wame/internal/auth"
+	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/mcpserver"
 )
 
 // mcpHandler serves MCP over streamable HTTP at /mcp. With tokens configured, each request's bearer

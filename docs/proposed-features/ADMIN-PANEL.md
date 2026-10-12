@@ -4,7 +4,7 @@
 > [Logging today](#logging-today) section describes. It's kept here as a plan we may pick up later;
 > see the [list of proposals](README.md).
 
-This is a plan for a small web admin panel served by `wabot serve`, and a description of the
+This is a plan for a small web admin panel served by `wame serve`, and a description of the
 logging and audit groundwork that already exists for it.
 
 ## Goals
@@ -65,7 +65,7 @@ logging and audit groundwork that already exists for it.
    `ok`, `from`, `to` query parameters, and an index on `(action, at)` if it gets slow.
 6. **Admin auth, separate from the API tokens.** API tokens are meant for scripts and agents (and
    `?token=` is only accepted on a few GET routes). The panel should instead use:
-   - a login form (password from `-admin-password` / `WABOT_ADMIN_PASSWORD`, stored hashed if
+   - a login form (password from `-admin-password` / `WAME_ADMIN_PASSWORD`, stored hashed if
      persisted), creating a server-side session with an `HttpOnly`, `SameSite=Strict`,
      `Secure`-when-TLS cookie;
    - a CSRF token on every state-changing request (double-submit or per-session token);
@@ -114,7 +114,7 @@ Configured by `-log-format text|json`, `-log-file PATH` (stderr otherwise) and `
 | `cache groups failed` | warn | `err` |
 | `API has no token: only local, same-origin requests are accepted` | warn | `addr` |
 | `HTTP API listening` | info | `addr`, `docs` |
-| `MCP server on stdio` | info | `as` (principal name), `scopes` (`wabot mcp` only) |
+| `MCP server on stdio` | info | `as` (principal name), `scopes` (`wame mcp` only) |
 | `HTTP API stopped` | error | `err` (`tui -addr` only) |
 
 whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
@@ -140,11 +140,11 @@ whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 | `edit` | `Bot.Edit` | message id |
 | `delete` | `Bot.Delete` | message id |
 | `read` | `Bot.MarkRead` | `N messages` (every call, including failures and calls that marked nothing) |
-| `pair` | `Bot.PairPhone`: `POST /pair`, TUI `/pair`, `wabot login -phone` | |
-| `logout` | `POST /logout`, `wabot logout` | |
+| `pair` | `Bot.PairPhone`: `POST /pair`, TUI `/pair`, `wame login -phone` | |
+| `logout` | `POST /logout`, `wame logout` | |
 | `logged_out` | WhatsApp event (actor `whatsapp`) | reason code |
-| `token_create` | `POST /tokens`, `wabot token create` | requested scopes (target = token name) |
-| `token_revoke` | `DELETE /tokens/{name}`, `wabot token revoke` | (target = token name) |
+| `token_create` | `POST /tokens`, `wame token create` | requested scopes (target = token name) |
+| `token_revoke` | `DELETE /tokens/{name}`, `wame token revoke` | (target = token name) |
 
 `send`, `send_file`, `react`, `edit` and `delete` run through `Bot.audited`, which records every
 attempt exactly once, whatever the outcome. Failures (`ok` = 0) include input errors such as empty
@@ -157,7 +157,7 @@ the table agree.
 
 ## Conventions for new controls
 
-- Every control action (anything that changes state on WhatsApp or in wabot) is wrapped in
+- Every control action (anything that changes state on WhatsApp or in wame) is wrapped in
   `Bot.audited(actor, action, target, detail, fn)`, so it's recorded once with the real error,
   including validation failures. Use `Bot.Audit` directly only where the action doesn't fit that
   shape (pair, logout, read).

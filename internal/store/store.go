@@ -1,4 +1,4 @@
-// Package store keeps wabot's message history and audit log in SQLite, next to whatsmeow's own tables.
+// Package store keeps wame's message history and audit log in SQLite, next to whatsmeow's own tables.
 package store
 
 import (
@@ -17,7 +17,7 @@ type Store struct {
 	lidKey string
 }
 
-// Open creates or upgrades wabot's tables in db.
+// Open creates or upgrades wame's tables in db.
 func Open(ctx context.Context, db *sql.DB) (*Store, error) {
 	if err := migrate(ctx, db); err != nil {
 		return nil, fmt.Errorf("create message tables: %w", err)

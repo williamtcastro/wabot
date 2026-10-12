@@ -11,7 +11,7 @@ import (
 
 	"go.mau.fi/whatsmeow/types"
 
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 type Contact struct {

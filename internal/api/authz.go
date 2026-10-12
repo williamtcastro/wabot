@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/williamtcastro/wabot/internal/auth"
-	"github.com/williamtcastro/wabot/internal/bot"
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/internal/auth"
+	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 type principalKey struct{}
@@ -271,7 +271,7 @@ func (a *server) createToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if caller.TokenID != "" && slices.Contains(scopes, auth.Admin) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin tokens can only be created with 'wabot token create' or the owner token"})
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin tokens can only be created with 'wame token create' or the owner token"})
 		return
 	}
 	chats, err := NormalizeChats(req.Chats)

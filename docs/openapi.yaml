@@ -1,12 +1,12 @@
 openapi: 3.0.3
 info:
-  title: wabot HTTP API
+  title: wame HTTP API
   version: "2.0"
   description: |
     A small WhatsApp bot built on [whatsmeow](https://github.com/tulir/whatsmeow).
 
-    **Auth:** send `Authorization: Bearer <token>` with an API token (`wabot_…`, from `wabot token create`
-    or `POST /tokens`) or the owner secret (`WABOT_TOKEN`, at least 16 characters). Click **Authorize**
+    **Auth:** send `Authorization: Bearer <token>` with an API token (`wame_…`, from `wame token create`
+    or `POST /tokens`) or the owner secret (`WAME_TOKEN`, at least 16 characters). Click **Authorize**
     above to set it for the "Try it out" buttons. `?token=` is accepted only on `GET /events`, `GET /qr`
     and `GET /media/{seq}`. Every route needs a scope (`read`, `send` or `admin`; admin implies all), and
     tokens limited to chats only see and act on those chats. Before any token was ever created and without
@@ -131,7 +131,7 @@ paths:
               required: [to, text]
               properties:
                 to: { type: string, example: "5511999999999" }
-                text: { type: string, example: "Hello from *wabot* 👋" }
+                text: { type: string, example: "Hello from *wame* 👋" }
                 reply_to: { type: string, description: "id of a stored message in the same chat to quote", example: "3EB0C767D26A1D0F5E2A" }
                 idempotency_key: { type: string, maxLength: 200, description: "Same as the Idempotency-Key header; the header wins." }
       responses:
@@ -597,7 +597,7 @@ paths:
               schema:
                 type: object
                 properties:
-                  token: { type: string, example: "wabot_k3x7q2ma_…", description: "Shown only now" }
+                  token: { type: string, example: "wame_k3x7q2ma_…", description: "Shown only now" }
                   details: { $ref: "#/components/schemas/Token" }
                   note: { type: string }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -655,7 +655,7 @@ components:
       type: http
       scheme: bearer
       description: |
-        An API token (`wabot_<id>_<secret>`) or the owner secret. Scopes: `read` (status, chats, messages,
+        An API token (`wame_<id>_<secret>`) or the owner secret. Scopes: `read` (status, chats, messages,
         events, media, contacts, groups), `send` (send, file, react, edit, delete, read receipts, typing,
         check), `admin` (everything, incl. qr/pair/logout, audit and tokens). Tokens may be limited to a
         chat allowlist and have their own send rate (default 10/min).

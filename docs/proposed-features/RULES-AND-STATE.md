@@ -78,7 +78,7 @@ rules:
 webhooks:
   transcriber:
     url: https://example.com/hooks/transcribe
-    secret_env: WABOT_TRANSCRIBER_SECRET
+    secret_env: WAME_TRANSCRIBER_SECRET
 ```
 
 ### Match fields
@@ -105,7 +105,7 @@ Internally the first five reuse `store.Filter` (with a new `ChatOnly`-style flag
 
 | Action | Does | Limits |
 |---|---|---|
-| `webhook: <name>` | POSTs the Message to a named target, same body, headers and HMAC signing as `-webhook`, with `X-Wabot-Rule: <rule name>` | each target gets its own `bot.Webhook` (queue, workers, retries). URLs and secrets never logged |
+| `webhook: <name>` | POSTs the Message to a named target, same body, headers and HMAC signing as `-webhook`, with `X-Wame-Rule: <rule name>` | each target gets its own `bot.Webhook` (queue, workers, retries). URLs and secrets never logged |
 | `route: <token name>` | marks the message as routed to that token; it shows up on that token's `routed` stream (below) | the token must exist; a route to a deleted token is a load error |
 | `react: <emoji>` | `Bot.React(ctx, "rule:<name>", …)` | goes through `Bot.deliver`, so `Bot.Limiter` applies; plus a rule budget like `autoLimit` (default 6/min, one per 10 s per chat), **dropped** when over budget, never queued |
 | `drop: {}` | stops default handling: no default `-webhook` delivery, no auto-reply, no later rules | the message is still stored and still visible on `/messages` and `/events`. Dropping storage isn't offered |
@@ -119,7 +119,7 @@ or goes through an agent.
 - Rules run by `priority` ascending, then `name`. Every matching rule's actions run, until a
   matching rule has `stop: true`.
 - Only new messages stored by `Bot.handle` (incoming and from the phone) are evaluated, the same
-  set the webhook sees today. Not history imports, not messages sent through wabot, not
+  set the webhook sees today. Not history imports, not messages sent through wame, not
   edits/deletes in v1.
 - Evaluation is in-memory and synchronous right after `b.save`, before `Webhook.Deliver`; actions
   that do I/O run in goroutines. Never block the whatsmeow event handler.
@@ -182,7 +182,7 @@ are only logged (debug level, rule name and `seq`, never text).
   spec TEXT /* JSON of match, actions, stop */, version INTEGER, updated_at INTEGER, updated_by TEXT)`
   and `wabot_rule_webhooks (name, url, secret_ref)`. Secrets are stored as env var names
   (`secret_env`), not values, so a DB copy doesn't leak them.
-- **File:** `-rules PATH` / `WABOT_RULES`. Loaded at startup and on `SIGHUP`; a bad file keeps the
+- **File:** `-rules PATH` / `WAME_RULES`. Loaded at startup and on `SIGHUP`; a bad file keeps the
   previous rules and logs the error. File rules win over DB rules with the same name.
   YAML via `go.yaml.in/yaml/v3` (v3.0.5; the maintained continuation of `gopkg.in/yaml.v3`), or
   accept only JSON to avoid the dependency. See open questions.
@@ -282,9 +282,9 @@ CREATE INDEX IF NOT EXISTS wabot_kv_expires ON wabot_kv (expires_at) WHERE expir
 
 ### Redis backend (optional)
 
-`-state redis://user:pass@host:6379/0` (or `rediss://` for TLS), env `WABOT_STATE`. Default is
+`-state redis://user:pass@host:6379/0` (or `rediss://` for TLS), env `WAME_STATE`. Default is
 `sqlite`. The URL holds a password: never log it (same rule as the webhook URL). `-state-prefix`
-(default `wabot:`) namespaces keys so several wabot accounts can share one Redis.
+(default `wame:`) namespaces keys so several wame accounts can share one Redis.
 
 **Client.** Recommend [`github.com/redis/go-redis/v9`](https://github.com/redis/go-redis):
 the official Redis-org client, the most widely used, pure Go (fine with `CGO_ENABLED=0`),
@@ -302,23 +302,23 @@ stay offline as `AGENTS.md` requires.
 
 **Mapping.**
 
-- One hash per entry: `wabot:kv:{<chat>}:<ns>:<key>` with fields `v` (JSON), `ver`, `by`. The
+- One hash per entry: `wame:kv:{<chat>}:<ns>:<key>` with fields `v` (JSON), `ver`, `by`. The
   `{<chat>}` hash tag keeps a chat's keys on one Redis Cluster slot.
 - TTL is native (`PEXPIRE`); no sweep needed.
 - CAS is a short Lua script (`EVALSHA`): read `ver`, compare, `HSET`, `HINCRBY ver`, `PEXPIRE`,
   atomically. `WATCH`/`MULTI` works too but needs retries.
-- `List` uses a per-chat set index `wabot:kvidx:{<chat>}:<ns>` maintained by the same scripts
+- `List` uses a per-chat set index `wame:kvidx:{<chat>}:<ns>` maintained by the same scripts
   (cleaned lazily when a member has expired), not `SCAN`.
 - The 16 KB / 256-key limits are checked in `bot`, so both backends enforce them identically.
 
 **What Redis adds.**
 
-- Shared state between processes: several wabot instances (one per WhatsApp account, since one
+- Shared state between processes: several wame instances (one per WhatsApp account, since one
   process holds one session), and bots that want to read the same keys directly from Redis
-  without going through wabot's API.
+  without going through wame's API.
 - Native TTL and expiry without sweeps.
 - Fan-out across processes: with Redis configured, the `route` action can also `PUBLISH` to
-  `wabot:route:<token>`, so a pool of worker processes can share one agent's traffic. Pub/sub is
+  `wame:route:<token>`, so a pool of worker processes can share one agent's traffic. Pub/sub is
   fire-and-forget; if workers need at-least-once, use a Redis Stream (`XADD` + consumer groups)
   instead. Within one process, `Bot.publish` and SSE already do the fan-out, so this only matters
   for multi-process setups.
@@ -326,13 +326,13 @@ stay offline as `AGENTS.md` requires.
 **What it costs.**
 
 - Another service to run, secure (AUTH, TLS, not exposed), back up, and monitor. State in Redis
-  isn't in `wabot.db` backups; without AOF/RDB persistence a Redis restart loses it.
+  isn't in `wame.db` backups; without AOF/RDB persistence a Redis restart loses it.
 - New failure mode: Redis down → state endpoints return 502, while messaging keeps working. Rules
   must not depend on state being reachable in v1.
 - One more dependency tree (go-redis pulls a couple of small modules).
 
-So SQLite stays the default and the docs say when Redis is worth it: more than one wabot process,
-or bots outside wabot that already use Redis.
+So SQLite stays the default and the docs say when Redis is worth it: more than one wame process,
+or bots outside wame that already use Redis.
 
 ## Where the code goes
 

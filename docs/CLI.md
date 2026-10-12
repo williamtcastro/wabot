@@ -1,19 +1,19 @@
 # CLI reference
 
 ```
-wabot <command> [flags] [args]
+wame <command> [flags] [args]
 ```
 
 Flags go right after the command and before any other arguments, e.g.
-`wabot serve -addr 127.0.0.1:9000 -debug` or `wabot send -db other.db 5511999999999 hi`.
+`wame serve -addr 127.0.0.1:9000 -debug` or `wame send -db other.db 5511999999999 hi`.
 Boolean flags take `=`: `-autoreply=false`. Durations use Go syntax: `500ms`, `2s`, `1m`.
 
-Pass secrets (`WABOT_TOKEN`, `WABOT_WEBHOOK_SECRET`) as environment variables rather than flags:
+Pass secrets (`WAME_TOKEN`, `WAME_WEBHOOK_SECRET`) as environment variables rather than flags:
 command-line arguments are visible to every user on the machine through `ps`.
 
 ## Commands
 
-### `wabot login [-phone NUMBER]`
+### `wame login [-phone NUMBER]`
 
 Links the bot to your WhatsApp account as a "Linked device".
 
@@ -26,7 +26,7 @@ After `✅ logged in` it waits a few seconds for the first sync, then exits. Run
 the session lives in the database file from then on. If you're already logged in it says so
 and exits.
 
-### `wabot serve [-addr 127.0.0.1:8080]`
+### `wame serve [-addr 127.0.0.1:8080]`
 
 Runs the [HTTP API](API.md) until Ctrl+C. If the session isn't logged in, it prints QR codes
 in the terminal and serves them at `/qr`, so you can log in from a browser.
@@ -36,7 +36,7 @@ at `/mcp`.
 
 It refuses to start when:
 
-- the owner secret (`WABOT_TOKEN` / `-token`) is shorter than 16 characters
+- the owner secret (`WAME_TOKEN` / `-token`) is shorter than 16 characters
   (generate one with `openssl rand -hex 24`);
 - the address isn't loopback (`127.0.0.1`, `::1`, `localhost`) and there's neither an owner secret
   nor any token ever created.
@@ -44,30 +44,30 @@ It refuses to start when:
 Without any token it only accepts same-origin requests from and to localhost; see
 [API.md → Auth](API.md#auth).
 
-### `wabot tui [-addr ADDR]`
+### `wame tui [-addr ADDR]`
 
 Interactive terminal UI. See [TUI.md](TUI.md). With `-addr` it also runs the HTTP API in the
 same process, under the same rules (a non-loopback address needs a token; the owner secret must be
 at least 16 characters).
 
-### `wabot send NUMBER|JID TEXT...`
+### `wame send NUMBER|JID TEXT...`
 
 Sends one message and exits. Handy for scripts and cron:
 
 ```sh
-./wabot send 5511999999999 "Backup finished ✅"
-./wabot send 120363012345678901@g.us "Deploy done"
+./wame send 5511999999999 "Backup finished ✅"
+./wame send 120363012345678901@g.us "Deploy done"
 ```
 
 Needs an existing login. Auto-replies are disabled for this command. Prints
 `sent <id> to <chat>` on success.
 
-### `wabot token create NAME [-scopes read,send] [-chats N,...] [-rate N] [-expires 720h]`
+### `wame token create NAME [-scopes read,send] [-chats N,...] [-rate N] [-expires 720h]`
 
 Creates an API token for an agent, bot or script and prints it **once**:
 
 ```sh
-./wabot token create support-bot -scopes read,send -chats 5511999999999,120363012345678901@g.us -expires 720h
+./wame token create support-bot -scopes read,send -chats 5511999999999,120363012345678901@g.us -expires 720h
 ```
 
 | Flag | Default | |
@@ -88,62 +88,75 @@ Names are 1–40 of `a-z 0-9 . _ -`, unique forever (revoked names stay taken). 
 The command only touches the database; it doesn't connect to WhatsApp, so it can run while `serve`
 is running.
 
-### `wabot token list`
+### `wame token list`
 
 Prints every token: name, scopes, rate, status (active, revoked, expired), expiry, last use, the token
 that created it (`-` for the CLI or owner; revoking that one revokes this one too) and chats.
 Secrets are never shown.
 
-### `wabot token revoke NAME`
+### `wame token revoke NAME`
 
 Revokes the token and every token it created over the API. Open streams using it close within
 10 seconds. Fails if there's no active token with that name.
 
-### `wabot mcp [-allow-send] [-mcp-token TOKEN]`
+### `wame mcp [-allow-send] [-mcp-token TOKEN]`
 
 Runs an [MCP](MCP.md) server on stdio for AI agents. Read-only by default; `-allow-send` adds
-`send_message`, `react` and `mark_read`. `-mcp-token TOKEN` (or `WABOT_MCP_TOKEN`) makes it act as
+`send_message`, `react` and `mark_read`. `-mcp-token TOKEN` (or `WAME_MCP_TOKEN`) makes it act as
 that API token, with its scopes and chat allowlist. It needs an existing login and opens its own
 WhatsApp connection, so don't run it alongside `serve` or `tui` on the same database; connect the
 agent to `http://127.0.0.1:8080/mcp` instead. stdout carries the protocol; logs go to stderr.
 
-### `wabot logout`
+### `wame logout`
 
 Unlinks the device from your phone and deletes the session. Messages stored in the
 `wabot_messages` table and the audit log are kept; delete the database file to remove everything.
 
-### `wabot version`
+### `wame version`
 
-Prints `wabot <version>`. Release builds carry the tag (e.g. `wabot 0.3.0`); anything built
-locally prints `wabot dev`. `--version` works too.
+Prints `wame <version>`. Release builds carry the tag (e.g. `wame 0.3.0`); anything built
+locally prints `wame dev`. `--version` works too.
 
-### `wabot help`
+### `wame help`
 
 Prints usage (also `-h` / `--help`).
+
+## Upgrading from wabot
+
+wame was called `wabot`. After switching binaries nothing has to change:
+
+- **Database:** with no `-db`/`WAME_DB`, wame uses `~/.config/wame/wame.db`, or
+  `~/.config/wabot/wabot.db` if that exists and the new one doesn't. To move it, stop wame and run
+  `mkdir -p ~/.config/wame && for f in ~/.config/wabot/wabot.db*; do mv "$f" ~/.config/wame/"$(basename "$f" | sed s/wabot/wame/)"; done`.
+  The tables inside keep their `wabot_` names.
+- **Environment:** every `WAME_*` variable falls back to its old `WABOT_*` name.
+- **Tokens:** new tokens start with `wame_`; existing `wabot_…` tokens keep working.
+- **Webhooks:** headers are now `X-Wame-Event`, `X-Wame-Delivery`, `X-Wame-Timestamp` and
+  `X-Wame-Signature` (same values and signing scheme). Update receivers that read `X-Wabot-*`.
 
 ## Flags
 
 | Flag | Env | Default | |
 |---|---|---|---|
-| `-db PATH` | `WABOT_DB` | `~/.config/wabot/wabot.db` | session and message database (SQLite). See [The database](#the-database) |
-| `-addr ADDR` | `WABOT_ADDR` | `127.0.0.1:8080` for `serve`, off for `tui` | HTTP listen address. A non-loopback address requires a token |
-| `-token TOKEN` | `WABOT_TOKEN` | none | owner secret: full access with `Authorization: Bearer TOKEN`. At least 16 characters. Prefer per-agent tokens from `wabot token create` |
-| `-webhook URL` | `WABOT_WEBHOOK` | none | POST incoming messages as JSON to this http(s) URL |
-| `-webhook-secret S` | `WABOT_WEBHOOK_SECRET` | none | sign webhook bodies with HMAC-SHA256 ([how to verify](BOT.md#verifying-webhook-signatures)) |
-| `-webhook-filter Q` | `WABOT_WEBHOOK_FILTER` | none | only deliver matching messages, e.g. `type=text&from_me=false` ([syntax](API.md#filters)). A `chat=<number>` is resolved on WhatsApp after login |
-| `-rate N` | `WABOT_RATE` | `20` | max messages sent per minute; `0` = unlimited. Number lookups get 3 × this. `WABOT_RATE` must be a non-negative integer or wabot exits with code 2 |
+| `-db PATH` | `WAME_DB` | `~/.config/wame/wame.db` | session and message database (SQLite). See [The database](#the-database) |
+| `-addr ADDR` | `WAME_ADDR` | `127.0.0.1:8080` for `serve`, off for `tui` | HTTP listen address. A non-loopback address requires a token |
+| `-token TOKEN` | `WAME_TOKEN` | none | owner secret: full access with `Authorization: Bearer TOKEN`. At least 16 characters. Prefer per-agent tokens from `wame token create` |
+| `-webhook URL` | `WAME_WEBHOOK` | none | POST incoming messages as JSON to this http(s) URL |
+| `-webhook-secret S` | `WAME_WEBHOOK_SECRET` | none | sign webhook bodies with HMAC-SHA256 ([how to verify](BOT.md#verifying-webhook-signatures)) |
+| `-webhook-filter Q` | `WAME_WEBHOOK_FILTER` | none | only deliver matching messages, e.g. `type=text&from_me=false` ([syntax](API.md#filters)). A `chat=<number>` is resolved on WhatsApp after login |
+| `-rate N` | `WAME_RATE` | `20` | max messages sent per minute; `0` = unlimited. Number lookups get 3 × this. `WAME_RATE` must be a non-negative integer or wame exits with code 2 |
 | `-chat-gap D` | | `1s` | min time between two messages to the same chat |
 | `-max-wait D` | | `30s` | queue a send at most this long before answering 429; `0` = wait as long as needed |
 | `-typing` | | `false` | show "typing…" before each text message |
 | `-online` | | `false` | appear "online" while connected. Off by default so your phone keeps showing notifications; typing indicators still switch to "available" briefly |
 | `-autoreply` | | `true` | answer `!ping`, `!time`, `!help` |
-| `-log-format F` | `WABOT_LOG_FORMAT` | `text` | app log format: `text` or `json` |
-| `-log-file PATH` | `WABOT_LOG_FILE` | stderr | write app logs to PATH (appended, mode 0600) |
+| `-log-format F` | `WAME_LOG_FORMAT` | `text` | app log format: `text` or `json` |
+| `-log-file PATH` | `WAME_LOG_FILE` | stderr | write app logs to PATH (appended, mode 0600) |
 | `-debug` | | `false` | debug-level logs, including whatsmeow's |
 | `-phone NUMBER` | | | `login` only: use a pairing code instead of a QR |
 
 All flags are accepted by every command, so `-rate`, `-chat-gap` and `-typing` also apply to
-`wabot send`. See [API.md → Rate limiting](API.md#rate-limiting) for how the limiter behaves
+`wame send`. See [API.md → Rate limiting](API.md#rate-limiting) for how the limiter behaves
 and why it's on by default.
 
 ## Logs
@@ -171,27 +184,27 @@ Message text, the token and the webhook URL are never logged. `*.log` files are 
 
 ## The database
 
-One SQLite file (`wabot.db` plus its `-wal`/`-shm` companions) holds everything. By default it
-lives in `~/.config/wabot/` on both macOS and Linux, or in `$XDG_CONFIG_HOME/wabot/` when that
-variable is set to an absolute path (on Windows: `%AppData%\wabot\`). `-db` and `WABOT_DB` override
+One SQLite file (`wame.db` plus its `-wal`/`-shm` companions) holds everything. By default it
+lives in `~/.config/wame/` on both macOS and Linux, or in `$XDG_CONFIG_HOME/wame/` when that
+variable is set to an absolute path (on Windows: `%AppData%\wame\`). `-db` and `WAME_DB` override
 it. The directory is created with mode `0700` if it doesn't exist.
 
-Older versions kept `wabot.db` in the current directory. If the default file doesn't exist yet but
-a `./wabot.db` does, wabot prints a one-line notice to stderr and starts a fresh session at the
+Older versions kept `wame.db` in the current directory. If the default file doesn't exist yet but
+a `./wame.db` does, wame prints a one-line notice to stderr and starts a fresh session at the
 default path. It never moves anything by itself; to keep your session, either move it:
 
 ```sh
-mkdir -p ~/.config/wabot && mv wabot.db* ~/.config/wabot/
+mkdir -p ~/.config/wame && mv wame.db* ~/.config/wame/
 ```
 
-or keep using it where it is with `-db wabot.db` (or `WABOT_DB=wabot.db`).
+or keep using it where it is with `-db wame.db` (or `WAME_DB=wame.db`).
 
 The file holds:
 
 - whatsmeow's tables (`whatsmeow_*`): your encryption keys, session, contacts, and
   phone-number ↔ hidden-ID links. **Anyone with this file can act as your WhatsApp
   account.** Keep it private and out of git (the included `.gitignore` already excludes it).
-wabot's own tables:
+wame's own tables:
 
 | Table | Holds |
 |---|---|
@@ -224,12 +237,12 @@ its newest message, so nothing already stored shows as unread.
 When WhatsApp reveals which phone number a hidden `…@lid` ID belongs to, messages stored under
 the `@lid` chat are moved to the phone-number chat, and leftover duplicates are removed.
 
-At startup wabot sets the database file and its `-wal`/`-shm` files to mode `0600` (owner only).
+At startup wame sets the database file and its `-wal`/`-shm` files to mode `0600` (owner only).
 
 `wabot_audit` columns: `id`, `at` (Unix ms), `actor`, `action`, `target`, `detail`, `ok`, `error`.
 
 You can inspect the database with any SQLite tool, e.g.
-`sqlite3 ~/.config/wabot/wabot.db "select seq, chat, type, ts from wabot_messages order by seq desc limit 10"`.
+`sqlite3 ~/.config/wame/wame.db "select seq, chat, type, ts from wabot_messages order by seq desc limit 10"`.
 
 Only one process can use a database at a time, so don't run `serve`, `tui` and `send` on
 the same file at once.
@@ -237,4 +250,4 @@ the same file at once.
 ## Exit codes
 
 `0` on success, `1` on any error (printed to stderr), `2` when called without a command, with an
-unknown flag, or with an invalid `WABOT_RATE`.
+unknown flag, or with an invalid `WAME_RATE`.

@@ -25,46 +25,46 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
-	"github.com/williamtcastro/wabot/internal/api"
-	"github.com/williamtcastro/wabot/internal/auth"
-	"github.com/williamtcastro/wabot/internal/bot"
-	"github.com/williamtcastro/wabot/internal/mcpserver"
-	"github.com/williamtcastro/wabot/internal/store"
-	"github.com/williamtcastro/wabot/internal/tui"
+	"github.com/williamtcastro/wame/internal/api"
+	"github.com/williamtcastro/wame/internal/auth"
+	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/mcpserver"
+	"github.com/williamtcastro/wame/internal/store"
+	"github.com/williamtcastro/wame/internal/tui"
 )
 
 // version is set by release builds (-ldflags "-X main.version=...").
 var version = "dev"
 
-const usage = `wabot - a tiny WhatsApp bot built on whatsmeow
+const usage = `wame - WhatsApp manager for your terminal: TUI, HTTP API, bot and MCP server
 
 Usage:
-  wabot login [-phone NUMBER]          link this bot to your WhatsApp (QR or pairing code)
-  wabot serve [-addr ADDR]             run the HTTP API
-  wabot tui   [-addr ADDR]             interactive terminal UI (optionally also serves the API)
-  wabot send  NUMBER|JID TEXT...       send one message and exit
-  wabot token create NAME [-scopes read,send] [-chats N,...] [-rate N] [-expires 720h]
-  wabot token list | revoke NAME       manage API tokens for agents and bots (see docs/API.md)
-  wabot mcp [-allow-send] [-mcp-token TOKEN]
+  wame login [-phone NUMBER]          link this bot to your WhatsApp (QR or pairing code)
+  wame serve [-addr ADDR]             run the HTTP API
+  wame tui   [-addr ADDR]             interactive terminal UI (optionally also serves the API)
+  wame send  NUMBER|JID TEXT...       send one message and exit
+  wame token create NAME [-scopes read,send] [-chats N,...] [-rate N] [-expires 720h]
+  wame token list | revoke NAME       manage API tokens for agents and bots (see docs/API.md)
+  wame mcp [-allow-send] [-mcp-token TOKEN]
                                        MCP server over stdio for AI agents (see docs/MCP.md)
-  wabot version                        print the version
-  wabot logout                         unlink the device and delete the session
+  wame version                        print the version
+  wame logout                         unlink the device and delete the session
 
 Flags (right after the command, before other arguments):
-  -db PATH               session database (env WABOT_DB, default ~/.config/wabot/wabot.db)
-  -addr ADDR             HTTP listen address (env WABOT_ADDR; serve defaults to 127.0.0.1:8080)
-  -token TOKEN           require "Authorization: Bearer TOKEN" on the API (env WABOT_TOKEN)
-  -webhook URL           POST incoming messages as JSON to URL (env WABOT_WEBHOOK)
-  -webhook-secret S      sign webhook bodies with HMAC-SHA256 (env WABOT_WEBHOOK_SECRET)
-  -webhook-filter Q      only deliver matching messages, e.g. "type=text&from_me=false" (env WABOT_WEBHOOK_FILTER)
-  -rate N                max messages sent per minute, 0 = unlimited (env WABOT_RATE, default 20)
+  -db PATH               session database (env WAME_DB, default ~/.config/wame/wame.db)
+  -addr ADDR             HTTP listen address (env WAME_ADDR; serve defaults to 127.0.0.1:8080)
+  -token TOKEN           require "Authorization: Bearer TOKEN" on the API (env WAME_TOKEN)
+  -webhook URL           POST incoming messages as JSON to URL (env WAME_WEBHOOK)
+  -webhook-secret S      sign webhook bodies with HMAC-SHA256 (env WAME_WEBHOOK_SECRET)
+  -webhook-filter Q      only deliver matching messages, e.g. "type=text&from_me=false" (env WAME_WEBHOOK_FILTER)
+  -rate N                max messages sent per minute, 0 = unlimited (env WAME_RATE, default 20)
   -chat-gap D            min time between messages to the same chat (default 1s)
   -max-wait D            queue a send at most this long before answering 429 (default 30s)
   -typing                show "typing…" before each text message
   -online                appear "online" while connected (off: your phone keeps getting notifications)
   -autoreply             answer !ping, !time and !help (default true)
-  -log-format F          text or json (env WABOT_LOG_FORMAT, default text)
-  -log-file PATH         write app logs to PATH instead of stderr (env WABOT_LOG_FILE)
+  -log-format F          text or json (env WAME_LOG_FORMAT, default text)
+  -log-file PATH         write app logs to PATH instead of stderr (env WAME_LOG_FILE)
   -debug                 verbose logs, including whatsmeow's
 
 Docs: README.md, docs/*.md, or http://localhost:8080/docs while serving`
@@ -89,25 +89,25 @@ func main() {
 		fmt.Println(usage)
 		return
 	case "version", "--version":
-		fmt.Println("wabot", version)
+		fmt.Println("wame", version)
 		return
 	}
 
 	var c config
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	fs.Usage = func() { fmt.Println(usage) }
-	fs.StringVar(&c.db, "db", envOr("WABOT_DB", defaultDB()), "")
-	fs.StringVar(&c.addr, "addr", envOr("WABOT_ADDR", ""), "")
-	fs.StringVar(&c.token, "token", os.Getenv("WABOT_TOKEN"), "")
-	fs.StringVar(&c.webhook, "webhook", os.Getenv("WABOT_WEBHOOK"), "")
-	fs.StringVar(&c.webhookSecret, "webhook-secret", os.Getenv("WABOT_WEBHOOK_SECRET"), "")
-	fs.StringVar(&c.webhookFilter, "webhook-filter", os.Getenv("WABOT_WEBHOOK_FILTER"), "")
-	fs.StringVar(&c.logFormat, "log-format", envOr("WABOT_LOG_FORMAT", "text"), "")
-	fs.StringVar(&c.logFile, "log-file", os.Getenv("WABOT_LOG_FILE"), "")
+	fs.StringVar(&c.db, "db", envOr("WAME_DB", defaultDB()), "")
+	fs.StringVar(&c.addr, "addr", envOr("WAME_ADDR", ""), "")
+	fs.StringVar(&c.token, "token", envOr("WAME_TOKEN", ""), "")
+	fs.StringVar(&c.webhook, "webhook", envOr("WAME_WEBHOOK", ""), "")
+	fs.StringVar(&c.webhookSecret, "webhook-secret", envOr("WAME_WEBHOOK_SECRET", ""), "")
+	fs.StringVar(&c.webhookFilter, "webhook-filter", envOr("WAME_WEBHOOK_FILTER", ""), "")
+	fs.StringVar(&c.logFormat, "log-format", envOr("WAME_LOG_FORMAT", "text"), "")
+	fs.StringVar(&c.logFile, "log-file", envOr("WAME_LOG_FILE", ""), "")
 	fs.StringVar(&c.phone, "phone", "", "")
-	rate, err := strconv.Atoi(envOr("WABOT_RATE", "20"))
+	rate, err := strconv.Atoi(envOr("WAME_RATE", "20"))
 	if err != nil || rate < 0 {
-		fmt.Fprintln(os.Stderr, "error: WABOT_RATE must be a non-negative number")
+		fmt.Fprintln(os.Stderr, "error: WAME_RATE must be a non-negative number")
 		os.Exit(2)
 	}
 	fs.IntVar(&c.rate, "rate", rate, "")
@@ -219,10 +219,10 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 
 	case "send":
 		if len(args) < 2 {
-			return errors.New("usage: wabot send NUMBER|JID TEXT")
+			return errors.New("usage: wame send NUMBER|JID TEXT")
 		}
 		if b.Client.Store.ID == nil {
-			return errors.New("not logged in, run 'wabot login' first")
+			return errors.New("not logged in, run 'wame login' first")
 		}
 		if err := b.Start(ctx); err != nil {
 			return err
@@ -259,7 +259,7 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 		fmt.Println("logged out")
 		return nil
 	}
-	return fmt.Errorf("unknown command %q (try 'wabot help')", cmd)
+	return fmt.Errorf("unknown command %q (try 'wame help')", cmd)
 }
 
 func login(ctx context.Context, b *bot.Bot, phone string) error {
@@ -409,7 +409,7 @@ func guardPublicAddr(b *bot.Bot, c config) error {
 		return fmt.Errorf("check tokens: %w", err)
 	}
 	if !has {
-		return fmt.Errorf("refusing to serve on %s without a token: anyone on the network could send messages as you (create one with 'wabot token create', set WABOT_TOKEN, or bind to 127.0.0.1)", c.addr)
+		return fmt.Errorf("refusing to serve on %s without a token: anyone on the network could send messages as you (create one with 'wame token create', set WAME_TOKEN, or bind to 127.0.0.1)", c.addr)
 	}
 	return nil
 }
@@ -426,37 +426,57 @@ func isLoopbackAddr(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// envOr reads WAME_* variables, falling back to the WABOT_* names from before the rename.
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
 	}
+	if old, ok := strings.CutPrefix(k, "WAME_"); ok {
+		if v := os.Getenv("WABOT_" + old); v != "" {
+			return v
+		}
+	}
 	return def
 }
 
-// defaultDB is ~/.config/wabot/wabot.db (or $XDG_CONFIG_HOME/wabot/wabot.db) on macOS and Linux alike.
+// defaultDB is ~/.config/wame/wame.db (or $XDG_CONFIG_HOME/wame/wame.db) on macOS and Linux alike. A
+// database from before the rename (~/.config/wabot/wabot.db) is used when there's no new one yet.
 func defaultDB() string {
-	if runtime.GOOS == "windows" {
-		if dir, err := os.UserConfigDir(); err == nil {
-			return filepath.Join(dir, "wabot", "wabot.db")
+	dir := configDir()
+	if dir == "" {
+		return "wame.db"
+	}
+	current := filepath.Join(dir, "wame", "wame.db")
+	if _, err := os.Stat(current); errors.Is(err, os.ErrNotExist) {
+		if old := filepath.Join(dir, "wabot", "wabot.db"); fileExists(old) {
+			return old
 		}
-		return "wabot.db"
 	}
-	if dir := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(dir) {
-		return filepath.Join(dir, "wabot", "wabot.db")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "wabot.db"
-	}
-	return filepath.Join(home, ".config", "wabot", "wabot.db")
+	return current
 }
 
-// legacyDBNotice points at a wabot.db in the current directory, where older versions kept it.
-func legacyDBNotice(path string) {
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		return
+func configDir() string {
+	if runtime.GOOS == "windows" {
+		dir, _ := os.UserConfigDir()
+		return dir
 	}
-	if _, err := os.Stat("wabot.db"); err != nil {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(dir) {
+		return dir
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".config")
+	}
+	return ""
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// legacyDBNotice points at a wabot.db in the current directory, where early versions kept it.
+func legacyDBNotice(path string) {
+	if fileExists(path) || !fileExists("wabot.db") {
 		return
 	}
 	dir := filepath.Dir(path)
@@ -465,7 +485,7 @@ func legacyDBNotice(path string) {
 			dir = filepath.Join("~", rest)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "notice: ./wabot.db is no longer the default; move it with 'mv wabot.db* %s/' or pass '-db wabot.db'\n", dir)
+	fmt.Fprintf(os.Stderr, "notice: ./wabot.db is no longer the default; move it with 'mkdir -p %[1]s && mv wabot.db %[1]s/wame.db' (and its -wal/-shm files) or pass '-db wabot.db'\n", dir)
 }
 
 // newLogger builds the app logger. format is "text" or "json"; file "" means stderr.
@@ -496,7 +516,7 @@ func newLogger(format, file, level string, quiet bool) (*slog.Logger, io.Closer,
 // tokenCommand manages API tokens. It only touches the database, so it's safe to run while serve is up.
 func tokenCommand(b *bot.Bot, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: wabot token create NAME [flags] | list | revoke NAME")
+		return errors.New("usage: wame token create NAME [flags] | list | revoke NAME")
 	}
 	switch args[0] {
 	case "list":
@@ -505,7 +525,7 @@ func tokenCommand(b *bot.Bot, args []string) error {
 			return err
 		}
 		if len(tokens) == 0 {
-			fmt.Println("no tokens yet; create one with 'wabot token create NAME'")
+			fmt.Println("no tokens yet; create one with 'wame token create NAME'")
 			return nil
 		}
 		fmt.Printf("%-20s %-16s %-6s %-10s %-17s %-17s %-20s %s\n", "NAME", "SCOPES", "RATE", "STATUS", "EXPIRES", "LAST USED", "CREATED BY", "CHATS")
@@ -524,7 +544,7 @@ func tokenCommand(b *bot.Bot, args []string) error {
 
 	case "revoke":
 		if len(args) != 2 {
-			return errors.New("usage: wabot token revoke NAME")
+			return errors.New("usage: wame token revoke NAME")
 		}
 		n, err := b.Store.RevokeToken(args[1])
 		b.Audit("cli", "token_revoke", args[1], "", err)
@@ -555,7 +575,7 @@ func tokenCommand(b *bot.Bot, args []string) error {
 			name = fs.Arg(0)
 		}
 		if name == "" {
-			return errors.New("usage: wabot token create NAME [-scopes read,send] [-chats ...] [-rate N] [-expires 720h]")
+			return errors.New("usage: wame token create NAME [-scopes read,send] [-chats ...] [-rate N] [-expires 720h]")
 		}
 		sc, err := auth.ParseScopes(strings.Split(*scopes, ","))
 		if err != nil {
@@ -599,12 +619,12 @@ func mcpCommand(ctx context.Context, b *bot.Bot, args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	allowSend := fs.Bool("allow-send", false, "let the agent send messages, react and mark chats read")
-	token := fs.String("mcp-token", os.Getenv("WABOT_MCP_TOKEN"), "act as this API token (its scopes and chat allowlist)")
+	token := fs.String("mcp-token", envOr("WAME_MCP_TOKEN", ""), "act as this API token (its scopes and chat allowlist)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if b.Client.Store.ID == nil {
-		return errors.New("not logged in: run 'wabot login' first")
+		return errors.New("not logged in: run 'wame login' first")
 	}
 	p := auth.Principal{Name: "mcp", Scopes: []auth.Scope{auth.Read}}
 	if *allowSend {

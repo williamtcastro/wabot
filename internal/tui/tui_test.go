@@ -15,8 +15,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
-	"github.com/williamtcastro/wabot/internal/bot"
-	"github.com/williamtcastro/wabot/internal/store"
+	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 const (
@@ -27,7 +27,7 @@ const (
 
 func newTestModel(t *testing.T, msgs ...store.Message) *model {
 	t.Helper()
-	b, err := bot.New(context.Background(), filepath.Join(t.TempDir(), "wabot.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	b, err := bot.New(context.Background(), filepath.Join(t.TempDir(), "wame.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

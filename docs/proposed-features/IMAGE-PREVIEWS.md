@@ -25,7 +25,7 @@ come later behind the same interface.
 
 ## Detection
 
-1. Config override first: a flag or env var (`WABOT_IMAGES=kitty|iterm|sixel|off`).
+1. Config override first: a flag or env var (`WAME_IMAGES=kitty|iterm|sixel|off`).
 2. Environment hints: `TERM=xterm-kitty`, `TERM_PROGRAM=ghostty|WezTerm|iTerm.app`, `KITTY_WINDOW_ID`.
 3. Query the terminal: send a Kitty graphics query (`ESC _Gi=1,a=q;… ESC \`) followed by a
    device-attributes request, and read the replies with a short timeout before Bubble Tea takes
@@ -58,9 +58,9 @@ come later behind the same interface.
 
 - In memory: an LRU of decoded, already-scaled images keyed by `seq` and target cell size
   (e.g. 50 entries).
-- On disk (optional): scaled PNGs under `~/.cache/wabot/previews/<seq>-<w>x<h>.png`, mode 0600,
+- On disk (optional): scaled PNGs under `~/.cache/wame/previews/<seq>-<w>x<h>.png`, mode 0600,
   with a size cap and pruning. These are private images; never store them inside the repo and
-  delete them with `wabot logout`.
+  delete them with `wame logout`.
 - Kitty can keep transmitted images by ID; transmit once (`a=t,i=<id>`), then place/delete
   (`a=p` / `a=d`) as the view changes, which is cheaper than re-sending.
 
@@ -95,4 +95,4 @@ come later behind the same interface.
 - Selected-message preview only, or also inline? Is a toggle key (e.g. `p`) worth it?
 - Should previews be off by default and enabled with a flag, at least at first?
 - Support iTerm2 and Sixel, or only Kitty-compatible terminals?
-- Does the disk cache belong in wabot at all, given the privacy cost?
+- Does the disk cache belong in wame at all, given the privacy cost?

@@ -4,13 +4,19 @@ Guidance for AI coding agents working on this repo. Human-facing docs are in `RE
 
 ## What this is
 
-`wabot` is a single Go binary that links to a WhatsApp account through
-[whatsmeow](https://github.com/tulir/whatsmeow) and exposes it three ways: an HTTP API, a Bubble Tea
-TUI and a one-shot CLI. All state lives in one SQLite file (default `~/.config/wabot/wabot.db`).
+`wame` (WhatsApp manager: TUI & bot, formerly `wabot`) is a single Go binary that links to a WhatsApp
+account through [whatsmeow](https://github.com/tulir/whatsmeow) and exposes it as an HTTP API, an MCP
+server, a Bubble Tea TUI and a one-shot CLI. All state lives in one SQLite file (default
+`~/.config/wame/wame.db`).
+
+**Kept from the old name, on purpose:** SQLite tables stay `wabot_*` (renaming them would need a
+migration of live databases), `WABOT_*` env vars are read as a fallback (`envOr`), a pre-rename
+`~/.config/wabot/wabot.db` is used when no `wame.db` exists (`defaultDB`), and `wabot_` tokens still
+authenticate (`auth.legacyPrefix`). Don't "finish the rename" on these.
 
 ## Layout
 
-Go's "server project" layout: the `wabot` command at the root, everything else under `internal/`.
+Go's "server project" layout: the `wame` command at the root, everything else under `internal/`.
 
 | Path | Package | Responsibility |
 |---|---|---|
@@ -62,7 +68,7 @@ rejects cycles anyway). `store` knows nothing about whatsmeow's client: it deals
 
 **Where new code goes:**
 
-- SQL, schema, filters, anything that reads or writes `wabot_*` tables: `internal/store`.
+- SQL, schema, filters, anything that reads or writes `wame_*` tables: `internal/store`.
 - Anything that talks to WhatsApp, enforces limits, audits or publishes events: `internal/bot`,
   in the file that matches (a new action goes in `actions.go`, a new event in `events.go`).
 - HTTP concerns (parsing requests, status codes, headers, scopes per route): `internal/api`. Handlers
@@ -77,7 +83,7 @@ rejects cycles anyway). `store` knows nothing about whatsmeow's client: it deals
 ## Build and check
 
 ```sh
-go build -o wabot .      # or: go install .
+go build -o wame .      # or: go install .
 go vet ./...
 go test -race ./...
 gofmt -l .               # must print nothing
@@ -92,7 +98,7 @@ Each package has `_test.go` files in the same package (so they can reach unexpor
 run offline: scratch databases in `t.TempDir()`, `bot.New` on a fresh DB (no login, no
 connection), `events.Message` values built by hand, `httptest` for the API, and the TUI model
 driven by feeding it `tea.WindowSizeMsg` / `tea.KeyMsg` and running the returned `Cmd`s
-synchronously. Never point a test at a real `wabot.db` or connect to WhatsApp. Use only the fake
+synchronously. Never point a test at a real `wame.db` or connect to WhatsApp. Use only the fake
 numbers and names below.
 
 - `internal/store`: v1 → current migration keeps rowids as `seq` and is idempotent, `Filter` SQL vs
@@ -123,7 +129,7 @@ git tag v0.x.y && git push --tags
 ```
 
 The `release` workflow runs the tests and then GoReleaser, which publishes the archives and
-`checksums.txt` to a GitHub release. The version printed by `wabot version` comes from the tag
+`checksums.txt` to a GitHub release. The version printed by `wame version` comes from the tag
 (without the `v`); local builds print `dev`. Don't edit `version` in `main.go` by hand.
 
 Add a test with every behavior change. To eyeball the TUI, print `ansi.Strip(m.View())` from a
@@ -172,7 +178,7 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
   `store.ChatsChanged` isn't forwarded but triggers the same DB catch-up as `Message`; other types are dropped.
   A numeric `Last-Event-ID` beats `?since=`, so `EventSource` reconnects resume correctly.
 - Messages are only published when `Store.Save` actually inserted them (`Bot.save`). Incoming ones
-  (`Bot.handle`) then also go to the webhook; messages wabot sends itself don't. `seq` is an explicit
+  (`Bot.handle`) then also go to the webhook; messages wame sends itself don't. `seq` is an explicit
   `INTEGER PRIMARY KEY AUTOINCREMENT` column; never reuse or renumber it.
 - Fill `Raw`, `RawChat` and `RawSender` when building a `store.Message` to store: quoting, reactions, deletes,
   read receipts and media download all need the original protobuf and the JIDs as WhatsApp sent them.
@@ -216,12 +222,12 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
 
 ## Safety and privacy
 
-- **Never commit `wabot.db*`.** (The default location is now `~/.config/wabot/`, but older checkouts may still have one in the repo directory.) It holds the account's encryption keys and message history. `.gitignore`
+- **Never commit `wame.db*`.** (The default location is now `~/.config/wame/`, but older checkouts may still have one in the repo directory.) It holds the account's encryption keys and message history. `.gitignore`
   covers it; don't weaken that.
 - **No real data in the repo.** Docs and examples use fake numbers (`5511999999999`, `5511988887777`,
   `552187654321`) and fake names (Maria, John, Ana). Before committing, grep the staged diff for real phone
   numbers, names and tokens.
-- Don't run `wabot` against the user's real `wabot.db` while they may have it open. Copy it to a scratch
+- Don't run `wame` against the user's real `wame.db` while they may have it open. Copy it to a scratch
   directory to inspect it, and treat message contents as private.
 - The bot can message real people. Don't send test messages to anyone except the account owner's own
   number, and only when asked.
@@ -244,7 +250,7 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
   `sendTarget`, which adds the per-token rate (`Bot.ThrottleToken`, shared with the HTTP API). Anything written by third parties (text, names, captions, file names) goes
   under an `untrusted` field and through `clean()`. Mark read-only tools `ReadOnlyHint` and sending ones
   open-world / destructive.
-- `wabot mcp` speaks the protocol on **stdout**: never print to stdout in that mode (logs go to stderr,
+- `wame mcp` speaks the protocol on **stdout**: never print to stdout in that mode (logs go to stderr,
   whatsmeow logging stays off).
 - See [docs/security/SCOPED-TOKENS.md](docs/security/SCOPED-TOKENS.md) for the threat model and the
   findings these rules come from; add a regression test for any new auth behaviour.
