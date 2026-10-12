@@ -7,3 +7,5 @@ wame
 *.log
 zz_*_test.go
 bin/
+_demo/wame-demo
+_demo/frames/

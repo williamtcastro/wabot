@@ -26,4 +26,4 @@ jobs:
       - name: go test
         run: go test -race -count=1 ./...
       - name: build
-        run: CGO_ENABLED=0 go build -o /dev/null .
+        run: CGO_ENABLED=0 go build -o /dev/null . && go build -o /dev/null ./_demo

@@ -54,6 +54,7 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `internal/tui/complete.go` | `tui` | autocomplete (`suggest`, `pathSuggestions`, `chatTarget`) |
 | `internal/tui/view.go` | `tui` | rendering: panes, sidebar, context bar, footer, styles |
 | `internal/tui/format.go` | `tui` | text helpers and `safe()` sanitizing of untrusted text |
+| `_demo/` | `main` | README screenshot: seeds a scratch DB with fake chats and opens the TUI without connecting; `screenshot.sh` records it with VHS into `docs/wame-tui.png`. Ignored by `./...`, built by CI. Rerun it after visible TUI changes |
 | `docs/openapi.yaml` | | OpenAPI 3 spec, embedded into the binary (rebuild after editing) |
 | `docs/*.md` | | user docs: CLI, API, TUI, MCP, writing bot logic |
 | `docs/security/` | | security reviews (`SCOPED-TOKENS.md`: token system threat model, findings and fixes) |
@@ -68,7 +69,7 @@ rejects cycles anyway). `store` knows nothing about whatsmeow's client: it deals
 
 **Where new code goes:**
 
-- SQL, schema, filters, anything that reads or writes `wame_*` tables: `internal/store`.
+- SQL, schema, filters, anything that reads or writes `wabot_*` tables: `internal/store`.
 - Anything that talks to WhatsApp, enforces limits, audits or publishes events: `internal/bot`,
   in the file that matches (a new action goes in `actions.go`, a new event in `events.go`).
 - HTTP concerns (parsing requests, status codes, headers, scopes per route): `internal/api`. Handlers

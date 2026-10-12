@@ -13,21 +13,9 @@ handle them. Scoped tokens, rate limits and an audit log keep each of those in c
 It's one Go binary and one SQLite file, with no cgo and no external services. Built on
 [whatsmeow](https://github.com/tulir/whatsmeow).
 
-```
-╭──────────────────────────────╮╭──────────────────────────────────────────────────────╮
-│ Chats  3                     ││ Maria   +5511999999999                               │
-│                              ││ ──────────────────── Today ────────────────────      │
-│   All activity               ││                                                      │
-│ ▌ Maria                14:05 ││   oi, tudo bem?  14:02                               │
-│   bem também!                ││                              tudo, e você?  14:03 ✓  │
-│   👥 Family                2 ││   ┃ me: tudo, e você?                                │
-│   📷 foto da festa           ││   bem também!  │ 👍  14:05                           │
-│   ~John            Yesterday ││                                                      │
-╰──────────────────────────────╯╰──────────────────────────────────────────────────────╯
-╭──────────────────────────────────────────────────────────────────────────────────────╮
-│ › _                                                                                  │
-╰──────────────────────────────────────────────────────────────────────────────────────╯
-```
+![wame TUI: chat list on the left, a conversation with a quoted reply, a reaction and a PDF on the right](docs/wame-tui.png)
+
+<sub>Mocked data; regenerate with <code>_demo/screenshot.sh</code>.</sub>
 
 ## What you can do
 
