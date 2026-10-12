@@ -54,6 +54,9 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `internal/tui/complete.go` | `tui` | autocomplete (`suggest`, `pathSuggestions`, `chatTarget`) |
 | `internal/tui/view.go` | `tui` | rendering: panes, sidebar, context bar, footer, styles |
 | `internal/tui/format.go` | `tui` | text helpers and `safe()` sanitizing of untrusted text |
+| `internal/admin/client.go` | `admin` | `wame admin`: HTTP client for a remote server (`NewClient` refuses plain http beyond loopback), typed on `bot.Status`, `store.Token`, `store.AuditEntry` |
+| `internal/admin/model.go` | `admin` | the panel's Bubble Tea model: tabs, modes (pair, confirm, token form, one-time token view, filter), polling |
+| `internal/admin/view.go` | `admin` | rendering: header, tabs, status with QR, tokens and audit tables |
 | `_demo/` | `main` | README screenshot: seeds a scratch DB with fake chats and opens the TUI without connecting; `screenshot.sh` records it with VHS into `docs/wame-tui.png`. Ignored by `./...`, built by CI. Rerun it after visible TUI changes |
 | `docs/openapi.yaml` | | OpenAPI 3 spec, embedded into the binary (rebuild after editing) |
 | `docs/*.md` | | user docs: CLI, API, TUI, MCP, writing bot logic |
@@ -115,6 +118,8 @@ numbers and names below.
 - `internal/mcpserver`: read-only and restricted callers, cleaning of untrusted text.
 - `internal/tui`: 110×24 renders exactly 24 lines (with and without the context bar), autocomplete,
   reaction divider, vim-style keys, half-page scroll, `safe()`.
+- `internal/admin`: the client against the real `api.NewHandler` (tokens, audit paging, 401/403
+  messages), the http guard, and the panel's create → copy → revoke → filter flow.
 - `main`: default DB path, `isLoopbackAddr`.
 - Also: `internal/store/state_test.go` (read positions, upgrade marks history read, FTS search incl.
   accents/prefix/deleted/edited, group cache) and `internal/bot/state_test.go` (read-self receipts,
@@ -142,7 +147,8 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
 - **Keep the docs in sync.** A change to an endpoint means updating `internal/api/api.go`, `docs/openapi.yaml` *and*
   `docs/API.md`. A TUI key or command means updating `tuiHelp` in `internal/tui/commands.go`, the
   footer `hints` in `internal/tui/view.go` and `docs/TUI.md` (which quotes `tuiHelp` verbatim). A flag means
-  updating `usage` in `main.go`, `docs/CLI.md` and the README table. A new TUI command goes in
+  updating `usage` in `main.go`, `docs/CLI.md` and the README table. An admin panel key means
+  updating the footer `keys` in `internal/admin/view.go` and `docs/ADMIN.md`. A new TUI command goes in
   `tuiCommands` (autocomplete and hint bar), `tuiHelp` and `docs/TUI.md`.
 - Errors from the API are always `{"error": "..."}` via `writeError` (401/403 come from the auth
   middleware), which maps errors to codes:

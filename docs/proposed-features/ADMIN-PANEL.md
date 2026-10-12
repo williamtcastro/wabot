@@ -4,6 +4,10 @@
 > [Logging today](#logging-today) section describes. It's kept here as a plan we may pick up later;
 > see the [list of proposals](README.md).
 
+A terminal version now exists: `wame admin` ([ADMIN.md](../ADMIN.md)) covers status, remote
+login, tokens and the audit log over the API. The webhook, limiter, config and log views below
+would serve both.
+
 This is a plan for a small web admin panel served by `wame serve`, and a description of the
 logging and audit groundwork that already exists for it.
 

@@ -1,6 +1,6 @@
 # wame
 
-**WhatsApp manager for your terminal: a TUI, an HTTP API, a bot and an MCP server in one binary.**
+**WhatsApp manager for your terminal: a TUI, an HTTP API, a bot, an MCP server and a remote admin panel in one binary.**
 
 [![CI](https://github.com/williamtcastro/wame/actions/workflows/ci.yml/badge.svg)](https://github.com/williamtcastro/wame/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/go-1.26+-00ADD8?logo=go&logoColor=white)](go.mod)
@@ -141,6 +141,19 @@ pass `-allow-send`. The tools are `status`, `list_chats`, `read_messages`, `sear
 allowlists, rate limits and audit log as the API. Setup for Claude Desktop and other clients:
 [docs/MCP.md](docs/MCP.md).
 
+## Managing a remote server
+
+Running `wame serve` on a VPS or home server? Manage it from your laptop:
+
+```sh
+export WAME_TOKEN=…   # owner secret or an admin token
+wame admin -server https://wame.example.com
+```
+
+A terminal panel with the connection status, a QR to link the server's WhatsApp from afar (or a
+pairing code), token creation and revocation, and the audit log. It uses only the HTTP API and
+refuses plain `http://` beyond localhost, so use HTTPS or an SSH tunnel. See [docs/ADMIN.md](docs/ADMIN.md).
+
 ## Bots and webhooks
 
 wame calls your code when a message arrives:
@@ -180,7 +193,8 @@ The most used global flags:
 |---|---|---|---|
 | `-db` | `WAME_DB` | `~/.config/wame/wame.db` | session and message database |
 | `-addr` | `WAME_ADDR` | `127.0.0.1:8080` for `serve` | HTTP listen address; a non-loopback address needs a token |
-| `-token` | `WAME_TOKEN` | | owner secret, 16+ characters |
+| `-token` | `WAME_TOKEN` | | owner secret, 16+ characters (for `admin`: the token to connect with) |
+| `-server` | `WAME_SERVER` | `http://127.0.0.1:8080` | `admin` only: the server to manage |
 | `-webhook` / `-webhook-secret` / `-webhook-filter` | `WAME_WEBHOOK*` | | where and what to deliver, and how to sign it |
 | `-rate` / `-chat-gap` / `-max-wait` | `WAME_RATE` | `20` / `1s` / `30s` | send limits; a send that would wait longer than `-max-wait` gets a 429 |
 | `-online` | | `false` | appear online (off keeps notifications on your phone) |
@@ -198,6 +212,7 @@ All flags and commands: [docs/CLI.md](docs/CLI.md).
 | [OpenAPI spec](docs/openapi.yaml) | for Postman, Insomnia or Bruno; also served live at `/docs` |
 | [TUI](docs/TUI.md) | layout, keys and commands |
 | [Bots](docs/BOT.md) | your own bot logic via webhook, polling or Go, verifying signatures, running as a service |
+| [Admin panel](docs/ADMIN.md) | `wame admin`: manage a remote server from the terminal, connecting safely |
 | [MCP](docs/MCP.md) | the MCP server: HTTP and stdio, tools, safety, client setup |
 | [Security review](docs/security/SCOPED-TOKENS.md) | the token system's threat model, findings and fixes, operational advice |
 | [Proposed features](docs/proposed-features/README.md) | ideas not built yet: admin panel, image previews, LLM context, drafts approval, rules and state |

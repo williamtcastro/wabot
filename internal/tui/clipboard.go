@@ -30,15 +30,15 @@ func (m *model) copyNumber() tea.Cmd {
 		return m.setNotice(err.Error(), true)
 	}
 	return func() tea.Msg {
-		if err := copyToClipboard(text); err != nil {
+		if err := CopyToClipboard(text); err != nil {
 			return noticeMsg{"copy failed: " + err.Error(), true}
 		}
 		return noticeMsg{"copied " + text, false}
 	}
 }
 
-// copyToClipboard uses the system clipboard tool, or the terminal's OSC 52 clipboard (works over SSH).
-func copyToClipboard(text string) error {
+// CopyToClipboard uses the system clipboard tool, or the terminal's OSC 52 clipboard (works over SSH).
+func CopyToClipboard(text string) error {
 	for _, tool := range [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}, {"xsel", "--clipboard", "--input"}} {
 		if _, err := exec.LookPath(tool[0]); err != nil {
 			continue

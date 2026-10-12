@@ -25,6 +25,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
+	"github.com/williamtcastro/wame/internal/admin"
 	"github.com/williamtcastro/wame/internal/api"
 	"github.com/williamtcastro/wame/internal/auth"
 	"github.com/williamtcastro/wame/internal/bot"
@@ -47,6 +48,9 @@ Usage:
   wame token list | revoke NAME       manage API tokens for agents and bots (see docs/API.md)
   wame mcp [-allow-send] [-mcp-token TOKEN]
                                        MCP server over stdio for AI agents (see docs/MCP.md)
+  wame admin [-server URL] [-insecure]
+                                       admin panel for a running server: status, login, tokens, audit
+                                       (env WAME_SERVER, token in WAME_TOKEN; see docs/ADMIN.md)
   wame version                        print the version
   wame logout                         unlink the device and delete the session
 
@@ -90,6 +94,12 @@ func main() {
 		return
 	case "version", "--version":
 		fmt.Println("wame", version)
+		return
+	case "admin":
+		if err := adminCommand(args); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -644,4 +654,22 @@ func mcpCommand(ctx context.Context, b *bot.Bot, args []string) error {
 	}
 	b.Log.Info("MCP server on stdio", "as", p.Name, "scopes", p.Scopes)
 	return mcpserver.New(b, version, &p).Run(ctx, &mcp.StdioTransport{})
+}
+
+// adminCommand opens the admin panel for a server over its HTTP API; it never touches the local database.
+func adminCommand(args []string) error {
+	fs := flag.NewFlagSet("admin", flag.ExitOnError)
+	fs.Usage = func() { fmt.Println(usage) }
+	server := fs.String("server", envOr("WAME_SERVER", "http://127.0.0.1:8080"), "")
+	token := fs.String("token", envOr("WAME_TOKEN", ""), "")
+	insecure := fs.Bool("insecure", false, "")
+	_ = fs.Parse(args)
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q (flags go right after 'admin')", fs.Arg(0))
+	}
+	c, err := admin.NewClient(*server, *token, *insecure)
+	if err != nil {
+		return err
+	}
+	return admin.Run(c, tui.CopyToClipboard)
 }

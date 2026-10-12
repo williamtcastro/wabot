@@ -107,6 +107,15 @@ that API token, with its scopes and chat allowlist. It needs an existing login a
 WhatsApp connection, so don't run it alongside `serve` or `tui` on the same database; connect the
 agent to `http://127.0.0.1:8080/mcp` instead. stdout carries the protocol; logs go to stderr.
 
+### `wame admin [-server URL] [-insecure]`
+
+Opens a terminal [admin panel](ADMIN.md) for a server running elsewhere: status and remote login
+(QR or pairing code), tokens (create, revoke) and the audit log. It only talks to the HTTP API, so
+it needs no database and can run next to `serve`. `-server` (or `WAME_SERVER`, default
+`http://127.0.0.1:8080`) is the server's URL; the token comes from `WAME_TOKEN` (or `-token`) and
+must be the owner secret or have the admin scope. Plain `http://` is refused for non-loopback
+addresses unless you pass `-insecure`.
+
 ### `wame logout`
 
 Unlinks the device from your phone and deletes the session. Messages stored in the
