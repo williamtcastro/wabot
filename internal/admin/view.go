@@ -96,6 +96,14 @@ func (m *model) View() string {
 		body = m.modal(styleModal, m.viewAddOptOut())
 	case m.mode == modeConfirmRemoveOptOut:
 		body = m.modal(styleDanger, m.viewConfirmRemoveOptOut())
+	case m.mode == modeEditContact:
+		body = m.modal(styleModal, m.viewContactForm())
+	case m.mode == modeConfirmDeleteContact:
+		body = m.modal(styleDanger, m.viewConfirmDeleteContact())
+	case m.mode == modeConfirmImport:
+		body = m.modal(styleModal, m.viewConfirmImport())
+	case m.mode == modeImportContacts, m.mode == modeExportContacts:
+		body = m.modal(styleModal, m.viewContactPath())
 	case m.tab == tabStatus:
 		body = m.viewStatus()
 	case m.tab == tabChats:
@@ -110,6 +118,8 @@ func (m *model) View() string {
 		body = m.viewQueue()
 	case m.tab == tabLogs:
 		body = m.viewLogs()
+	case m.tab == tabContacts:
+		body = m.viewContacts()
 	default:
 		body = m.viewSettings()
 	}
@@ -262,6 +272,8 @@ func (m *model) viewNotice() string {
 	case modeSetting:
 		label, _ := settingLabel(m.editKey)
 		return " " + styleAccent.Render("✎ "+safe(label)) + " " + m.prompt.View()
+	case modeContactTag:
+		return m.viewContactTagPrompt()
 	}
 	if m.notice == "" {
 		return ""
@@ -283,15 +295,20 @@ func (m *model) viewKeys() string {
 		keys = [][2]string{{"j/k", "move"}, {"enter", "connect"}, {"esc", "cancel"}}
 	case modeCreate:
 		keys = [][2]string{{"tab", "next field"}, {"enter", "next / create"}, {"esc", "cancel"}}
+	case modeEditContact:
+		keys = [][2]string{{"tab", "next field"}, {"enter", "next / save"}, {"esc", "cancel"}}
+	case modeContactTag:
+		keys = [][2]string{{"enter", "ok"}, {"tab", "complete"}, {"esc", "cancel"}}
 	case modeShowToken:
 		keys = [][2]string{{"c", "copy"}, {"any key", "close"}}
-	case modePair, modeFilter, modeSearch, modeAddOptOut:
+	case modePair, modeFilter, modeSearch, modeAddOptOut, modeImportContacts, modeExportContacts:
 		keys = [][2]string{{"enter", "ok"}, {"esc", "cancel"}}
 	case modeCompose:
 		keys = [][2]string{{"enter", "send"}, {"esc", "cancel"}}
 	case modeSetting:
 		keys = [][2]string{{"enter", "save"}, {"esc", "cancel"}}
-	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch, modeConfirmRemoveOptOut:
+	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch, modeConfirmRemoveOptOut,
+		modeConfirmDeleteContact, modeConfirmImport:
 		keys = [][2]string{{"y", "confirm"}, {"any key", "cancel"}}
 	default:
 		switch m.tab {
@@ -302,7 +319,7 @@ func (m *model) viewKeys() string {
 				keys = append(keys, [2]string{"p", "pair with phone number"})
 			}
 		case tabChats:
-			keys = [][2]string{{"j/k", "chat"}, {"i", "send"}, {"/", "search"}}
+			keys = [][2]string{{"j/k", "chat"}, {"i", "send"}, {"/", "search"}, {"p", "contact"}}
 		case tabTokens:
 			keys = [][2]string{{"j/k", "move"}, {"n", "new"}, {"R", "rotate"}, {"x", "revoke"}}
 		case tabAudit:
@@ -330,6 +347,11 @@ func (m *model) viewKeys() string {
 				follow = "follow"
 			}
 			keys = [][2]string{{"j/k", "move"}, {"f", "level"}, {"/", "filter"}, {"F", follow}}
+		case tabContacts:
+			keys = [][2]string{{"/", "filter"}, {"t", "tag"}, {"e", "edit"}, {"x", "delete"}, {"I/E", "import/export"}}
+			if m.contactsReadOnly() {
+				keys = [][2]string{{"j/k", "move"}, {"/", "filter"}, {"t", "tag"}, {"enter", "chat"}}
+			}
 		}
 		keys = append(keys, [2]string{fmt.Sprintf("1-%d", len(tabNames)), "tabs"})
 		if len(m.opts.Profiles) > 0 {

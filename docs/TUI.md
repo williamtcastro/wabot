@@ -122,6 +122,8 @@ Commands
   /copy                     copy this chat's number (same as Ctrl+Y)
   /all                      live feed of every chat
   /contacts [search]        your address book
+  /name [text]              your name for the open chat (alone: clear it)
+  /tag clients vip          set its tags; /tag +vip -old edits them, alone clears
   /groups                   your groups
   /send <number|jid> <msg>  one-off message
   /file <path> [caption]    send a file to the open chat
@@ -130,7 +132,8 @@ Commands
   /help  /quit
 
 Typing a command, Tab completes it (and names after /to, numbers after /send,
-paths after /file), ↑ ↓ or Ctrl+J / Ctrl+K cycle the matches.
+paths after /file, the current name after /name), ↑ ↓ or Ctrl+J / Ctrl+K cycle
+the matches.
 ```
 
 Details:
@@ -187,6 +190,7 @@ While the input starts with `/`:
   - `/to `: names of your chats and address-book contacts, the number for chats without a
     contact name, and group JIDs.
   - `/send `: numbers and group JIDs of your chats.
+  - `/name `: the open chat's current name, to edit it (not when it's only a push name or a number).
   - `/file `: files and folders on disk, relative to the current directory or starting with
     `~/`. Hidden files only show up once you type a `.`; names containing spaces are skipped
     (`/file` can't take them anyway).
@@ -204,6 +208,8 @@ in the audit log with actor `tui` (including `/pair`).
 | `/search <words>` | search every chat; see **Search** above |
 | `/all` | go back to **All activity** |
 | `/contacts [search]` | list your contacts, optionally filtered by name or part of the number |
+| `/name [text]` | your own name for the open chat. It wins over the phone's address book and the person's push name everywhere: the chat list, the API, the admin panel. `/name` alone clears it. Never sent to WhatsApp or the phone |
+| `/tag <tags>` | `/tag clients vip` sets the open chat's tags, `/tag +vip -old` adds and removes some, `/tag` alone clears them. Tags are lowercase letters, digits, `-` and `_`. They show dimmed after the name above the conversation |
 | `/groups` | list your groups with their JIDs |
 | `/send <number or JID> <text>` | one-off message without switching chats |
 | `/file <path> [caption]` | send a file to the open chat (images go as photos, the rest as documents). `~/` expands to your home directory |
@@ -221,6 +227,9 @@ in the audit log with actor `tui` (including `/pair`).
   keep the app logs (HTTP requests, actions, webhook deliveries). whatsmeow's own logs stay off;
   to see them, run `wame serve -debug` with the same `-db` instead.
 - File paths in `/file` can't contain spaces.
+- `/name` and `/tag` work offline and only on people (not groups); both are in the audit log with
+  actor `tui` (field names only, never the values). The same list is edited from the API and the
+  admin panel's Contacts tab.
 - New commands go in `tuiCommands`, `tuiHelp` (in `internal/tui/commands.go`) and this file, so autocomplete,
   the hint bar and `/help` stay in sync.
 - WhatsApp sometimes identifies people by a hidden ID (`…@lid`) instead of their number,

@@ -208,9 +208,9 @@ func TestListKeysAndTabNumbers(t *testing.T) {
 	if m.tokSel != 0 {
 		t.Fatalf("g in tokens: sel %d", m.tokSel)
 	}
-	press(m, "9")
+	press(m, "0")
 	if m.tab != tabTokens {
-		t.Fatal("a digit past the last tab switched tabs")
+		t.Fatal("a digit outside the tabs switched tabs")
 	}
 	if !strings.Contains(ansi.Strip(m.View()), fmt.Sprintf(" 1-%d ", len(tabNames))) {
 		t.Fatal("tab hint missing")

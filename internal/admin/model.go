@@ -30,9 +30,10 @@ const (
 	tabSettings
 	tabQueue
 	tabLogs
+	tabContacts
 )
 
-var tabNames = []string{"Status", "Chats", "Tokens", "Audit", "Health", "Settings", "Queue", "Logs"}
+var tabNames = []string{"Status", "Chats", "Tokens", "Audit", "Health", "Settings", "Queue", "Logs", "Contacts"}
 
 type mode int
 
@@ -52,6 +53,12 @@ const (
 	modeConfirmCancelBatch
 	modeAddOptOut
 	modeConfirmRemoveOptOut
+	modeContactTag
+	modeEditContact
+	modeConfirmDeleteContact
+	modeImportContacts
+	modeConfirmImport
+	modeExportContacts
 )
 
 const (
@@ -190,6 +197,26 @@ type model struct {
 	optOutQuery   string
 	confirmOptOut string
 
+	contacts            []bot.Contact
+	contactsReq         inflight
+	contactsErr         error
+	contactSel          int
+	contactQuery        string
+	contactTag          string
+	contactTags         []store.TagCount
+	contactTagsErr      error
+	contactView         bot.ContactView
+	contactViewReq      inflight
+	contactViewErr      error
+	contactDenied       bool
+	contactJump         string
+	contactForm         contactForm
+	confirmContact      string
+	confirmContactLabel string
+	importPath          string
+	importData          []byte
+	importDry           store.ImportResult
+
 	logs        []logEntry
 	logsStarted time.Time
 	logsErr     error
@@ -265,6 +292,10 @@ func (m *model) loadAll() tea.Cmd {
 	}
 	if m.tab == tabLogs {
 		cmds = append(cmds, m.loadLogs(0), m.followLogs())
+	}
+	if m.tab == tabContacts {
+		cmds = append(cmds, m.loadContactsTab())
+		m.contactView, m.contactViewErr = bot.ContactView{}, nil
 	}
 	return tea.Batch(cmds...)
 }
@@ -471,6 +502,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyOptOuts(msg)
 		return m, nil
 
+	case contactsMsg:
+		return m, m.applyContacts(msg)
+
+	case contactTagsMsg:
+		m.applyContactTags(msg)
+		return m, nil
+
+	case contactViewMsg:
+		m.applyContactView(msg)
+		return m, nil
+
+	case contactDoneMsg:
+		return m, m.applyContactDone(msg)
+
+	case importCheckedMsg:
+		m.applyImportChecked(msg)
+		return m, nil
+
 	case queueReloadMsg:
 		return m, m.reloadQueue()
 
@@ -588,12 +637,21 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		})
 	case modeAddOptOut:
 		return m.promptKey(k, m.addOptOut)
+	case modeContactTag:
+		return m.contactTagKey(k)
+	case modeImportContacts:
+		return m.promptKey(k, m.checkImport)
+	case modeExportContacts:
+		return m.promptKey(k, m.exportContacts)
 	case modeFilter:
 		return m, m.filterKey(k)
-	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch, modeConfirmRemoveOptOut:
+	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch, modeConfirmRemoveOptOut,
+		modeConfirmDeleteContact, modeConfirmImport:
 		return m, m.confirmKey(k.String() == "y")
 	case modeCreate:
 		return m.formKey(k)
+	case modeEditContact:
+		return m.contactFormKey(k)
 	case modeShowToken:
 		if k.String() == "c" {
 			plain, copyFn := m.created, m.opts.Copy
@@ -684,6 +742,19 @@ func (m *model) confirmKey(yes bool) tea.Cmd {
 			return nil
 		}
 		return m.removeOptOut(m.confirmOptOut)
+	case modeConfirmDeleteContact:
+		if !yes {
+			m.setNotice("kept "+m.confirmContactLabel, false)
+			return nil
+		}
+		return m.removeContact(m.confirmContact, m.confirmContactLabel)
+	case modeConfirmImport:
+		if !yes {
+			m.importData = nil
+			m.setNotice("nothing imported", false)
+			return nil
+		}
+		return m.runImport()
 	}
 	return nil
 }
@@ -735,6 +806,8 @@ func (m *model) setTab(t tab) tea.Cmd {
 		return tea.Batch(m.loadQueue(), m.loadStats(), m.loadOptOuts())
 	case tabLogs:
 		return tea.Batch(m.refreshLogs(), m.followLogs())
+	case tabContacts:
+		return m.loadContactsTab()
 	}
 	return nil
 }
@@ -757,7 +830,12 @@ func (m *model) tabKey(k string) tea.Cmd {
 			m.mode = modeConfirmLogout
 		}
 	case tabChats:
+		if k == "p" {
+			return m.jumpToContact(m.selectedChat())
+		}
 		return m.chatsKey(k)
+	case tabContacts:
+		return m.contactsKey(k)
 	case tabTokens:
 		return m.tokensKey(k)
 	case tabHealth:
@@ -817,11 +895,13 @@ func (m *model) auditKey(k string) tea.Cmd {
 	return nil
 }
 
-// filterQuery is the open tab's filter: Logs, Audit or the Queue tab's opt-outs.
+// filterQuery is the open tab's filter: Logs, Audit, Contacts or the Queue tab's opt-outs.
 func (m *model) filterQuery() *string {
 	switch m.tab {
 	case tabLogs:
 		return &m.logsQuery
+	case tabContacts:
+		return &m.contactQuery
 	case tabQueue:
 		return &m.optOutQuery
 	}
@@ -835,6 +915,8 @@ func (m *model) clampFiltered() {
 		m.logsSel = clamp(m.logsSel, len(m.visibleLogs()))
 	case tabQueue:
 		m.optOutSel = clamp(m.optOutSel, len(m.visibleOptOuts()))
+	case tabContacts:
+		m.contactSel = clamp(m.contactSel, len(m.visibleContacts()))
 	default:
 		m.auditSel = clamp(m.auditSel, len(m.visibleAudit()))
 	}
@@ -869,6 +951,9 @@ func (m *model) filterKey(k tea.KeyMsg) tea.Cmd {
 		*q = m.prompt.Value()
 	}
 	m.clampFiltered()
+	if m.tab == tabContacts {
+		return tea.Batch(cmd, m.contactSelected())
+	}
 	return cmd
 }
 
@@ -912,6 +997,7 @@ func (m *model) switchTo(p Profile) tea.Cmd {
 func (m *model) startPrompt(md mode, placeholder string) {
 	m.mode = md
 	m.prompt.Reset()
+	m.prompt.ShowSuggestions = false
 	m.prompt.Placeholder = placeholder
 	m.prompt.Focus()
 }

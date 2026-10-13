@@ -14,18 +14,19 @@ wame admin -server https://wame.example.com
 | Tab | Shows | Keys |
 |---|---|---|
 | **1 Status** | cards for the WhatsApp session, the server (URL, version and uptime, latency, live or polling), tokens (active, expiring within 7 days, unused for 30+ days, revoked), the last 24 h of activity, messages in the last hour (received, sent, busiest chats) and health (send rate, 429s, webhook). While the server isn't linked, the QR to scan instead, or the pairing code after `p` | `p` pair with a phone number, `L` log out (asks first) |
-| **2 Chats** | the server's chats with unread counts, and the selected chat's latest messages; or results of a search across every chat | `j`/`k`, `g`/`G` pick a chat, `i` send a message, `/` search, `Esc` clear the search |
+| **2 Chats** | the server's chats with unread counts, and the selected chat's latest messages; or results of a search across every chat | `j`/`k`, `g`/`G` pick a chat, `i` send a message, `/` search, `Esc` clear the search, `p` the person on the Contacts tab |
 | **3 Tokens** | every token with colored scopes (`read`, `send`, `admin`), chats, rate, expiry (amber within 7 days), last use (amber ⚠ when unused for 30+ days), its requests and sends in the last 24 h (failed sends in red), open live connections, and creator; revoked and expired ones struck through. A card below shows the selected token in full, including when and from which IP it was last seen | `j`/`k` move, `n` new, `R` rotate, `x` revoke (both ask first) |
 | **4 Audit** | the audit log, newest first, with ✓ / ✗ and actions colored by kind; a card below shows the selected entry with its full time and error | `j`/`k`, `Ctrl+D`/`Ctrl+U`, `g`/`G` move, `/` filter, `Esc` clear the filter |
 | **5 Health** | the server's version and uptime; for sends, number lookups and auto-replies, a meter of the last minute's use against the limit, the per-chat gap and 429s (or dropped auto-replies) since startup; the webhook's queue, delivered / retried / replayed / given up / dropped counts and its latest failures; the [alerts](#alerts): backend, delay, sent (failed in red), the last one sent and the last error | `j`/`k` pick a failure, `R` replay it, `t` send a test delivery, `a` send a test alert |
 | **6 Settings** | the settings that change without a restart (send rate, chat gap, max wait, auto-replies, webhook filter, queue paused, queue jitter, queue quiet hours, quiet hours on/off, queue time zone): the value in effect, the server's flag, and who changed it and when | `j`/`k` move, `Enter` change (toggles on/off ones), `x` back to the flag |
 | **7 Queue** | the [send queue](QUEUE.md): whether it's sending, paused, in [quiet hours](QUEUE.md#quiet-hours) (until when, in which zone), backing off or has no worker, what's waiting and what was sent or failed in the last 7 days, how many sent ones were delivered and read, the quiet hours, the jitter and the last error; below, the items (batch, recipient, state, attempts, who queued it, when it's due, error), never their text. A sent item's state shows its receipts like WhatsApp: `✓ sent`, `✓✓ delivered`, and a blue `✓✓ read`. The card also counts the opt-outs: chats that get no queued messages (`GET /optouts`, see [API.md](API.md#get-optouts-post-optouts-delete-optoutschat)); `o` swaps the items for that list (number, name when known, reason such as `keyword STOP` or `added by api`, when; one stored under a `…@lid` id shows that id, without a name) | `j`/`k` move, `f` filter by state, `x` cancel the marked item, `X` cancel its whole batch (asks first), `P` pause / resume, `Q` quiet hours off / on (keeps the window), `o` opt-outs. In the opt-outs: `j`/`k` move, `/` filter, `a` add a number or JID, `x` remove the marked one (asks first), `o` back to the items (`Esc` too, once the filter is cleared) |
+| **9 Contacts** | the people in the phone's address book and the server's own contact list, merged (`GET /contacts`): unified name, where it comes from (`own`, `book`, `business`, `push`, `number`), number and tags; a card below shows the selected person (`GET /contacts/{number}`): every name with its source, tags and, for an admin, your notes, language, time zone and who changed them last ([details](#contacts)) | `j`/`k` move, `/` filter (name, number, tag), `t` show only some tags, `Esc` clear the filter, then the tags, `e` edit name, tags and notes, `x` delete your fields (asks first), `I` import a CSV (checks first), `E` export to a CSV file, `Enter` open the chat on Chats |
 | **8 Logs** | the server's recent app logs, newest first: time, level (debug faint, info blue, warn amber, error red), message and attributes (dim); a card below shows the selected entry with every attribute. While the tab is open it follows new entries every 3 s ([details](#logs)) | `j`/`k` move, `f` level (all, info, warn, error), `/` filter, `Esc` clear the filter, `F` pause / follow |
 
 In every list, `j`/`k` or the arrows move, `Ctrl+D`/`Ctrl+U` or `PgDn`/`PgUp` page, and `g`/`G` or
 `Home`/`End` jump to the top / bottom. Times show in your local time zone, whatever the server's is.
 
-Everywhere: `1`–`8` or `Tab` / `Shift+Tab` switch tabs, `S` switches server (see
+Everywhere: `1`–`9` or `Tab` / `Shift+Tab` switch tabs, `S` switches server (see
 [Several servers](#several-servers)), `r` refreshes, `q` or `Ctrl+C` quits. The header shows unread
 chats, active tokens, failed actions in the last 24 h (red), a `!` on Health after a 429,
 webhook failure or alert error in the last hour, a `•` on Settings while any is changed from its flag and the number
@@ -58,6 +59,37 @@ full-text search.
 
 Text written by other people (names, messages, file names) is stripped of control characters and
 bidi overrides before it's drawn, so it can't redraw or recolor the screen.
+
+## Contacts
+
+The Contacts tab is your own list of people, kept on the server (see
+[the plan](proposed-features/CONTACTS.md)): a name, tags and notes per person, merged with the
+phone's address book. Your name wins over every other one, in the panel, the TUI, the API and MCP.
+Nothing is ever written to WhatsApp or to the phone.
+
+- **Edit** (`e`): a form with the name, the tags (separated by spaces) and the notes. Only what you
+  changed is sent (`PATCH`), and tags go as additions and removals, so another panel's edit in the
+  meantime isn't undone. An empty field clears it. The notes field shows up once the card has
+  loaded; notes are drawn on one line, newlines folded.
+- **Delete** (`x`): removes your name, tags, notes, language and time zone for the person marked
+  when you pressed it; the address book and WhatsApp names stay.
+- **Import** (`I`): a local CSV file with a `number` column and any of `name`, `tags`, `notes`,
+  `language`, `time_zone` (up to 5000 rows and 4 MB). The server checks it first (`dry_run`) and
+  the panel shows how many people would be added, updated or left as they are; `y` sends the same
+  file, as it was checked. A column present overwrites that field; an empty cell clears it. A bad
+  line stores nothing and names the line.
+- **Export** (`E`): saves your list as CSV in the import's columns to a new file (mode 0600; `~/`
+  works). An existing file is never overwritten.
+- **Tags** (`t`): show only people with every tag typed (`clients vip`); `Tab` completes a known tag,
+  and the prompt lists them with their counts. An empty prompt shows everyone again.
+- `p` on the Chats tab jumps here with that chat's person selected, even when nothing is stored
+  about them yet, so `e` names them. Groups aren't contacts.
+
+The tab loads when you open it, after each of its own changes and on `r`; it doesn't poll. Names,
+tags and notes are sanitized like messages. A token without the admin scope sees the list and the
+names but no notes, and `e`, `x`, `I` and `E` say they need the admin scope; a token limited to some
+chats sees only those and can't filter by tag. A server older than the contact list says so
+instead of failing.
 
 ## Rotating a token
 
@@ -198,7 +230,8 @@ Tailscale): the token would otherwise be readable by anyone on the path.
 A token without the admin scope can still open the panel and see the Status and Chats tabs (without
 the QR), but the Tokens, Audit, Health and Logs tabs say it needs the admin scope, and so do the
 opt-outs: the Queue card leaves out their count and the panel stops asking for them until `r`, `o`
-or a tab switch. Prefer a dedicated
+or a tab switch. On the Contacts tab it can read names and tags but not notes, and can't change
+anything. Prefer a dedicated
 admin token with an expiry over the owner secret, so it can be revoked (or rotated) on its own:
 
 ```sh
@@ -206,7 +239,8 @@ wame token create ops-laptop -scopes admin -expires 720h   # on the server
 ```
 
 The Health tab, the usage columns, webhook test and replay, the Settings, Queue and Logs tabs and the opt-outs
-need a recent server (`GET /stats`, `/settings`, `/webhook/*`, `/queue`, `/logs`, `/optouts`); an older one says so
+need a recent server (`GET /stats`, `/settings`, `/webhook/*`, `/queue`, `/logs`, `/optouts`), and so do the
+Contacts tab and `p` (`/contacts/tags`, `/contacts/{number}`); an older one says so
 instead of failing.
 
 ## What it doesn't do (yet)

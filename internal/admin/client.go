@@ -103,7 +103,11 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	return c.send(ctx, c.http, method, path, query, bytes.NewReader(data), http.Header{"Content-Type": {"application/json"}}, out)
 }
 
-// send makes one request with a raw body on hc and decodes a 2xx JSON answer into out.
+// maxRawAnswer caps an answer read as bytes (a CSV export) rather than JSON.
+const maxRawAnswer = 64 << 20
+
+// send makes one request with a raw body on hc and decodes a 2xx JSON answer into out, or with
+// out a *[]byte, keeps the answer as it came.
 func (c *Client) send(ctx context.Context, hc *http.Client, method, path string, query url.Values, body io.Reader, header http.Header, out any) error {
 	u := c.base.JoinPath(path)
 	u.RawQuery = query.Encode()
@@ -123,7 +127,12 @@ func (c *Client) send(ctx context.Context, hc *http.Client, method, path string,
 		return err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	limit := int64(16 << 20)
+	raw, isRaw := out.(*[]byte)
+	if isRaw {
+		limit = maxRawAnswer
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return err
 	}
@@ -134,7 +143,13 @@ func (c *Client) send(ctx context.Context, hc *http.Client, method, path string,
 		_ = json.Unmarshal(data, &e)
 		return &APIError{Code: resp.StatusCode, Msg: e.Error}
 	}
-	if out == nil {
+	switch {
+	case isRaw && int64(len(data)) > limit:
+		return fmt.Errorf("the answer from %s is larger than %d MB", path, limit>>20)
+	case isRaw:
+		*raw = data
+		return nil
+	case out == nil:
 		return nil
 	}
 	if err := json.Unmarshal(data, out); err != nil {
@@ -440,4 +455,76 @@ func (c *Client) AddOptOut(ctx context.Context, chat string) (o store.OptOut, ad
 
 func (c *Client) RemoveOptOut(ctx context.Context, chat string) error {
 	return c.do(ctx, "DELETE", "optouts/"+url.PathEscape(chat), nil, nil, nil)
+}
+
+// ContactsQuery filters GET /contacts: Q matches names, tags and the number, every tag in Tags must
+// be set, Known drops people known only by push name or number.
+type ContactsQuery struct {
+	Q     string
+	Tags  []string
+	Known bool
+	Limit int
+}
+
+// Contacts lists the people in the phone's address book and the server's own contact list, merged.
+func (c *Client) Contacts(ctx context.Context, q ContactsQuery) ([]bot.Contact, error) {
+	v := url.Values{"tag": q.Tags}
+	if q.Q != "" {
+		v.Set("q", q.Q)
+	}
+	if q.Known {
+		v.Set("known", "1")
+	}
+	if q.Limit > 0 {
+		v.Set("limit", strconv.Itoa(q.Limit))
+	}
+	var out []bot.Contact
+	err := c.do(ctx, "GET", "contacts", v, nil, &out)
+	return out, err
+}
+
+// ContactTags counts the people per tag. A server older than the own contact list answers 404.
+func (c *Client) ContactTags(ctx context.Context) ([]store.TagCount, error) {
+	var out []store.TagCount
+	err := c.do(ctx, "GET", "contacts/tags", nil, nil, &out)
+	return out, err
+}
+
+// Contact is one person by number or JID; Own (with the notes) comes only to an admin, and only
+// when something is stored about them.
+func (c *Client) Contact(ctx context.Context, number string) (bot.ContactView, error) {
+	var out bot.ContactView
+	err := c.do(ctx, "GET", "contacts/"+url.PathEscape(number), nil, nil, &out)
+	return out, err
+}
+
+// PatchContact changes only the fields set in in; the answer is the person as the token may see them.
+func (c *Client) PatchContact(ctx context.Context, number string, in bot.ContactInput) (bot.ContactView, error) {
+	var out bot.ContactView
+	err := c.do(ctx, "PATCH", "contacts/"+url.PathEscape(number), nil, in, &out)
+	return out, err
+}
+
+// DeleteContact removes your own fields for a person; 404 when there were none.
+func (c *Client) DeleteContact(ctx context.Context, number string) error {
+	return c.do(ctx, "DELETE", "contacts/"+url.PathEscape(number), nil, nil, nil)
+}
+
+// ImportContacts uploads a contacts CSV (see bot.ContactImportColumns); with dryRun the server only
+// counts what it would add and update.
+func (c *Client) ImportContacts(ctx context.Context, csv []byte, dryRun bool) (store.ImportResult, error) {
+	var q url.Values
+	if dryRun {
+		q = url.Values{"dry_run": {"1"}}
+	}
+	var out store.ImportResult
+	err := c.send(ctx, c.stream, "POST", "contacts/import", q, bytes.NewReader(csv), http.Header{"Content-Type": {"text/csv; charset=utf-8"}}, &out)
+	return out, err
+}
+
+// ExportContacts returns the server's own contact list as CSV, in the import's columns.
+func (c *Client) ExportContacts(ctx context.Context) ([]byte, error) {
+	var out []byte
+	err := c.send(ctx, c.stream, "GET", "contacts/export", nil, nil, nil, &out)
+	return out, err
 }

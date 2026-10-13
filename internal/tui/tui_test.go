@@ -13,6 +13,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/williamtcastro/wame/internal/bot"
@@ -482,5 +483,79 @@ func TestChatReloadsAreDebouncedAndOrdered(t *testing.T) {
 	m.Update(stale)
 	if len(m.chats) != 3 {
 		t.Fatalf("an older chat list replaced a newer one: %d chats", len(m.chats))
+	}
+}
+
+func TestNameAndTagCommands(t *testing.T) {
+	group := "120363000000000000@g.us"
+	msgs := append(chatMessages(), store.Message{ID: "G1", Chat: group, Sender: ana, IsGroup: true, Type: "text", Text: "oi", Timestamp: time.Now()})
+	m := newTestModel(t, msgs...)
+	command := func(line string) {
+		t.Helper()
+		m.input.SetValue(line)
+		m.notice = ""
+		if cmd := press(m, "enter"); m.notice == "" {
+			run(m, cmd)
+		}
+	}
+	title := func() string { return ansi.Strip(m.paneTitle()) }
+
+	command("/name Maria")
+	if !m.noticeErr || !strings.Contains(m.notice, "no chat open") {
+		t.Fatalf("/name without a chat: %q", m.notice)
+	}
+	run(m, m.open(maria))
+	command("/name Maria Silva")
+	if !strings.HasPrefix(title(), "Maria Silva") || m.noticeErr {
+		t.Fatalf("/name: title %q, notice %q", title(), m.notice)
+	}
+	if got := m.bot.ChatName(t.Context(), maria, ""); got != "Maria Silva" {
+		t.Fatalf("the unified name is %q", got)
+	}
+	command("/tag clients vip")
+	if !strings.Contains(title(), "Maria Silva  clients vip") {
+		t.Fatalf("/tag: %q", title())
+	}
+	command("/tag +late -vip")
+	if !strings.Contains(title(), "clients late") || strings.Contains(title(), "vip") {
+		t.Fatalf("/tag +late -vip: %q", title())
+	}
+	command("/tag clients +vip")
+	if !m.noticeErr || !strings.Contains(m.notice, "not both") {
+		t.Fatalf("mixed /tag: %q", m.notice)
+	}
+	command("/tag Bad\x1b[2J")
+	if !m.noticeErr || strings.Contains(m.notice, "\x1b") {
+		t.Fatalf("a bad tag: %q", m.notice)
+	}
+
+	if !m.chatsReload.Pending() {
+		t.Fatal("/name must reload the chat list")
+	}
+	settle(m, func() tea.Msg { return chatsReloadMsg{} })
+	if i := chatIndex(m.chats, maria); i < 0 || m.chats[i].Name != "Maria Silva" {
+		t.Fatalf("the chat list keeps the old name: %+v", m.chats)
+	}
+	run(m, m.open(john))
+	run(m, m.open(maria))
+	if !strings.Contains(title(), "Maria Silva  clients late") {
+		t.Fatalf("reopening must load the tags: %q", title())
+	}
+	m.input.SetValue("")
+	typeText(m, "/name ")
+	if got := m.input.MatchedSuggestions(); len(got) != 1 || got[0] != "/name Maria Silva" {
+		t.Fatalf("/name completion: %q", got)
+	}
+
+	command("/name")
+	command("/tag")
+	if got := title(); strings.Contains(got, "Maria") || strings.Contains(got, "clients") || !strings.HasPrefix(got, "+5511999999999") {
+		t.Fatalf("/name and /tag alone must clear: %q", got)
+	}
+
+	run(m, m.open(group))
+	command("/name Family")
+	if !m.noticeErr || !strings.Contains(m.notice, "not groups") {
+		t.Fatalf("/name on a group: %q", m.notice)
 	}
 }

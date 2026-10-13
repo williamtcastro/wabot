@@ -54,6 +54,7 @@ type (
 	openedMsg      struct {
 		seq           int
 		jid, name     string
+		tags          []string
 		msgs          []store.Message
 		readSeq, jump int64
 	}
@@ -87,6 +88,7 @@ type model struct {
 	chatsReload termui.Debounce
 
 	active, activeName string
+	activeTags         []string
 	msgs               []store.Message
 	feed               []store.Message
 
@@ -199,7 +201,12 @@ func (m *model) load(seq int, jid string, jump int64) tea.Cmd {
 			return noticeMsg{"load chat: " + err.Error(), true}
 		}
 		slices.Reverse(msgs)
-		return openedMsg{seq: seq, jid: jid, name: m.bot.ChatName(context.Background(), jid, ""), msgs: msgs,
+		ctx := context.Background()
+		var tags []string
+		if v, err := m.bot.ContactOf(ctx, jid); err == nil {
+			tags = v.Tags
+		}
+		return openedMsg{seq: seq, jid: jid, name: m.bot.ChatName(ctx, jid, ""), tags: tags, msgs: msgs,
 			readSeq: m.bot.Store.ReadSeq(jid), jump: jump}
 	}
 }
@@ -269,6 +276,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vp.GotoTop()
 		return m, nil
 
+	case contactMsg:
+		return m, m.applyContact(msg)
+
 	case contactNamesMsg:
 		m.contactNames, m.loadingNames = msg, false
 		return m, m.suggest()
@@ -330,6 +340,7 @@ func (m *model) applyOpened(msg openedMsg) tea.Cmd {
 	}
 	m.replyTo, m.editing, m.panelTitle = nil, nil, ""
 	m.active, m.activeName, m.msgs, m.sel = msg.jid, safeLine(msg.name), safeAll(msg.msgs), -1
+	m.activeTags = safeTags(msg.tags)
 	if i := chatIndex(m.chats, msg.jid); i >= 0 {
 		m.activeName = m.chats[i].Name
 	}

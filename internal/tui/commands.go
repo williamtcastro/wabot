@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,6 +40,8 @@ Commands
   /copy                     copy this chat's number (same as Ctrl+Y)
   /all                      live feed of every chat
   /contacts [search]        your address book
+  /name [text]              your name for the open chat (alone: clear it)
+  /tag clients vip          set its tags; /tag +vip -old edits them, alone clears
   /groups                   your groups
   /send <number|jid> <msg>  one-off message
   /file <path> [caption]    send a file to the open chat
@@ -47,12 +50,15 @@ Commands
   /help  /quit
 
 Typing a command, Tab completes it (and names after /to, numbers after /send,
-paths after /file), ↑ ↓ or Ctrl+J / Ctrl+K cycle the matches.`
+paths after /file, the current name after /name), ↑ ↓ or Ctrl+J / Ctrl+K cycle
+the matches.`
 
 var tuiCommands = []struct{ name, args, desc string }{
 	{"/to", "<name|number>", "open a chat"},
 	{"/all", "", "every chat, live"},
 	{"/contacts", "[search]", "address book"},
+	{"/name", "[text]", "your name for this chat"},
+	{"/tag", "<tags|+add -remove>", "tags for this chat"},
 	{"/groups", "", "your groups"},
 	{"/send", "<number> <text>", "one-off message"},
 	{"/file", "<path> [caption]", "send a file here"},
@@ -117,6 +123,22 @@ func (m *model) command(line string) tea.Cmd {
 			}
 			return panelMsg{fmt.Sprintf("Contacts (%d) · /to <name> to open", len(contacts)), formatContacts(contacts, 0)}
 		}
+	case "/name", "/tag":
+		if m.active == "" {
+			return m.setNotice("no chat open: /to <name> first", true)
+		}
+		in, err := contactInput(cmd, rest)
+		if err != nil {
+			return m.setNotice(err.Error(), true)
+		}
+		chat := m.active
+		return func() tea.Msg {
+			v, err := m.bot.PatchContact(context.Background(), actor, chat, in)
+			if err != nil {
+				return noticeMsg{err.Error(), true}
+			}
+			return contactMsg{chat, v}
+		}
 	case "/groups":
 		return func() tea.Msg {
 			groups, err := m.bot.Client.GetJoinedGroups(context.Background())
@@ -178,6 +200,59 @@ func (m *model) command(line string) tea.Cmd {
 		})
 	}
 	return m.setNotice("unknown command "+cmd+" (try /help)", true)
+}
+
+// contactMsg is a person's contact after /name or /tag changed it.
+type contactMsg struct {
+	chat string
+	v    bot.ContactView
+}
+
+// contactInput turns /name or /tag into a PATCH: "/tag a b" sets the tags, "/tag +a -b" edits them,
+// and either command alone clears.
+func contactInput(cmd, rest string) (bot.ContactInput, error) {
+	if cmd == "/name" {
+		return bot.ContactInput{Name: &rest}, nil
+	}
+	var in bot.ContactInput
+	set := []string{}
+	for _, f := range strings.Fields(rest) {
+		switch {
+		case strings.HasPrefix(f, "+"):
+			in.AddTags = append(in.AddTags, f[1:])
+		case strings.HasPrefix(f, "-"):
+			in.RemoveTags = append(in.RemoveTags, f[1:])
+		default:
+			set = append(set, f)
+		}
+	}
+	switch {
+	case len(in.AddTags)+len(in.RemoveTags) == 0:
+		in.Tags = &set
+	case len(set) > 0:
+		return in, errors.New("either list every tag (/tag clients vip) or change some (/tag +vip -old), not both")
+	}
+	return in, nil
+}
+
+// applyContact shows the new name and tags of the open chat; the chat list follows on reload.
+func (m *model) applyContact(msg contactMsg) tea.Cmd {
+	if msg.chat == m.active {
+		m.activeName, m.activeTags = safeLine(msg.v.Display), safeTags(msg.v.Tags)
+	}
+	notice := "no tags"
+	if len(msg.v.Tags) > 0 {
+		notice = "tags: " + strings.Join(msg.v.Tags, " ")
+	}
+	return tea.Batch(m.setNotice(msg.v.Display+" · "+notice, false), m.chatsChanged())
+}
+
+func safeTags(tags []string) []string {
+	out := make([]string, len(tags))
+	for i, t := range tags {
+		out[i] = safeLine(t)
+	}
+	return out
 }
 
 func (m *model) openByName(q string) tea.Cmd {

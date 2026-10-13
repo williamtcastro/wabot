@@ -54,6 +54,8 @@ func (m *model) suggest() tea.Cmd {
 				return contactNamesMsg(names)
 			}
 		}
+	case cmd == "/name" && m.active != "" && !strings.HasPrefix(m.activeName, "~") && !strings.HasPrefix(m.activeName, "+"):
+		list = []string{"/name " + m.activeName}
 	case cmd == "/send":
 		for _, c := range m.chats {
 			target := userOf(c.JID)

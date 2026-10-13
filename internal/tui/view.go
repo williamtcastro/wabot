@@ -308,7 +308,11 @@ func (m *model) paneTitle() string {
 	}
 	sub, _ := copyTarget(m.active)
 	hint := styleFaint.Render("   ctrl+y copy")
-	return ansi.Truncate(styleBold.Render(m.activeName)+styleDim.Render("   "+cmp.Or(sub, m.active))+hint, m.vp.Width, "…")
+	tags := ""
+	if len(m.activeTags) > 0 {
+		tags = styleDim.Render("  " + strings.Join(m.activeTags, " "))
+	}
+	return ansi.Truncate(styleBold.Render(m.activeName)+tags+styleDim.Render("   "+cmp.Or(sub, m.active))+hint, m.vp.Width, "…")
 }
 
 func (m *model) contextBar() string {
