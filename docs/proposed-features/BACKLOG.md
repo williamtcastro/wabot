@@ -82,41 +82,8 @@ keeps media for a limited time (weeks), after which `/media` answers 410 and the
 
 ## Contacts
 
-### wame's own contact list
-
-Today `GET /contacts` reads whatsmeow's `whatsmeow_contacts` (the phone's address book synced by
-WhatsApp, plus push names), read-only, and skips numbers without a saved name. A small
-`wame_contacts` table on top would hold your own name, tags and notes per number, filled by hand
-(`PUT /contacts/{number}`, admin panel), from CSV, or automatically from people who write to you.
-
-- Uses: CSV sends by tag (`to=tag:clients`), `{name}` in message templates, a nicer Chats list.
-- Merge rule: your own name wins over the phone's, which wins over the push name; never written
-  back to WhatsApp.
-- Watch for: restricted tokens (only contacts in their allowlist), privacy (notes are personal
-  data; keep them out of logs, events and alerts), LID mapping (key by phone JID, relink like
-  messages).
-
-### A richer contact profile
-
-`GET /contacts/{number}` (and a profile card in the admin panel's Chats tab, `p` on a chat) that
-puts everything known about a person in one place:
-
-- **From WhatsApp, on request and cached** (whatsmeow): profile picture
-  (`GetProfilePictureInfo`: URL and id, refreshed when the id changes), "about" text and verified
-  business name (`GetUserInfo`), business profile (`GetBusinessProfile`: address, email, website,
-  category, hours), whether the number is on WhatsApp. These are lookups: they go through
-  `Bot.lookup` and its budget, are cached (e.g. 24 h, in a `wame_contact_cache` table), and are
-  never triggered by a restricted token's input.
-- **From wame's own data**: names from every source (your own, the phone's, the push name), first
-  and last message, message counts sent and received, unread, groups in common (from the group
-  cache), queued and sent items with receipts (delivered/read rates), opt-out status, which tokens'
-  allowlists include the chat.
-- **Your own fields** (the table above): name, tags, notes, a preferred language or time zone (for
-  quiet hours per recipient later).
-
-Watch for: privacy (a profile aggregates personal data: admin scope only; never in logs, events,
-alerts or webhooks; the photo is fetched, not stored unless asked), the lookup budget (no bulk
-profile refreshes; batch `GetUserInfo` when needed), and stale caches (show "as of").
+See [CONTACTS.md](CONTACTS.md): wame's own contact list (names, tags, notes) and a profile per
+person, plus tags, `{name}` templates and dedupe in the queue.
 
 ## Integrations
 
