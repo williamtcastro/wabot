@@ -139,10 +139,8 @@ func run(m *model, cmd tea.Cmd) {
 	for cmd != nil {
 		out := make(chan tea.Msg, 1)
 		go func() { out <- cmd() }()
-		var msg tea.Msg
-		select {
-		case msg = <-out:
-		case <-time.After(100 * time.Millisecond):
+		msg, ok := wait(out)
+		if !ok {
 			return
 		}
 		if batch, ok := msg.(tea.BatchMsg); ok {
@@ -269,5 +267,23 @@ func TestPanelShowsTheQR(t *testing.T) {
 	press(m, "L")
 	if m.mode == modeConfirmLogout {
 		t.Fatal("offered logout while not logged in")
+	}
+}
+
+// wait returns cmd's message. A timer (cursor blink, poll tick) is dropped after 100 ms, but a server
+// call is waited for: on a slow CI runner one can take longer than that.
+func wait(out <-chan tea.Msg) (tea.Msg, bool) {
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case msg := <-out:
+			return msg, true
+		case <-time.After(100 * time.Millisecond):
+			if callsInFlight.Load() == 0 {
+				return nil, false
+			}
+		case <-deadline:
+			return nil, false
+		}
 	}
 }

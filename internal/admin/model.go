@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -302,12 +303,17 @@ func (f *inflight) done(seq int) bool {
 }
 
 // call runs f against the current client in the background, tagged with its generation.
+// callsInFlight counts server calls still running; tests use it to tell a slow call from a timer.
+var callsInFlight atomic.Int64
+
 func (m *model) call(f func(ctx context.Context, c *Client) tea.Msg) tea.Cmd {
 	c, gen := m.c, m.gen
 	if c == nil {
 		return nil
 	}
 	return func() tea.Msg {
+		callsInFlight.Add(1)
+		defer callsInFlight.Add(-1)
 		ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 		defer cancel()
 		return genMsg{gen, f(ctx, c)}
