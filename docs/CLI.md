@@ -164,6 +164,7 @@ wame was called `wabot`. After switching binaries nothing has to change:
 | `-typing` | | `false` | show "typing…" before each text message |
 | `-online` | | `false` | appear "online" while connected. Off by default so your phone keeps showing notifications; typing indicators still switch to "available" briefly |
 | `-autoreply` | | `true` | answer `!ping`, `!time`, `!help` |
+| `-queue-jitter D` | `WAME_QUEUE_JITTER` | `2s` | wait a random 0–D more between [queued](QUEUE.md) sends; `0` = none |
 | `-log-format F` | `WAME_LOG_FORMAT` | `text` | app log format: `text` or `json` |
 | `-log-file PATH` | `WAME_LOG_FILE` | stderr | write app logs to PATH (appended, mode 0600) |
 | `-debug` | | `false` | debug-level logs, including whatsmeow's |
@@ -172,8 +173,8 @@ wame was called `wabot`. After switching binaries nothing has to change:
 All flags are accepted by every command, so `-rate`, `-chat-gap` and `-typing` also apply to
 `wame send`.
 
-`-rate`, `-chat-gap`, `-max-wait`, `-autoreply` and `-webhook-filter` can also be changed while
-wame runs, with [`PATCH /settings`](API.md#get-settings-patch-settings) or the admin panel's
+`-rate`, `-chat-gap`, `-max-wait`, `-autoreply`, `-webhook-filter` and `-queue-jitter` can also be
+changed while wame runs, with [`PATCH /settings`](API.md#get-settings-patch-settings) or the admin panel's
 Settings tab. Those changes are stored in the database and **win over the flags**, on later starts
 too, until they're reset there. See [API.md → Rate limiting](API.md#rate-limiting) for how the limiter behaves
 and why it's on by default.

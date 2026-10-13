@@ -8,7 +8,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	mrand "math/rand/v2"
 	"net/http"
@@ -18,6 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"go.mau.fi/whatsmeow/types"
+
 	"github.com/williamtcastro/wame/internal/store"
 )
 
@@ -25,6 +29,8 @@ const (
 	webhookQueueSize = 1000
 	webhookWorkers   = 4
 	webhookAttempts  = 6
+	webhookDrain     = 3 * time.Second
+	maxRetryAfter    = 5 * time.Minute
 )
 
 type webhookJob struct {
@@ -36,9 +42,10 @@ type webhookJob struct {
 // Webhook POSTs messages to a URL with retries and an optional HMAC signature.
 // Delivery is at-least-once and unordered; receivers should dedupe on X-Wame-Delivery.
 type Webhook struct {
-	URL    string
-	Secret string
-	Filter store.Filter
+	url       string
+	secret    string
+	filter    store.Filter
+	filterRaw string
 
 	log    *slog.Logger
 	client *http.Client
@@ -107,26 +114,25 @@ func (w *Webhook) recordFailure(f WebhookFailure) {
 	})
 }
 
-// SetChatIf replaces the filter's chat once a phone number has been resolved to WhatsApp's JID,
-// unless the filter was changed in the meantime.
-func (w *Webhook) SetChatIf(old, chat string) {
-	w.mu.Lock()
-	if w.Filter.Chat == old {
-		w.Filter.Chat = chat
-	}
-	w.mu.Unlock()
+func (w *Webhook) currentFilter() store.Filter {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.filter
 }
 
-// SetFilter replaces the whole filter (a runtime settings change).
-func (w *Webhook) SetFilter(f store.Filter) {
-	w.mu.Lock()
-	w.Filter = f
-	w.mu.Unlock()
-}
-
+// NewWebhook starts a webhook whose workers stop with ctx. filter applies until a webhook_filter
+// setting replaces it; StartWebhook ties the workers to the bot instead.
 func NewWebhook(ctx context.Context, url, secret string, filter store.Filter, log *slog.Logger) *Webhook {
-	w := &Webhook{
-		URL: url, Secret: secret, Filter: filter,
+	w := newWebhook(url, secret, filter, log)
+	for range webhookWorkers {
+		go w.worker(ctx)
+	}
+	return w
+}
+
+func newWebhook(url, secret string, filter store.Filter, log *slog.Logger) *Webhook {
+	return &Webhook{
+		url: url, secret: secret, filter: filter,
 		log: log.With("component", "webhook"),
 		client: &http.Client{
 			Timeout:       10 * time.Second,
@@ -134,17 +140,87 @@ func NewWebhook(ctx context.Context, url, secret string, filter store.Filter, lo
 		},
 		queue: make(chan webhookJob, webhookQueueSize),
 	}
+}
+
+// StartWebhook POSTs messages to url from now until Close. Its filter is the webhook_filter setting,
+// so call it before InitSettings.
+func (b *Bot) StartWebhook(url, secret string) {
+	w := newWebhook(url, secret, store.Filter{}, b.Log)
 	for range webhookWorkers {
-		go w.worker(ctx)
+		b.Go(w.worker)
 	}
-	return w
+	b.Webhook = w
+}
+
+// setWebhookFilter installs raw as the webhook filter when it differs from the current one, and
+// resolves a phone number in chat= to the JID WhatsApp uses (e.g. with or without Brazil's 9th
+// digit) in the background.
+func (b *Bot) setWebhookFilter(raw string) {
+	w := b.Webhook
+	if w == nil {
+		return
+	}
+	f, err := ParseWebhookFilter(raw)
+	if err != nil {
+		return
+	}
+	w.mu.Lock()
+	if raw == w.filterRaw {
+		w.mu.Unlock()
+		return
+	}
+	w.filter, w.filterRaw = f, raw
+	w.mu.Unlock()
+	q, _ := url.ParseQuery(raw)
+	if chat := q.Get("chat"); chat != "" && !strings.Contains(chat, "@") {
+		b.Go(func(ctx context.Context) { b.resolveWebhookChat(ctx, raw, chat) })
+	}
+}
+
+// resolveWebhookChat waits for the login and looks number up, retrying WhatsApp errors, until it's
+// resolved or the filter changes.
+func (b *Bot) resolveWebhookChat(ctx context.Context, raw, number string) {
+	w := b.Webhook
+	current := func() bool {
+		w.mu.RLock()
+		defer w.mu.RUnlock()
+		return w.filterRaw == raw
+	}
+	for !b.Client.IsLoggedIn() {
+		if !current() || SleepUntil(ctx, time.Now().Add(time.Second)) != nil {
+			return
+		}
+	}
+	var jid types.JID
+	var err error
+	for wait := 10 * time.Second; ; wait = min(wait*2, 10*time.Minute) {
+		if !current() {
+			return
+		}
+		if jid, err = b.Resolve(ctx, number); err == nil {
+			break
+		}
+		if _, ok := errors.AsType[InputError](err); ok {
+			b.Log.Warn("webhook filter: chat isn't on WhatsApp, keeping it as typed", "chat", number, "err", err)
+			return
+		}
+		b.Log.Warn("webhook filter: chat lookup failed, retrying", "chat", number, "err", err, "retry_in", wait)
+		if SleepUntil(ctx, time.Now().Add(wait)) != nil {
+			return
+		}
+	}
+	chat := b.PhoneJID(jid).String()
+	w.mu.Lock()
+	if w.filterRaw == raw {
+		w.filter.Chat = chat
+	}
+	w.mu.Unlock()
+	b.Log.Info("webhook filter chat resolved", "chat", number, "jid", chat)
 }
 
 // Deliver queues m if it matches the filter. event is "message" or "update".
 func (w *Webhook) Deliver(event string, m store.Message) {
-	w.mu.RLock()
-	f := w.Filter
-	w.mu.RUnlock()
+	f := w.currentFilter()
 	f.Since = 0
 	if !f.Match(m) {
 		return
@@ -153,7 +229,10 @@ func (w *Webhook) Deliver(event string, m store.Message) {
 	if err != nil {
 		return
 	}
-	job := webhookJob{event: event, body: body, id: fmt.Sprintf("%d-%s-%s", m.Seq, event, randomHex(4))}
+	w.enqueue(webhookJob{event: event, body: body, id: fmt.Sprintf("%d-%s-%s", m.Seq, event, randomHex(4))})
+}
+
+func (w *Webhook) enqueue(job webhookJob) {
 	select {
 	case w.queue <- job:
 	default:
@@ -166,6 +245,7 @@ func (w *Webhook) worker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			w.drain()
 			return
 		case job := <-w.queue:
 			w.send(ctx, job)
@@ -173,10 +253,24 @@ func (w *Webhook) worker(ctx context.Context) {
 	}
 }
 
+// drain gives the deliveries still queued at shutdown one attempt each within webhookDrain.
+func (w *Webhook) drain() {
+	ctx, cancel := context.WithTimeout(context.Background(), webhookDrain)
+	defer cancel()
+	for ctx.Err() == nil {
+		select {
+		case job := <-w.queue:
+			w.send(ctx, job)
+		default:
+			return
+		}
+	}
+}
+
 func (w *Webhook) send(ctx context.Context, job webhookJob) {
 	backoff := time.Second
 	for attempt := 1; attempt <= webhookAttempts; attempt++ {
-		status, err := w.post(ctx, job)
+		status, retryAfter, err := w.post(ctx, job)
 		if err == nil && status < 300 {
 			if attempt > 1 {
 				w.log.Info("delivered after retry", "delivery", job.id, "attempt", attempt)
@@ -203,7 +297,8 @@ func (w *Webhook) send(ctx context.Context, job webhookJob) {
 		if !retryable {
 			return
 		}
-		if SleepUntil(ctx, time.Now().Add(backoff+mrand.N(backoff/2))) != nil {
+		wait := max(backoff+mrand.N(backoff/2), min(retryAfter, maxRetryAfter))
+		if SleepUntil(ctx, time.Now().Add(wait)) != nil {
 			return
 		}
 		backoff *= 2
@@ -211,10 +306,11 @@ func (w *Webhook) send(ctx context.Context, job webhookJob) {
 	w.log.Error("giving up on delivery", "delivery", job.id, "attempts", webhookAttempts)
 }
 
-func (w *Webhook) post(ctx context.Context, job webhookJob) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.URL, bytes.NewReader(job.body))
+// post makes one attempt. retryAfter is the receiver's Retry-After on a 429 or 503.
+func (w *Webhook) post(ctx context.Context, job webhookJob) (status int, retryAfter time.Duration, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.url, bytes.NewReader(job.body))
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	req.Header.Set("Content-Type", "application/json")
@@ -222,18 +318,37 @@ func (w *Webhook) post(ctx context.Context, job webhookJob) (int, error) {
 	req.Header.Set("X-Wame-Event", job.event)
 	req.Header.Set("X-Wame-Delivery", job.id)
 	req.Header.Set("X-Wame-Timestamp", ts)
-	if w.Secret != "" {
-		req.Header.Set("X-Wame-Signature", "sha256="+Sign(w.Secret, ts, job.body))
+	if w.secret != "" {
+		req.Header.Set("X-Wame-Signature", "sha256="+Sign(w.secret, ts, job.body))
 	}
 	resp, err := w.client.Do(req)
-	if uerr, ok := err.(*url.Error); ok {
-		return 0, uerr.Err
+	if uerr, ok := errors.AsType[*url.Error](err); ok {
+		return 0, 0, uerr.Err
 	}
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
+	// Reading the rest of a small body lets the connection be reused.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	resp.Body.Close()
-	return resp.StatusCode, nil
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	}
+	return resp.StatusCode, retryAfter, nil
+}
+
+// parseRetryAfter reads a Retry-After header: seconds or an HTTP date.
+func parseRetryAfter(v string, now time.Time) time.Duration {
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+		return max(time.Duration(n)*time.Second, 0)
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		return max(t.Sub(now), 0)
+	}
+	return 0
 }
 
 // Sign returns hex(HMAC-SHA256(secret, timestamp + "." + body)).
@@ -263,7 +378,7 @@ func (w *Webhook) once(ctx context.Context, job webhookJob) (WebhookResult, erro
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	start := time.Now()
-	status, err := w.post(ctx, job)
+	status, _, err := w.post(ctx, job)
 	if err == nil && status >= 300 {
 		err = fmt.Errorf("the webhook answered HTTP %d", status)
 	}

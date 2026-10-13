@@ -13,7 +13,7 @@ import (
 
 type Store struct {
 	db     *sql.DB
-	mu     sync.RWMutex
+	mu     sync.Mutex
 	lidKey string
 }
 
@@ -36,6 +36,9 @@ func Open(ctx context.Context, db *sql.DB) (*Store, error) {
 	}
 	if err := migrateSettings(ctx, db); err != nil {
 		return nil, fmt.Errorf("create settings table: %w", err)
+	}
+	if err := migrateOutbox(ctx, db); err != nil {
+		return nil, fmt.Errorf("create outbox table: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -75,11 +78,16 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	for rows.Next() {
 		var name string
-		if rows.Scan(&name) == nil {
-			cols[name] = true
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
 		}
+		cols[name] = true
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	if len(cols) == 0 || cols["seq"] {
 		if _, err := db.ExecContext(ctx, messagesTable); err != nil {
 			return err
@@ -122,7 +130,7 @@ func addMissingColumns(ctx context.Context, db *sql.DB, have map[string]bool) er
 	if len(have) == 0 {
 		return nil
 	}
-	for _, line := range strings.Split(messagesTable, "\n") {
+	for line := range strings.SplitSeq(messagesTable, "\n") {
 		f := strings.Fields(strings.TrimSuffix(strings.TrimSpace(line), ","))
 		if len(f) < 2 || have[f[0]] || f[0] == "CREATE" || f[0] == "UNIQUE" || f[0] == "seq" || f[0] == ");" {
 			continue
@@ -166,11 +174,7 @@ func (s *Store) Save(m Message) (Message, bool, error) {
 	if m.FromMe {
 		s.MarkReadUpTo(m.Chat, seq)
 	}
-	if strings.HasSuffix(m.Chat, "@lid") || strings.HasSuffix(m.Sender, "@lid") {
-		s.mu.Lock()
-		s.lidKey = ""
-		s.mu.Unlock()
-	}
+	s.relinkLater(m)
 	if m.Media != nil {
 		media := *m.Media
 		media.Path = mediaPath(seq)
@@ -186,29 +190,42 @@ func (s *Store) Import(msgs []Message) error {
 	if err != nil {
 		return err
 	}
-	for _, m := range msgs {
-		if m.Edited {
-			res, err := tx.Exec(`UPDATE wame_messages SET text = ?, edited = 1 WHERE chat = ? AND id = ?`, m.Text, m.Chat, m.ID)
-			if err == nil {
-				if n, _ := res.RowsAffected(); n > 0 {
-					continue
-				}
-			}
-		}
-		_, _, _ = save(tx, m)
-	}
+	defer tx.Rollback()
 	imported := map[string]bool{}
 	for _, m := range msgs {
 		imported[m.Chat] = true
-	}
-	for chat := range imported {
-		if _, err := tx.Exec(`INSERT INTO wame_chat_state (chat, read_seq) SELECT ?, MAX(seq) FROM wame_messages WHERE chat = ?
-			ON CONFLICT (chat) DO UPDATE SET read_seq = excluded.read_seq WHERE excluded.read_seq > read_seq`, chat, chat); err != nil {
+		if m.Edited {
+			res, err := tx.Exec(`UPDATE wame_messages SET `+editSet+` WHERE chat = ? AND id = ? AND deleted = 0`, m.Text, m.Chat, m.ID)
+			if err != nil {
+				return err
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				continue
+			}
+		}
+		if _, _, err := save(tx, m); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	for chat := range imported {
+		if _, err := tx.Exec(`INSERT INTO wame_chat_state (chat, read_seq) SELECT ?, MAX(seq) FROM wame_messages WHERE chat = ?`+upsertReadSeq, chat, chat); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, m := range msgs {
+		s.relinkLater(m)
+	}
+	return nil
 }
+
+// upsertReadSeq ends an INSERT into wame_chat_state: the read position only moves forward.
+const upsertReadSeq = `
+	ON CONFLICT (chat) DO UPDATE SET read_seq = excluded.read_seq WHERE excluded.read_seq > read_seq`
+
+const editSet = `text = ?, edited = 1`
 
 const msgCols = `seq, chat, id, sender, push_name, from_me, is_group, type, text, ts,
 	reply_to, mimetype, file_name, file_size, edited, deleted, raw, raw_chat, raw_sender`
@@ -232,8 +249,8 @@ func scanMessage(r scanner) (Message, error) {
 }
 
 // Query returns matching messages. oldestFirst orders by seq (for cursors); otherwise newest first by time.
-func (s *Store) Query(f Filter, limit int, oldestFirst bool) []Message {
-	s.RelinkLIDs()
+func (s *Store) Query(f Filter, limit int, oldestFirst bool) ([]Message, error) {
+	s.relinkLIDs()
 	where, args := f.where()
 	order := "ts DESC, seq DESC"
 	if oldestFirst {
@@ -242,26 +259,28 @@ func (s *Store) Query(f Filter, limit int, oldestFirst bool) []Message {
 	rows, err := s.db.Query(`SELECT `+msgCols+` FROM wame_messages WHERE `+where+` ORDER BY `+order+` LIMIT ?`,
 		append(args, limit)...)
 	if err != nil {
-		return []Message{}
+		return nil, err
 	}
 	defer rows.Close()
 	out := []Message{}
 	for rows.Next() {
-		if m, err := scanMessage(rows); err == nil {
-			out = append(out, m)
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
 		}
+		out = append(out, m)
 	}
-	return out
+	return out, rows.Err()
 }
 
-func (s *Store) LastSeq() int64 {
+func (s *Store) LastSeq() (int64, error) {
 	var seq sql.NullInt64
-	_ = s.db.QueryRow(`SELECT MAX(seq) FROM wame_messages`).Scan(&seq)
-	return seq.Int64
+	err := s.db.QueryRow(`SELECT MAX(seq) FROM wame_messages`).Scan(&seq)
+	return seq.Int64, err
 }
 
 // Messages returns the newest messages of one chat (or of all chats for ""), newest first.
-func (s *Store) Messages(chat string, limit int) []Message {
+func (s *Store) Messages(chat string, limit int) ([]Message, error) {
 	return s.Query(Filter{Chat: chat, ChatOnly: chat != ""}, limit, false)
 }
 
@@ -272,7 +291,7 @@ func (s *Store) Get(chat, id string) (Message, error) {
 func (s *Store) GetBySeq(seq int64) (Message, error) { return s.getWhere(`seq = ?`, seq) }
 
 func (s *Store) getWhere(where string, args ...any) (Message, error) {
-	s.RelinkLIDs()
+	s.relinkLIDs()
 	m, err := scanMessage(s.db.QueryRow(`SELECT `+msgCols+` FROM wame_messages WHERE `+where, args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, ErrNotFound
@@ -280,60 +299,70 @@ func (s *Store) getWhere(where string, args ...any) (Message, error) {
 	return m, err
 }
 
+// MarkEdited changes the text unless the message was deleted: a late edit mustn't bring it back.
 func (s *Store) MarkEdited(chat, id, text string) error {
-	return s.update(chat, id, `text = ?, edited = 1`, text)
+	_, err := s.db.Exec(`UPDATE wame_messages SET `+editSet+` WHERE chat = ? AND id = ? AND deleted = 0`, text, chat, id)
+	return err
 }
 
 // MarkDeleted clears the text and the raw protobuf, so a deleted message can't be quoted or downloaded.
 func (s *Store) MarkDeleted(chat, id string) error {
-	return s.update(chat, id, `text = '', deleted = 1, raw = NULL`)
-}
-
-func (s *Store) update(chat, id, set string, args ...any) error {
-	_, err := s.db.Exec(`UPDATE wame_messages SET `+set+` WHERE chat = ? AND id = ?`, append(args, chat, id)...)
+	_, err := s.db.Exec(`UPDATE wame_messages SET text = '', deleted = 1, raw = NULL WHERE chat = ? AND id = ?`, chat, id)
 	return err
 }
 
-// RelinkLIDs moves messages stored under a hidden @lid ID onto the phone-number chat once
-// whatsmeow has learned which number that ID belongs to.
-func (s *Store) RelinkLIDs() {
+// relinkLater makes the next read relink when m was stored under a hidden @lid ID.
+func (s *Store) relinkLater(m Message) {
+	if strings.HasSuffix(m.Chat, "@lid") || strings.HasSuffix(m.Sender, "@lid") {
+		s.mu.Lock()
+		s.lidKey = ""
+		s.mu.Unlock()
+	}
+}
+
+// relinkLIDs moves messages stored under a hidden @lid ID onto the phone-number chat once whatsmeow
+// has learned which number that ID belongs to. It runs in one transaction, one at a time, so a
+// message saved meanwhile can't be taken for a copy and deleted.
+func (s *Store) relinkLIDs() {
 	var count, maxRow int64
 	if s.db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM whatsmeow_lid_map`).Scan(&count, &maxRow) != nil {
 		return
 	}
 	key := fmt.Sprint(count, "/", maxRow)
-	s.mu.RLock()
-	same := key == s.lidKey
-	s.mu.RUnlock()
-	if same {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if key == s.lidKey {
 		return
 	}
-	mapped := `replace(%s, '@lid', '') IN (SELECT lid FROM whatsmeow_lid_map)`
-	for _, col := range []string{"chat", "sender"} {
-		if _, err := s.db.Exec(`UPDATE OR IGNORE wame_messages
-			SET ` + col + ` = (SELECT pn FROM whatsmeow_lid_map WHERE lid = replace(` + col + `, '@lid', '')) || '@s.whatsapp.net'
-			WHERE ` + col + ` LIKE '%@lid' AND ` + fmt.Sprintf(mapped, col)); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	const mapped = ` LIKE '%@lid' AND replace(chat, '@lid', '') IN (SELECT lid FROM whatsmeow_lid_map)`
+	const pn = `(SELECT pn FROM whatsmeow_lid_map WHERE lid = replace(chat, '@lid', '')) || '@s.whatsapp.net'`
+	for _, stmt := range []string{
+		`UPDATE OR IGNORE wame_messages SET chat = ` + pn + ` WHERE chat` + mapped,
+		strings.ReplaceAll(`UPDATE OR IGNORE wame_messages SET chat = `+pn+` WHERE chat`+mapped, "chat", "sender"),
+		// Rows left under @lid are copies of messages already stored under the phone number.
+		`DELETE FROM wame_messages WHERE chat` + mapped,
+		`INSERT INTO wame_chat_state (chat, read_seq) SELECT ` + pn + `, read_seq FROM wame_chat_state WHERE chat` + mapped + `
+			ON CONFLICT (chat) DO UPDATE SET read_seq = MAX(read_seq, excluded.read_seq)`,
+		`DELETE FROM wame_chat_state WHERE chat` + mapped,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
 			return
 		}
 	}
-	// Rows left under @lid are copies of messages already stored under the phone number.
-	if _, err := s.db.Exec(`DELETE FROM wame_messages WHERE chat LIKE '%@lid' AND ` + fmt.Sprintf(mapped, "chat")); err != nil {
-		return
+	if tx.Commit() == nil {
+		s.lidKey = key
 	}
-	_, _ = s.db.Exec(`INSERT INTO wame_chat_state (chat, read_seq)
-		SELECT (SELECT pn FROM whatsmeow_lid_map WHERE lid = replace(chat, '@lid', '')) || '@s.whatsapp.net', read_seq
-		FROM wame_chat_state WHERE chat LIKE '%@lid' AND ` + fmt.Sprintf(mapped, "chat") + `
-		ON CONFLICT (chat) DO UPDATE SET read_seq = MAX(read_seq, excluded.read_seq)`)
-	_, _ = s.db.Exec(`DELETE FROM wame_chat_state WHERE chat LIKE '%@lid' AND ` + fmt.Sprintf(mapped, "chat"))
-	s.mu.Lock()
-	s.lidKey = key
-	s.mu.Unlock()
 }
 
 // Chats lists conversations by most recent activity. Reactions don't count as activity. name turns a
 // chat JID and the latest push name seen in it into a display name.
 func (s *Store) Chats(ctx context.Context, limit int, name func(chat, pushName string) string) ([]Chat, error) {
-	s.RelinkLIDs()
+	s.relinkLIDs()
 	rows, err := s.db.QueryContext(ctx, `
 SELECT chat, is_group, type, CASE WHEN deleted THEN '' ELSE text END, from_me, MAX(ts),
 	(SELECT push_name FROM wame_messages p WHERE p.chat = m.chat AND p.from_me = 0 AND p.push_name <> '' AND p.is_group = 0
@@ -346,18 +375,26 @@ FROM wame_messages m WHERE type <> 'reaction' GROUP BY chat ORDER BY MAX(ts) DES
 	}
 	defer rows.Close()
 	out := []Chat{}
+	var push []string
 	for rows.Next() {
 		var c Chat
 		var ts int64
-		var push sql.NullString
-		if err := rows.Scan(&c.JID, &c.IsGroup, &c.LastType, &c.LastText, &c.LastFromMe, &ts, &push, &c.Unread); err != nil {
+		var p sql.NullString
+		if err := rows.Scan(&c.JID, &c.IsGroup, &c.LastType, &c.LastText, &c.LastFromMe, &ts, &p, &c.Unread); err != nil {
 			return nil, err
 		}
 		c.LastAt = time.UnixMilli(ts)
-		c.Name = name(c.JID, push.String)
-		out = append(out, c)
+		out, push = append(out, c), append(push, p.String)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	// name may hit the network (group names), so it runs after the cursor is closed.
+	for i := range out {
+		out[i].Name = name(out[i].JID, push[i])
+	}
+	return out, nil
 }
 
 // legacyPrefix is the table prefix from before the rename to wame.
@@ -408,11 +445,11 @@ func renameLegacyTables(ctx context.Context, db *sql.DB) error {
 			continue
 		}
 		newName := "wame_" + strings.TrimPrefix(name, legacyPrefix)
-		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name = ?`, newName).Scan(&exists); err != nil {
+		exists, err := tableExists(ctx, tx, newName)
+		if err != nil {
 			return err
 		}
-		if exists > 0 {
+		if exists {
 			return fmt.Errorf("both %s and %s exist; keep one and remove the other", name, newName)
 		}
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE "%s" RENAME TO "%s"`, name, newName)); err != nil {

@@ -1,8 +1,10 @@
 package admin
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/williamtcastro/wame/internal/api"
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/store"
+	"github.com/williamtcastro/wame/internal/termui"
 )
 
 type tab int
@@ -24,9 +27,10 @@ const (
 	tabAudit
 	tabHealth
 	tabSettings
+	tabQueue
 )
 
-var tabNames = []string{"Status", "Chats", "Tokens", "Audit", "Health", "Settings"}
+var tabNames = []string{"Status", "Chats", "Tokens", "Audit", "Health", "Settings", "Queue"}
 
 type mode int
 
@@ -43,6 +47,7 @@ const (
 	modeCompose
 	modeServers
 	modeSetting
+	modeConfirmCancelBatch
 )
 
 const (
@@ -52,6 +57,7 @@ const (
 	chatsLimit    = 100
 	messagesLimit = 60
 	unusedAfter   = 30 * 24 * time.Hour
+	callTimeout   = 30 * time.Second
 )
 
 type (
@@ -62,6 +68,7 @@ type (
 		msg tea.Msg
 	}
 	statusMsg struct {
+		seq     int
 		s       bot.Status
 		latency time.Duration
 		err     error
@@ -73,9 +80,11 @@ type (
 	auditMsg struct {
 		entries []store.AuditEntry
 		older   bool
+		before  int64
 		err     error
 	}
 	statsMsg struct {
+		seq int
 		s   api.Stats
 		err error
 	}
@@ -132,14 +141,16 @@ type model struct {
 	mode          mode
 
 	status    bot.Status
+	statusReq inflight
 	statusErr error
 	checked   time.Time
 	latency   time.Duration
 	pairCode  string
 
-	tokens    []store.Token
-	tokensErr error
-	tokSel    int
+	tokens     []store.Token
+	tokensErr  error
+	tokSel     int
+	confirmTok store.Token
 
 	audit      []store.AuditEntry
 	auditErr   error
@@ -149,6 +160,7 @@ type model struct {
 	auditQuery string
 
 	stats     api.Stats
+	statsReq  inflight
 	statsErr  error
 	statsAt   time.Time
 	healthSel int
@@ -158,14 +170,22 @@ type model struct {
 	setSel      int
 	editKey     string
 
-	chats      []store.Chat
-	chatsErr   error
-	chatSel    int
-	msgs       []store.Message
-	msgsChat   string
-	msgsErr    error
-	search     string
-	searchHits []store.Message
+	queue        QueuePage
+	queueErr     error
+	queueSel     int
+	queueStatus  string
+	queueReload  termui.Debounce
+	confirmBatch string
+
+	chats       []store.Chat
+	chatsReload termui.Debounce
+	chatsErr    error
+	chatSel     int
+	msgs        []store.Message
+	msgsChat    string
+	msgsErr     error
+	search      string
+	searchHits  []store.Message
 
 	live live
 
@@ -216,7 +236,7 @@ func (m *model) loadAll() tea.Cmd {
 	if m.c == nil {
 		return nil
 	}
-	return tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadStats(), m.loadChats(), m.loadSettings())
+	return tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadStats(), m.loadChats(), m.loadSettings(), m.loadQueue())
 }
 
 func (m *model) pollEvery() time.Duration {
@@ -230,6 +250,28 @@ func tick(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
+// inflight tracks one kind of polled request: the tick skips it while one is pending, and an answer
+// older than one already applied is dropped, so a slow request can't undo a newer answer.
+type inflight struct{ started, applied, pending int }
+
+func (f *inflight) start() int {
+	f.started++
+	f.pending++
+	return f.started
+}
+
+func (f *inflight) busy() bool { return f.pending > 0 }
+
+// done reports whether the answer to request seq is the newest so far.
+func (f *inflight) done(seq int) bool {
+	f.pending = max(f.pending-1, 0)
+	if seq < f.applied {
+		return false
+	}
+	f.applied = seq
+	return true
+}
+
 // call runs f against the current client in the background, tagged with its generation.
 func (m *model) call(f func(ctx context.Context, c *Client) tea.Msg) tea.Cmd {
 	c, gen := m.c, m.gen
@@ -237,17 +279,21 @@ func (m *model) call(f func(ctx context.Context, c *Client) tea.Msg) tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 		defer cancel()
 		return genMsg{gen, f(ctx, c)}
 	}
 }
 
 func (m *model) loadStatus() tea.Cmd {
+	if m.c == nil {
+		return nil
+	}
+	seq := m.statusReq.start()
 	return m.call(func(ctx context.Context, c *Client) tea.Msg {
 		start := time.Now()
 		s, err := c.Status(ctx)
-		return statusMsg{s, time.Since(start), err}
+		return statusMsg{seq, s, time.Since(start), err}
 	})
 }
 
@@ -266,19 +312,25 @@ func (m *model) loadAudit(older bool) tea.Cmd {
 	m.auditBusy = true
 	return m.call(func(ctx context.Context, c *Client) tea.Msg {
 		e, err := c.Audit(ctx, auditPage, before)
-		return auditMsg{e, older, err}
+		return auditMsg{e, older, before, err}
 	})
 }
 
 func (m *model) loadStats() tea.Cmd {
+	if m.c == nil {
+		return nil
+	}
+	seq := m.statsReq.start()
 	return m.call(func(ctx context.Context, c *Client) tea.Msg {
 		s, err := c.Stats(ctx)
-		return statsMsg{s, err}
+		return statsMsg{seq, s, err}
 	})
 }
 
+// setNotice shows a line above the keys. It's sanitized: it often ends in an error from the server
+// or from a webhook receiver.
 func (m *model) setNotice(text string, isErr bool) {
-	m.notice, m.noticeErr = text, isErr
+	m.notice, m.noticeErr = safe(text), isErr
 }
 
 func (m *model) healthy() bool {
@@ -321,7 +373,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		cmds := []tea.Cmd{m.loadStatus(), m.loadStats(), tick(m.pollEvery())}
+		cmds := []tea.Cmd{tick(m.pollEvery())}
+		if !m.statusReq.busy() {
+			cmds = append(cmds, m.loadStatus())
+		}
+		if !m.statsReq.busy() {
+			cmds = append(cmds, m.loadStats())
+		}
 		if m.mode == modeNormal && m.tab == tabTokens {
 			cmds = append(cmds, m.loadTokens())
 		}
@@ -331,12 +389,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.tab == tabChats && !m.live.on {
 			cmds = append(cmds, m.loadChats())
 		}
+		if m.tab == tabQueue {
+			cmds = append(cmds, m.loadQueue())
+		}
 		return m, tea.Batch(cmds...)
 
 	case liveMsg, eventMsg:
 		return m, m.handleLive(msg)
 
 	case statusMsg:
+		if !m.statusReq.done(msg.seq) {
+			return m, nil
+		}
 		m.applyStatus(msg.s, msg.err)
 		if msg.err == nil {
 			m.latency = msg.latency
@@ -344,26 +408,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tokensMsg:
-		m.tokens, m.tokensErr = msg.tokens, msg.err
-		m.tokSel = clamp(m.tokSel, len(m.tokens))
+		m.applyTokens(msg)
 		return m, nil
 
 	case auditMsg:
-		m.auditBusy = false
-		m.auditErr = msg.err
-		if msg.err != nil {
-			return m, nil
-		}
-		if msg.older {
-			m.audit = append(m.audit, msg.entries...)
-		} else {
-			m.audit = msg.entries
-		}
-		m.auditMore = len(msg.entries) == auditPage
-		m.auditSel = clamp(m.auditSel, len(m.visibleAudit()))
+		m.applyAudit(msg)
 		return m, nil
 
 	case statsMsg:
+		if !m.statsReq.done(msg.seq) {
+			return m, nil
+		}
 		m.statsErr = msg.err
 		if msg.err == nil {
 			m.stats, m.statsAt = msg.s, time.Now()
@@ -372,6 +427,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case queueMsg:
+		m.applyQueue(msg)
+		return m, nil
+
+	case queueReloadMsg:
+		return m, m.reloadQueue()
+
+	case chatsReloadMsg:
+		m.chatsReload.Done()
+		if m.tab != tabChats {
+			return m, nil
+		}
+		return m, m.loadChats()
 
 	case settingsMsg:
 		return m, m.applySettingsMsg(msg)
@@ -420,7 +489,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setNotice(msg.notice, false)
 		}
-		return m, tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false))
+		return m, tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadQueue(), m.loadStats())
 
 	case noticeMsg:
 		m.setNotice(msg.text, msg.err)
@@ -440,18 +509,7 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeServers:
 		return m.serversKey(k)
 	case modeSetting:
-		switch k.String() {
-		case "esc":
-			m.mode = modeNormal
-			return m, nil
-		case "enter":
-			m.mode = modeNormal
-			v := strings.TrimSpace(m.prompt.Value())
-			return m, m.changeSetting(m.editKey, &v, settingLabels[m.editKey][0]+" set to "+cmpOr(v, "(none)"))
-		}
-		var cmd tea.Cmd
-		m.prompt, cmd = m.prompt.Update(k)
-		return m, cmd
+		return m.settingPromptKey(k)
 	case modePair:
 		return m.promptKey(k, func(v string) tea.Cmd {
 			m.setNotice("asking the server for a pairing code…", false)
@@ -480,41 +538,9 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			})
 		})
 	case modeFilter:
-		if k.String() == "esc" {
-			m.auditQuery = ""
-		}
-		cmd := m.promptKeyLive(k)
-		m.auditQuery = m.prompt.Value()
-		m.auditSel = clamp(m.auditSel, len(m.visibleAudit()))
-		return m, cmd
-	case modeConfirmLogout:
-		m.mode = modeNormal
-		if k.String() != "y" {
-			m.setNotice("logout cancelled", false)
-			return m, nil
-		}
-		m.setNotice("logging out…", false)
-		return m, m.call(func(ctx context.Context, c *Client) tea.Msg {
-			return doneMsg{"logged out: the session on the server was unlinked", c.Logout(ctx)}
-		})
-	case modeConfirmRevoke:
-		m.mode = modeNormal
-		if k.String() != "y" || m.tokSel >= len(m.tokens) {
-			m.setNotice("revoke cancelled", false)
-			return m, nil
-		}
-		name := m.tokens[m.tokSel].Name
-		return m, m.call(func(ctx context.Context, c *Client) tea.Msg {
-			n, err := c.RevokeToken(ctx, name)
-			return doneMsg{"revoked " + name + " (" + plural(n, "token") + ")", err}
-		})
-	case modeConfirmRotate:
-		m.mode = modeNormal
-		if k.String() != "y" || m.tokSel >= len(m.tokens) {
-			m.setNotice("rotation cancelled", false)
-			return m, nil
-		}
-		return m, m.rotate(m.tokens[m.tokSel])
+		return m, m.auditFilterKey(k)
+	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch:
+		return m, m.confirmKey(k.String() == "y")
 	case modeCreate:
 		return m.formKey(k)
 	case modeShowToken:
@@ -534,6 +560,9 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if n, err := strconv.Atoi(k.String()); err == nil && n >= 1 && n <= len(tabNames) {
+		return m, m.setTab(tab(n - 1))
+	}
 	switch k.String() {
 	case "q":
 		return m, tea.Quit
@@ -541,8 +570,6 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.setTab((m.tab + 1) % tab(len(tabNames)))
 	case "shift+tab", "left":
 		return m, m.setTab((m.tab + tab(len(tabNames)) - 1) % tab(len(tabNames)))
-	case "1", "2", "3", "4", "5", "6":
-		return m, m.setTab(tab(k.String()[0] - '1'))
 	case "r":
 		m.setNotice("refreshing…", false)
 		return m, m.loadAll()
@@ -563,6 +590,79 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, m.tabKey(k.String())
 }
 
+// confirmKey answers a confirmation dialog. The token or batch it acts on was captured when the
+// dialog opened, so lists reloading underneath can't change it.
+func (m *model) confirmKey(yes bool) tea.Cmd {
+	md := m.mode
+	m.mode = modeNormal
+	switch md {
+	case modeConfirmLogout:
+		if !yes {
+			m.setNotice("logout cancelled", false)
+			return nil
+		}
+		m.setNotice("logging out…", false)
+		return m.call(func(ctx context.Context, c *Client) tea.Msg {
+			return doneMsg{"logged out: the session on the server was unlinked", c.Logout(ctx)}
+		})
+	case modeConfirmRevoke:
+		if !yes {
+			m.setNotice("revoke cancelled", false)
+			return nil
+		}
+		name := m.confirmTok.Name
+		return m.call(func(ctx context.Context, c *Client) tea.Msg {
+			n, err := c.RevokeToken(ctx, name)
+			return doneMsg{"revoked " + name + " (" + plural(n, "token") + ")", err}
+		})
+	case modeConfirmRotate:
+		if !yes {
+			m.setNotice("rotation cancelled", false)
+			return nil
+		}
+		return m.rotate(m.confirmTok)
+	case modeConfirmCancelBatch:
+		if !yes {
+			m.setNotice("nothing canceled", false)
+			return nil
+		}
+		return m.cancelQueued(0, m.confirmBatch, "batch "+m.confirmBatch)
+	}
+	return nil
+}
+
+func (m *model) settingPromptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "esc":
+		m.mode = modeNormal
+		return m, nil
+	case "enter":
+		m.mode = modeNormal
+		v := strings.TrimSpace(m.prompt.Value())
+		label, _ := settingLabel(m.editKey)
+		return m, m.changeSetting(m.editKey, &v, label+" set to "+cmp.Or(v, "(none)"))
+	}
+	var cmd tea.Cmd
+	m.prompt, cmd = m.prompt.Update(k)
+	return m, cmd
+}
+
+func (m *model) applyTokens(msg tokensMsg) {
+	m.tokensErr = msg.err
+	if msg.err != nil {
+		return
+	}
+	var selected string
+	if m.tokSel < len(m.tokens) {
+		selected = m.tokens[m.tokSel].Name
+	}
+	m.tokens = msg.tokens
+	if i := slices.IndexFunc(m.tokens, func(t store.Token) bool { return t.Name == selected }); i >= 0 {
+		m.tokSel = i
+	}
+	m.tokSel = clamp(m.tokSel, len(m.tokens))
+}
+
 func (m *model) setTab(t tab) tea.Cmd {
 	m.tab, m.notice = t, ""
 	switch t {
@@ -574,6 +674,8 @@ func (m *model) setTab(t tab) tea.Cmd {
 		return tea.Batch(m.loadTokens(), m.loadStats())
 	case tabSettings:
 		return m.loadSettings()
+	case tabQueue:
+		return tea.Batch(m.loadQueue(), m.loadStats())
 	}
 	return nil
 }
@@ -603,44 +705,88 @@ func (m *model) tabKey(k string) tea.Cmd {
 		return m.healthKey(k)
 	case tabSettings:
 		return m.settingsKey(k)
+	case tabQueue:
+		return m.queueKey(k)
 	case tabAudit:
-		n := len(m.visibleAudit())
-		switch k {
-		case "j", "down":
-			m.auditSel = clamp(m.auditSel+1, n)
-		case "k", "up":
-			m.auditSel = clamp(m.auditSel-1, n)
-		case "ctrl+d", "pgdown":
-			m.auditSel = clamp(m.auditSel+m.bodyHeight()/2, n)
-		case "ctrl+u", "pgup":
-			m.auditSel = clamp(m.auditSel-m.bodyHeight()/2, n)
-		case "g", "home":
-			m.auditSel = 0
-		case "G", "end":
-			m.auditSel = clamp(n-1, n)
-		case "/":
-			m.startPrompt(modeFilter, "filter by actor, action, target, detail or error")
-			m.prompt.SetValue(m.auditQuery)
-			m.prompt.CursorEnd()
-			return nil
-		case "esc":
-			m.auditQuery = ""
-			return nil
-		}
-		if m.auditSel >= n-1 && m.auditMore && !m.auditBusy && m.auditQuery == "" && n > 0 {
-			return m.loadAudit(true)
-		}
+		return m.auditKey(k)
 	}
 	return nil
 }
 
+// sanitizeAudit cleans what a token holder controls in audit entries (actor names, targets, file
+// names in details, error text) once, as they arrive.
+func sanitizeAudit(entries []store.AuditEntry) {
+	for i := range entries {
+		e := &entries[i]
+		e.Actor, e.Action, e.Target, e.Detail, e.Error = safe(e.Actor), safe(e.Action), safe(e.Target), safe(e.Detail), safe(e.Error)
+	}
+}
+
+// applyAudit takes a page of the audit log. An older page is only appended where it was asked for:
+// after a refresh the list ends elsewhere and the page is dropped.
+func (m *model) applyAudit(msg auditMsg) {
+	m.auditBusy = false
+	if msg.older && msg.err == nil && (len(m.audit) == 0 || m.audit[len(m.audit)-1].ID != msg.before) {
+		return
+	}
+	m.auditErr = msg.err
+	if msg.err != nil {
+		return
+	}
+	sanitizeAudit(msg.entries)
+	if msg.older {
+		m.audit = append(m.audit, msg.entries...)
+	} else {
+		m.audit = msg.entries
+	}
+	m.auditMore = len(msg.entries) == auditPage
+	m.auditSel = clamp(m.auditSel, len(m.visibleAudit()))
+}
+
+func (m *model) auditKey(k string) tea.Cmd {
+	n := len(m.visibleAudit())
+	if sel, ok := termui.ListMove(k, m.auditSel, n, m.bodyHeight()/2); ok {
+		m.auditSel = sel
+		if m.auditSel >= n-1 && m.auditMore && !m.auditBusy && m.auditQuery == "" && n > 0 {
+			return m.loadAudit(true)
+		}
+		return nil
+	}
+	switch k {
+	case "/":
+		m.startPrompt(modeFilter, "filter by actor, action, target, detail or error")
+		m.prompt.SetValue(m.auditQuery)
+		m.prompt.CursorEnd()
+	case "esc":
+		m.auditQuery = ""
+	}
+	return nil
+}
+
+// auditFilterKey edits the audit filter as it's typed; esc clears it, enter keeps it.
+func (m *model) auditFilterKey(k tea.KeyMsg) tea.Cmd {
+	var cmd tea.Cmd
+	switch k.String() {
+	case "esc":
+		m.mode = modeNormal
+		m.auditQuery = ""
+	case "enter":
+		m.mode = modeNormal
+	default:
+		m.prompt, cmd = m.prompt.Update(k)
+		m.auditQuery = m.prompt.Value()
+	}
+	m.auditSel = clamp(m.auditSel, len(m.visibleAudit()))
+	return cmd
+}
+
 func (m *model) serversKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	n := len(m.opts.Profiles)
+	if sel, ok := termui.ListMove(k.String(), m.serverSel, n, n); ok {
+		m.serverSel = sel
+		return m, nil
+	}
 	switch k.String() {
-	case "j", "down":
-		m.serverSel = clamp(m.serverSel+1, n)
-	case "k", "up":
-		m.serverSel = clamp(m.serverSel-1, n)
 	case "esc", "q":
 		if m.c == nil {
 			return m, tea.Quit
@@ -696,17 +842,6 @@ func (m *model) promptKey(k tea.KeyMsg, submit func(string) tea.Cmd) (tea.Model,
 	return m, cmd
 }
 
-func (m *model) promptKeyLive(k tea.KeyMsg) tea.Cmd {
-	switch k.String() {
-	case "esc", "enter":
-		m.mode = modeNormal
-		return nil
-	}
-	var cmd tea.Cmd
-	m.prompt, cmd = m.prompt.Update(k)
-	return cmd
-}
-
 func (m *model) visibleAudit() []store.AuditEntry {
 	q := strings.ToLower(m.auditQuery)
 	if q == "" {
@@ -732,6 +867,14 @@ func clamp(i, n int) int {
 		i = n - 1
 	}
 	return max(i, 0)
+}
+
+// row renders a table row, highlighted when it's the selected one.
+func (m *model) row(line string, selected bool) string {
+	if selected {
+		return m.selectedRow(line)
+	}
+	return "   " + line
 }
 
 func plural(n int, word string) string {

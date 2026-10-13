@@ -111,10 +111,10 @@ func TestOldTablesAreRenamed(t *testing.T) {
 	if n := countPrefix(t, db, "wabot_"); n != 0 {
 		t.Fatalf("%d wabot_ objects left", n)
 	}
-	if got := s.Query(Filter{Text: "boleto"}, 10, false); len(got) != 1 || got[0].ID != "M1" {
+	if got := query(t, s, Filter{Text: "boleto"}, 10, false); len(got) != 1 || got[0].ID != "M1" {
 		t.Fatalf("search after the rename = %+v", got)
 	}
-	if got := s.Query(Filter{}, 10, false); len(got) != 3 {
+	if got := query(t, s, Filter{}, 10, false); len(got) != 3 {
 		t.Fatalf("messages = %d", len(got))
 	}
 	chats, err := s.Chats(ctx, 10, func(_, push string) string { return push })
@@ -135,13 +135,13 @@ func TestOldTablesAreRenamed(t *testing.T) {
 	if st, err := s.Settings(); err != nil || st["rate"].Value != "5" {
 		t.Fatalf("settings = %+v, %v", st, err)
 	}
-	if g := s.Groups(); len(g) != 1 {
+	if g := must[[]Group](t)(s.Groups()); len(g) != 1 {
 		t.Fatalf("groups = %+v", g)
 	}
 	if _, _, err := s.Save(Message{ID: "M4", Chat: john, Sender: john, Type: "text", Text: "fatura nova", Timestamp: base.Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.Query(Filter{Text: "fatura"}, 10, false); len(got) != 2 {
+	if got := query(t, s, Filter{Text: "fatura"}, 10, false); len(got) != 2 {
 		t.Fatalf("the search index stopped following new messages: %+v", got)
 	}
 	var ok string

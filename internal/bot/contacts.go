@@ -36,7 +36,7 @@ func (b *Bot) Contacts(ctx context.Context, query string) ([]Contact, error) {
 		if jid.Server != types.DefaultUserServer {
 			continue
 		}
-		name := cmp.Or(c.FullName, c.FirstName, c.BusinessName, c.PushName)
+		name := contactName(c)
 		if name == "" {
 			continue
 		}
@@ -51,6 +51,10 @@ func (b *Bot) Contacts(ctx context.Context, query string) ([]Contact, error) {
 	}
 	slices.SortFunc(out, func(x, y Contact) int { return cmp.Compare(strings.ToLower(x.Name), strings.ToLower(y.Name)) })
 	return out, nil
+}
+
+func contactName(c types.ContactInfo) string {
+	return cmp.Or(c.FullName, c.FirstName, c.BusinessName, c.PushName)
 }
 
 // CheckResult is one number from Check.
@@ -153,11 +157,7 @@ func digits(s string) string {
 
 // lookup charges n number checks (or presence updates) to the Lookups limiter.
 func (b *Bot) lookup(ctx context.Context, n int) error {
-	slot, err := b.Lookups.ReserveN("lookup", n)
-	if err != nil {
-		return err
-	}
-	return SleepUntil(ctx, slot)
+	return b.Lookups.Wait(ctx, "lookup", n)
 }
 
 // Chats lists conversations by most recent activity, named like ChatName does.
@@ -182,7 +182,7 @@ func (b *Bot) ChatName(ctx context.Context, chat, pushName string) string {
 	}
 	if b.Client.Store.Contacts != nil {
 		if c, err := b.Client.Store.Contacts.GetContact(ctx, jid); err == nil {
-			if name := cmp.Or(c.FullName, c.FirstName, c.BusinessName, c.PushName); name != "" {
+			if name := contactName(c); name != "" {
 				return name
 			}
 		}
@@ -214,7 +214,7 @@ func (b *Bot) group(ctx context.Context, chat string) groupInfo {
 	switch {
 	case !b.Client.IsLoggedIn() || !stale:
 	case ok:
-		go b.refreshGroups(context.Background())
+		b.Go(b.refreshGroups)
 	default:
 		b.refreshGroups(ctx)
 		b.mu.RLock()
@@ -227,12 +227,27 @@ func (b *Bot) group(ctx context.Context, chat string) groupInfo {
 const groupsTTL = 10 * time.Minute
 
 // refreshGroups fetches every group we're in, caches names and admins in the database (so they show
-// instantly next start), and tells subscribers names may have changed.
+// instantly next start), and tells subscribers names may have changed. If a refresh is already
+// running it waits for that one instead.
 func (b *Bot) refreshGroups(ctx context.Context) {
-	if !b.groupsBusy.CompareAndSwap(false, true) {
+	b.mu.Lock()
+	if running := b.groupsRefresh; running != nil {
+		b.mu.Unlock()
+		select {
+		case <-running:
+		case <-ctx.Done():
+		}
 		return
 	}
-	defer b.groupsBusy.Store(false)
+	done := make(chan struct{})
+	b.groupsRefresh = done
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		b.groupsRefresh = nil
+		b.mu.Unlock()
+		close(done)
+	}()
 	joined, err := b.Client.GetJoinedGroups(ctx)
 	if err != nil {
 		b.Log.Warn("refresh groups failed", "err", err)
@@ -270,8 +285,12 @@ func (b *Bot) refreshGroups(ctx context.Context) {
 type NamesChanged struct{}
 
 func (b *Bot) loadCachedGroups() {
+	groups, err := b.Store.Groups()
+	if err != nil {
+		b.Log.Error("load cached groups", "err", err)
+	}
 	all := map[string]groupInfo{}
-	for _, g := range b.Store.Groups() {
+	for _, g := range groups {
 		info := groupInfo{name: g.Name, admins: map[string]bool{}}
 		for _, a := range g.Admins {
 			info.admins[a] = true

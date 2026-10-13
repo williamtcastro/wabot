@@ -18,19 +18,24 @@ wame admin -server https://wame.example.com
 | **3 Tokens** | every token with colored scopes (`read`, `send`, `admin`), chats, rate, expiry (amber within 7 days), last use (amber ⚠ when unused for 30+ days), its requests and sends in the last 24 h (failed sends in red), open live connections, and creator; revoked and expired ones struck through. A card below shows the selected token in full, including when and from which IP it was last seen | `j`/`k` move, `n` new, `R` rotate, `x` revoke (both ask first) |
 | **4 Audit** | the audit log, newest first, with ✓ / ✗ and actions colored by kind; a card below shows the selected entry with its full time and error | `j`/`k`, `Ctrl+D`/`Ctrl+U`, `g`/`G` move, `/` filter, `Esc` clear the filter |
 | **5 Health** | the server's version and uptime; for sends, number lookups and auto-replies, a meter of the last minute's use against the limit, the per-chat gap and 429s (or dropped auto-replies) since startup; the webhook's queue, delivered / retried / replayed / given up / dropped counts and its latest failures | `j`/`k` pick a failure, `R` replay it, `t` send a test delivery |
-| **6 Settings** | the settings that change without a restart (send rate, chat gap, max wait, auto-replies, webhook filter): the value in effect, the server's flag, and who changed it and when | `j`/`k` move, `Enter` change (toggles auto-replies), `x` back to the flag |
+| **6 Settings** | the settings that change without a restart (send rate, chat gap, max wait, auto-replies, webhook filter, queue paused, queue jitter): the value in effect, the server's flag, and who changed it and when | `j`/`k` move, `Enter` change (toggles on/off ones), `x` back to the flag |
+| **7 Queue** | the [send queue](QUEUE.md): whether it's sending, paused, backing off or has no worker, what's waiting and what was sent or failed in the last 7 days, the jitter and the last error; below, the items (batch, recipient, state, attempts, who queued it, when it's due, error), never their text | `j`/`k` move, `f` filter by state, `x` cancel the marked item, `X` cancel its whole batch (asks first), `P` pause / resume |
 
-Everywhere: `1`–`6` or `Tab` / `Shift+Tab` switch tabs, `S` switches server (see
+In every list, `j`/`k` or the arrows move, `Ctrl+D`/`Ctrl+U` or `PgDn`/`PgUp` page, and `g`/`G` or
+`Home`/`End` jump to the top / bottom. Times show in your local time zone, whatever the server's is.
+
+Everywhere: `1`–`7` or `Tab` / `Shift+Tab` switch tabs, `S` switches server (see
 [Several servers](#several-servers)), `r` refreshes, `q` or `Ctrl+C` quits. The header shows unread
 chats, active tokens, failed actions in the last 24 h (red), a `!` on Health after a 429 or
-webhook failure in the last hour and a `•` on Settings while any is changed from its flag, plus the connection state, the server, live or polling, and the
+webhook failure in the last hour, a `•` on Settings while any is changed from its flag and the number
+of messages waiting on Queue (`⏸` while paused), plus the connection state, the server, live or polling, and the
 latency. Confirmations, forms and the new token open as dialogs over the current tab.
 
 ## Live updates
 
 The panel follows the server's [event stream](API.md#get-events) (`⚡live` in the header): a
-status change shows at once, and new messages update the Chats tab and the Status tab's
-message counts as they arrive. If the stream drops, it reconnects with backoff (2 s up to 30 s) and
+status change shows at once, new messages update the Chats tab and the Status tab's
+message counts as they arrive, and the Queue tab follows each queued message as it goes out. If the stream drops, it reconnects with backoff (2 s up to 30 s) and
 the panel polls every 3 seconds meanwhile; while live, it polls every 15 s for the rest.
 
 When a healthy server loses WhatsApp, gets logged out or stops answering, the terminal **bell**
@@ -170,8 +175,9 @@ admin token with an expiry over the owner secret, so it can be revoked (or rotat
 wame token create ops-laptop -scopes admin -expires 720h   # on the server
 ```
 
-The Health tab, the usage columns, webhook test and replay, and the Settings tab need a recent
-server (`GET /stats`, `/settings`, `/webhook/*`); an older one says so instead of failing.
+The Health tab, the usage columns, webhook test and replay, the Settings tab and the Queue tab need
+a recent server (`GET /stats`, `/settings`, `/webhook/*`, `/queue`); an older one says so instead of
+failing.
 
 ## What it doesn't do (yet)
 

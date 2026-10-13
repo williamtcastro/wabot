@@ -255,7 +255,7 @@ func TestPanelShowsTheQR(t *testing.T) {
 	_, c := newServer(t)
 	m := newTestModel(t, Options{Client: c})
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
-	m.Update(statusMsg{s: bot.Status{State: "waiting for QR scan", QR: "2@fake-qr-payload"}})
+	m.Update(statusMsg{seq: m.statusReq.start(), s: bot.Status{State: "waiting for QR scan", QR: "2@fake-qr-payload"}})
 	view := m.View()
 	if !strings.Contains(view, "Scan to log in") || !strings.Contains(view, "▀") {
 		t.Fatalf("no QR:\n%s", view)

@@ -26,9 +26,22 @@ type Token struct {
 }
 
 var (
-	ErrTokenName = errors.New("a token with that name already exists (revoked names stay reserved)")
-	ErrTokenID   = errors.New("token id collision")
+	ErrTokenName    = errors.New("a token with that name already exists (revoked names stay reserved)")
+	ErrTokenID      = errors.New("token id collision")
+	ErrTokenRevoked = errors.New("token revoked")
+	ErrTokenExpired = errors.New("token expired")
 )
+
+// Usable reports why t can no longer be used at now, or nil.
+func (t Token) Usable(now time.Time) error {
+	switch {
+	case t.Revoked:
+		return ErrTokenRevoked
+	case !t.Expires.IsZero() && now.After(t.Expires):
+		return ErrTokenExpired
+	}
+	return nil
+}
 
 const tokensTable = `
 CREATE TABLE IF NOT EXISTS wame_tokens (

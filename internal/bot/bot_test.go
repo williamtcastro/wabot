@@ -18,7 +18,6 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/williamtcastro/wame/internal/store"
 )
@@ -36,7 +35,13 @@ func newTestBot(t *testing.T) *Bot {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = b.Close() })
 	return b
+}
+
+func isInputError(err error) bool {
+	_, ok := errors.AsType[InputError](err)
+	return ok
 }
 
 func TestLimiterReserveNAllOrNothing(t *testing.T) {
@@ -45,15 +50,13 @@ func TestLimiterReserveNAllOrNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := l.ReserveN("lookup", 2)
-	var rl RateLimitError
-	if !errors.As(err, &rl) || rl.RetryAfter < 50*time.Second {
+	if rl, ok := errors.AsType[RateLimitError](err); !ok || rl.RetryAfter < 50*time.Second {
 		t.Fatalf("second ReserveN(2) = %v, want RateLimitError of about a minute", err)
 	}
 	if at, err := l.Reserve("lookup"); err != nil || time.Until(at) > time.Second {
 		t.Fatalf("the failed ReserveN must not take slots: at %v err %v", at, err)
 	}
-	var in InputError
-	if _, err := l.ReserveN("lookup", 4); !errors.As(err, &in) {
+	if _, err := l.ReserveN("lookup", 4); !isInputError(err) {
 		t.Fatalf("n over PerMinute = %v, want InputError", err)
 	}
 }
@@ -85,8 +88,7 @@ func TestParseRecipient(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"", "1234", "+1 234 567 890 123 456", "@g.us", "Maria"} {
-		var in InputError
-		if _, err := ParseRecipient(bad); !errors.As(err, &in) {
+		if _, err := ParseRecipient(bad); !isInputError(err) {
 			t.Errorf("ParseRecipient(%q) err = %v, want InputError", bad, err)
 		}
 	}
@@ -108,13 +110,13 @@ func protocolEvent(chat, sender string, fromMe bool, pm *waE2E.ProtocolMessage) 
 func edit(id, text string) *waE2E.ProtocolMessage {
 	return &waE2E.ProtocolMessage{
 		Type:          waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
-		Key:           &waCommon.MessageKey{ID: proto.String(id)},
-		EditedMessage: &waE2E.Message{Conversation: proto.String(text)},
+		Key:           &waCommon.MessageKey{ID: new(id)},
+		EditedMessage: &waE2E.Message{Conversation: new(text)},
 	}
 }
 
 func revoke(id string) *waE2E.ProtocolMessage {
-	return &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_REVOKE.Enum(), Key: &waCommon.MessageKey{ID: proto.String(id)}}
+	return &waE2E.ProtocolMessage{Type: waE2E.ProtocolMessage_REVOKE.Enum(), Key: &waCommon.MessageKey{ID: new(id)}}
 }
 
 func TestHandleProtocolChecksAuthor(t *testing.T) {
@@ -169,7 +171,7 @@ func TestHandleStoresAndPublishesOnce(t *testing.T) {
 	c, _ := types.ParseJID(maria)
 	evt := &events.Message{
 		Info:    types.MessageInfo{MessageSource: types.MessageSource{Chat: c, Sender: c}, ID: "IN1", PushName: "Maria", Timestamp: time.Now()},
-		Message: &waE2E.Message{Conversation: proto.String("hello")},
+		Message: &waE2E.Message{Conversation: new("hello")},
 	}
 	b.handle(evt)
 	b.handle(evt)
@@ -187,8 +189,7 @@ func TestHandleStoresAndPublishesOnce(t *testing.T) {
 func TestAuditedRecordsFailures(t *testing.T) {
 	b := newTestBot(t)
 	ctx := context.Background()
-	var in InputError
-	if _, err := b.SendText(ctx, "api", maria, "  ", SendOptions{}); !errors.As(err, &in) {
+	if _, err := b.SendText(ctx, "api", maria, "  ", SendOptions{}); !isInputError(err) {
 		t.Fatalf("empty text err = %v", err)
 	}
 	if _, err := b.SendText(ctx, "cli", maria, "hi", SendOptions{}); err == nil || err.Error() != "not logged in" {
@@ -214,8 +215,7 @@ func TestCappedBody(t *testing.T) {
 	if got, err := read("01234", 10); err != nil || got != "01234" {
 		t.Fatalf("under the cap: %q, %v", got, err)
 	}
-	var in InputError
-	if _, err := read("0123456789", 5); !errors.As(err, &in) {
+	if _, err := read("0123456789", 5); !isInputError(err) {
 		t.Fatalf("over the cap: err = %v, want InputError", err)
 	}
 }
@@ -244,8 +244,7 @@ func TestDownloadMediaChecksBeforeNetwork(t *testing.T) {
 	big, _, _ := b.Store.Save(store.Message{ID: "D1", Chat: ana, Sender: ana, Type: "video", Raw: []byte{1}, Timestamp: time.Now(),
 		Media: &store.Media{Mimetype: "video/mp4", Size: maxMediaDownload + 1}})
 	text, _, _ := b.Store.Save(store.Message{ID: "D2", Chat: ana, Sender: ana, Type: "text", Text: "no media", Timestamp: time.Now()})
-	var in InputError
-	if _, _, err := b.DownloadMedia(context.Background(), big.Seq); !errors.As(err, &in) {
+	if _, _, err := b.DownloadMedia(context.Background(), big.Seq); !isInputError(err) {
 		t.Fatalf("oversized: %v", err)
 	}
 	for _, seq := range []int64{text.Seq, 999} {
@@ -264,8 +263,7 @@ func TestWebhookSignsAndFilters(t *testing.T) {
 		bodies <- string(data)
 	}))
 	defer srv.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	no := false
 	w := NewWebhook(ctx, srv.URL, "s3cret", store.Filter{FromMe: &no}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.Deliver("message", store.Message{Seq: 1, ID: "W0", Chat: john, FromMe: true, Type: "text"})
@@ -298,8 +296,7 @@ func TestWebhookStats(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	w := NewWebhook(ctx, srv.URL, "", store.Filter{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.Deliver("message", store.Message{Seq: 1, ID: "OK", Chat: maria, Type: "text", Text: "private words"})
 	w.Deliver("message", store.Message{Seq: 2, ID: "BAD", Chat: maria, Type: "text", Text: "private words"})
@@ -339,4 +336,43 @@ func TestLimiterStats(t *testing.T) {
 	}
 	var nilLimiter *Limiter
 	_ = nilLimiter.Stats()
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for v, want := range map[string]time.Duration{
+		"": 0, "7": 7 * time.Second, " 120 ": 2 * time.Minute, "-3": 0, "soon": 0,
+		now.Add(90 * time.Second).Format(http.TimeFormat): 90 * time.Second,
+		now.Add(-time.Hour).Format(http.TimeFormat):       0,
+	} {
+		if got := parseRetryAfter(v, now); got != want {
+			t.Errorf("parseRetryAfter(%q) = %v, want %v", v, got, want)
+		}
+	}
+}
+
+func TestWebhookPostReadsRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "42")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("slow down"))
+	}))
+	defer srv.Close()
+	w := newWebhook(srv.URL, "", store.Filter{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	status, retry, err := w.post(t.Context(), webhookJob{event: "test", body: []byte("{}"), id: "t-1"})
+	if err != nil || status != http.StatusTooManyRequests || retry != 42*time.Second {
+		t.Fatalf("post = %d, %v, %v", status, retry, err)
+	}
+}
+
+func TestLimiterWait(t *testing.T) {
+	l := NewLimiter(0, time.Hour, time.Hour)
+	if err := l.Wait(t.Context(), maria, 1); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if err := l.Wait(ctx, maria, 1); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second Wait = %v, want the context's deadline", err)
+	}
 }

@@ -154,7 +154,11 @@ func (m *model) command(line string) tea.Cmd {
 			return m.setNotice("type what to search for, e.g. /search bom dia", true)
 		}
 		return func() tea.Msg {
-			return searchMsg{rest, m.bot.Store.Query(store.Filter{Text: rest}, 200, false)}
+			results, err := m.bot.Store.Query(store.Filter{Text: rest}, searchLimit, false)
+			if err != nil {
+				return noticeMsg{"search: " + err.Error(), true}
+			}
+			return searchMsg{rest, results}
 		}
 	case "/copy":
 		return m.copyNumber()
@@ -201,7 +205,6 @@ func (m *model) openByName(q string) tea.Cmd {
 	}
 }
 
-// markRead sends read receipts for incoming messages in the open chat.
 // markRead marks what's on screen as read: locally right away (so badges clear even offline) and,
 // when connected, with read receipts to the senders.
 func (m *model) markRead(msgs []store.Message) tea.Cmd {
@@ -216,8 +219,8 @@ func (m *model) markRead(msgs []store.Message) tea.Cmd {
 			ids = append(ids, x.ID)
 		}
 	}
-	if len(ids) > 20 {
-		ids = ids[len(ids)-20:]
+	if len(ids) > receiptsMax {
+		ids = ids[len(ids)-receiptsMax:]
 	}
 	if last == 0 {
 		return nil
@@ -229,7 +232,7 @@ func (m *model) markRead(msgs []store.Message) tea.Cmd {
 			_, _ = m.bot.MarkRead(context.Background(), actor, chat, ids)
 		}
 		if moved {
-			return m.loadChats()()
+			return chatsStaleMsg{}
 		}
 		return nil
 	}
@@ -249,7 +252,7 @@ func (m *model) save(ctx context.Context, target store.Message) (string, error) 
 	}
 	name := filepath.Base(safe(full.MediaFileName()))
 	ext := filepath.Ext(name)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		path := filepath.Join(dir, name)
 		if i > 0 {
 			path = filepath.Join(dir, fmt.Sprintf("%s (%d)%s", strings.TrimSuffix(name, ext), i, ext))

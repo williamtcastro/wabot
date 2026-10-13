@@ -59,3 +59,78 @@ func TestCachedGroupNamesBeforeLogin(t *testing.T) {
 		t.Fatal("cached admins should be used too")
 	}
 }
+
+func TestAdminRevokeInGroup(t *testing.T) {
+	b := newTestBot(t)
+	if err := b.Store.SaveGroups([]store.Group{{JID: group, Name: "Family", Admins: []string{ana}}}); err != nil {
+		t.Fatal(err)
+	}
+	b.loadCachedGroups()
+	if _, ok, err := b.Store.Save(store.Message{ID: "G2", Chat: group, Sender: maria, IsGroup: true, Type: "text", Text: "oi", Timestamp: time.Now()}); !ok || err != nil {
+		t.Fatal(err)
+	}
+	b.handle(protocolEvent(group, ana, false, revoke("G2")))
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if m, _ := b.Store.Get(group, "G2"); m.Deleted {
+			return
+		}
+	}
+	t.Fatal("a group admin's revoke wasn't applied")
+}
+
+func TestTypingExpiryKeepsNewerTimer(t *testing.T) {
+	b := newTestBot(t)
+	b.trackTyping(maria, true)
+	b.mu.RLock()
+	old := b.typingIn[maria]
+	b.mu.RUnlock()
+	b.trackTyping(maria, true)
+	b.typingExpired(maria, old)
+	b.mu.RLock()
+	_, still := b.typingIn[maria]
+	b.mu.RUnlock()
+	if !still {
+		t.Fatal("an expired timer removed the newer typing indicator")
+	}
+	b.trackTyping(maria, false)
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if len(b.typingIn) != 0 || b.wantedPresence() != types.PresenceUnavailable {
+		t.Fatalf("typing = %v", b.typingIn)
+	}
+}
+
+func TestCloseStopsBackgroundWork(t *testing.T) {
+	b := newTestBot(t)
+	started := make(chan struct{})
+	stopped := false
+	b.Go(func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+		stopped = true
+	})
+	<-started
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !stopped {
+		t.Fatal("Close returned before the background work stopped")
+	}
+	ran := false
+	b.Go(func(context.Context) { ran = true })
+	if err := b.Close(); err != nil || ran {
+		t.Fatalf("after Close: Go ran %v, second Close %v", ran, err)
+	}
+}
+
+func TestAllowlistOfflineCachedBriefly(t *testing.T) {
+	b := newTestBot(t)
+	ctx := t.Context()
+	b.ExpandAllowlist(ctx, []string{maria})
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	c, ok := b.allowlists[maria]
+	if !ok || time.Until(c.expires) > allowlistRetryAfter {
+		t.Fatalf("offline result = %+v, %v; want cached for at most %s", c, ok, allowlistRetryAfter)
+	}
+}

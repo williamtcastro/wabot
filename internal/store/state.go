@@ -53,7 +53,10 @@ END;
 INSERT INTO wame_messages_fts(wame_messages_fts) VALUES ('rebuild');`
 
 func migrateState(ctx context.Context, db *sql.DB) error {
-	hadState := tableExists(ctx, db, "wame_chat_state")
+	hadState, err := tableExists(ctx, db, "wame_chat_state")
+	if err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx, stateTables); err != nil {
 		return err
 	}
@@ -64,24 +67,35 @@ func migrateState(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
-	if !tableExists(ctx, db, "wame_messages_fts") {
-		if _, err := db.ExecContext(ctx, searchTables); err != nil {
-			return err
-		}
+	hasSearch, err := tableExists(ctx, db, "wame_messages_fts")
+	if err != nil || hasSearch {
+		return err
 	}
-	return nil
+	// One transaction, so a crash can't leave the index without the triggers that keep it current.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, searchTables); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-func tableExists(ctx context.Context, db *sql.DB, name string) bool {
+type queryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func tableExists(ctx context.Context, db queryRower, name string) (bool, error) {
 	var n int
-	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name = ?`, name).Scan(&n)
-	return n > 0
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name = ?`, name).Scan(&n)
+	return n > 0, err
 }
 
 // MarkReadUpTo moves a chat's read position forward (never back) and reports whether it moved.
 func (s *Store) MarkReadUpTo(chat string, seq int64) bool {
-	res, err := s.db.Exec(`INSERT INTO wame_chat_state (chat, read_seq) VALUES (?, ?)
-		ON CONFLICT (chat) DO UPDATE SET read_seq = excluded.read_seq WHERE excluded.read_seq > read_seq`, chat, seq)
+	res, err := s.db.Exec(`INSERT INTO wame_chat_state (chat, read_seq) VALUES (?, ?)`+upsertReadSeq, chat, seq)
 	if err != nil {
 		return false
 	}
@@ -112,7 +126,7 @@ func (s *Store) MaxSeqOf(chat string, ids []string) int64 {
 		args = append(args, id)
 	}
 	var seq sql.NullInt64
-	_ = s.db.QueryRow(`SELECT MAX(seq) FROM wame_messages WHERE chat = ? AND id IN (?`+strings.Repeat(",?", len(ids)-1)+`)`, args...).Scan(&seq)
+	_ = s.db.QueryRow(`SELECT MAX(seq) FROM wame_messages WHERE chat = ? AND id IN (`+placeholders(len(ids))+`)`, args...).Scan(&seq)
 	return seq.Int64
 }
 
@@ -141,22 +155,23 @@ func (s *Store) SaveGroups(groups []Group) error {
 	return tx.Commit()
 }
 
-func (s *Store) Groups() []Group {
+func (s *Store) Groups() ([]Group, error) {
 	rows, err := s.db.Query(`SELECT jid, name, admins FROM wame_groups`)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	var out []Group
 	for rows.Next() {
 		var g Group
 		var admins string
-		if rows.Scan(&g.JID, &g.Name, &admins) == nil {
-			_ = json.Unmarshal([]byte(admins), &g.Admins)
-			out = append(out, g)
+		if err := rows.Scan(&g.JID, &g.Name, &admins); err != nil {
+			return nil, err
 		}
+		_ = json.Unmarshal([]byte(admins), &g.Admins)
+		out = append(out, g)
 	}
-	return out
+	return out, rows.Err()
 }
 
 // ftsQuery turns what a person typed into an FTS5 query: every word must appear, the last one as a

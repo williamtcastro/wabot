@@ -34,8 +34,8 @@ const legacyPrefix = "wabot_"
 
 var (
 	ErrUnauthorized = errors.New("unauthorized")
-	ErrExpired      = errors.New("token expired")
-	ErrRevoked      = errors.New("token revoked")
+	ErrExpired      = store.ErrTokenExpired
+	ErrRevoked      = store.ErrTokenRevoked
 
 	namePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,39}$`)
 	reservedNames = []string{"api", "owner", "local", "tui", "cli", "autoreply", "whatsapp"}
@@ -102,28 +102,35 @@ const DefaultRate = 10
 // MinOwnerSecret is the shortest -token / WAME_TOKEN accepted, since it can be guessed online.
 const MinOwnerSecret = 16
 
+// InvalidRequest is a token request Issue refused: a bad name, scopes or limits, or a name already taken.
+// Any other error from Issue is a database failure.
+type InvalidRequest struct{ Err error }
+
+func (e InvalidRequest) Error() string { return e.Err.Error() }
+func (e InvalidRequest) Unwrap() error { return e.Err }
+
+func invalid(format string, args ...any) error {
+	return InvalidRequest{fmt.Errorf(format, args...)}
+}
+
 // Issue creates a token and returns its plaintext, which is never stored and can't be shown again.
 func Issue(st *store.Store, req Request) (string, store.Token, error) {
 	if !namePattern.MatchString(req.Name) || slices.Contains(reservedNames, req.Name) {
-		return "", store.Token{}, fmt.Errorf("invalid token name %q: use 1-40 lowercase letters, digits, '.', '_' or '-' (not %s)", req.Name, strings.Join(reservedNames, ", "))
+		return "", store.Token{}, invalid("invalid token name %q: use 1-40 lowercase letters, digits, '.', '_' or '-' (not %s)", req.Name, strings.Join(reservedNames, ", "))
 	}
 	if len(req.Scopes) == 0 {
-		return "", store.Token{}, errors.New("at least one scope is required")
+		return "", store.Token{}, invalid("at least one scope is required")
 	}
 	if slices.Contains(req.Scopes, Admin) && len(req.Chats) > 0 {
-		return "", store.Token{}, errors.New("an admin token can't be limited to chats; drop admin or the chat list")
+		return "", store.Token{}, invalid("an admin token can't be limited to chats; drop admin or the chat list")
 	}
 	if req.Rate < 0 || req.TTL < 0 {
-		return "", store.Token{}, errors.New("rate and expiry can't be negative")
+		return "", store.Token{}, invalid("rate and expiry can't be negative")
 	}
 	for attempt := 0; ; attempt++ {
 		idBytes, secret := make([]byte, 5), make([]byte, 32)
-		if _, err := rand.Read(idBytes); err != nil {
-			return "", store.Token{}, err
-		}
-		if _, err := rand.Read(secret); err != nil {
-			return "", store.Token{}, err
-		}
+		rand.Read(idBytes)
+		rand.Read(secret)
 		id := idEncoding.EncodeToString(idBytes)
 		plain := Prefix + id + "_" + base64.RawURLEncoding.EncodeToString(secret)
 		t := store.Token{
@@ -139,10 +146,12 @@ func Issue(st *store.Store, req Request) (string, store.Token, error) {
 			t.Expires = req.NotAfter
 		}
 		err := st.InsertToken(t)
-		if errors.Is(err, store.ErrTokenID) && attempt < 3 {
+		switch {
+		case errors.Is(err, store.ErrTokenID) && attempt < 3:
 			continue
-		}
-		if err != nil {
+		case errors.Is(err, store.ErrTokenName):
+			return "", store.Token{}, InvalidRequest{err}
+		case err != nil:
 			return "", store.Token{}, err
 		}
 		return plain, t, nil
@@ -196,11 +205,8 @@ func (a *Authenticator) Authenticate(presented string) (Principal, error) {
 	if subtle.ConstantTimeCompare(digest, t.Hash) != 1 {
 		return Principal{}, ErrUnauthorized
 	}
-	switch {
-	case t.Revoked:
-		return Principal{}, ErrRevoked
-	case !t.Expires.IsZero() && time.Now().After(t.Expires):
-		return Principal{}, ErrExpired
+	if err := t.Usable(time.Now()); err != nil {
+		return Principal{}, err
 	}
 	a.touch(t.ID)
 	p := Principal{Name: t.Name, TokenID: t.ID, Chats: t.Chats, Rate: t.Rate, Expires: t.Expires}

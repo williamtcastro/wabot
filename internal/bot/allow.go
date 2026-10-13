@@ -2,21 +2,26 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"time"
 )
 
-const allowlistTTL = 10 * time.Minute
+const (
+	allowlistTTL        = 10 * time.Minute
+	allowlistRetryAfter = 30 * time.Second
+)
 
 type expandedAllowlist struct {
-	chats []string
-	at    time.Time
+	chats   []string
+	expires time.Time
 }
 
 // ExpandAllowlist returns a token's chat allowlist plus the JIDs its phone numbers resolve to, so an entry
 // saved with or without Brazil's 9th digit still matches the chat WhatsApp uses. Results (including
-// numbers WhatsApp doesn't know) are cached, so callers can't trigger repeated lookups.
+// numbers WhatsApp doesn't know) are cached, so callers can't trigger repeated lookups. When a lookup
+// couldn't be made (offline, rate limited, network) the partial result is kept only briefly.
 func (b *Bot) ExpandAllowlist(ctx context.Context, allow []string) []string {
 	if len(allow) == 0 {
 		return nil
@@ -25,15 +30,25 @@ func (b *Bot) ExpandAllowlist(ctx context.Context, allow []string) []string {
 	b.mu.RLock()
 	cached, ok := b.allowlists[key]
 	b.mu.RUnlock()
-	if ok && time.Since(cached.at) < allowlistTTL {
+	if ok && time.Now().Before(cached.expires) {
 		return cached.chats
 	}
 	out := slices.Clone(allow)
+	ttl := allowlistTTL
 	for _, entry := range allow {
-		if num, ok := strings.CutSuffix(entry, "@s.whatsapp.net"); ok {
-			if jid, err := b.Resolve(ctx, num); err == nil {
-				out = append(out, b.PhoneJID(jid).String())
-			}
+		num, ok := strings.CutSuffix(entry, "@s.whatsapp.net")
+		if !ok {
+			continue
+		}
+		if !b.Client.IsLoggedIn() {
+			ttl = allowlistRetryAfter
+			continue
+		}
+		jid, err := b.Resolve(ctx, num)
+		if err == nil {
+			out = append(out, b.PhoneJID(jid).String())
+		} else if _, ok := errors.AsType[InputError](err); !ok {
+			ttl = allowlistRetryAfter
 		}
 	}
 	slices.Sort(out)
@@ -42,7 +57,7 @@ func (b *Bot) ExpandAllowlist(ctx context.Context, allow []string) []string {
 	if b.allowlists == nil || len(b.allowlists) > 1000 {
 		b.allowlists = map[string]expandedAllowlist{}
 	}
-	b.allowlists[key] = expandedAllowlist{chats: out, at: time.Now()}
+	b.allowlists[key] = expandedAllowlist{chats: out, expires: time.Now().Add(ttl)}
 	b.mu.Unlock()
 	return out
 }

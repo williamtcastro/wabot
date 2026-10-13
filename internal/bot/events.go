@@ -18,7 +18,7 @@ func (b *Bot) handle(evt any) {
 	case *events.Connected:
 		b.setState("connected", "")
 		b.announcePresence()
-		go b.refreshGroups(context.Background())
+		b.Go(b.refreshGroups)
 	case *events.Receipt:
 		// "read-self" means we read the chat on another device, e.g. the phone.
 		if v.Type == types.ReceiptTypeReadSelf || (v.IsFromMe && v.Type == types.ReceiptTypeRead) {
@@ -55,7 +55,7 @@ func (b *Bot) handle(evt any) {
 			b.Webhook.Deliver("message", m)
 		}
 		if b.replies.Load() && (!m.FromMe || b.isSelfChat(m.Chat)) {
-			go b.autoReply(m)
+			b.autoReply(m)
 		}
 	}
 }
@@ -69,8 +69,16 @@ func (b *Bot) handleProtocol(v *events.Message, pm *waE2E.ProtocolMessage) {
 	sameAuthor := actor.FromMe == target.FromMe && (actor.FromMe || actor.Sender == target.Sender)
 	switch pm.GetType() {
 	case waE2E.ProtocolMessage_REVOKE:
-		if sameAuthor || (target.IsGroup && (actor.FromMe || b.isGroupAdmin(context.Background(), target.Chat, actor.Sender))) {
+		switch {
+		case sameAuthor || (target.IsGroup && actor.FromMe):
 			b.applyDelete(target.Chat, target.ID)
+		case target.IsGroup:
+			// The admin check may have to fetch the group list, which mustn't block the event handler.
+			b.Go(func(ctx context.Context) {
+				if b.isGroupAdmin(ctx, target.Chat, actor.Sender) {
+					b.applyDelete(target.Chat, target.ID)
+				}
+			})
 		}
 	case waE2E.ProtocolMessage_MESSAGE_EDIT:
 		if sameAuthor && target.Type == "text" {
@@ -130,26 +138,33 @@ func (b *Bot) importHistory(h *events.HistorySync) {
 	}
 }
 
-func (b *Bot) autoReply(m store.Message) {
-	var reply string
-	switch strings.ToLower(strings.TrimSpace(m.Text)) {
+func autoReplyText(text string) string {
+	switch strings.ToLower(strings.TrimSpace(text)) {
 	case "!ping":
-		reply = "pong 🏓"
+		return "pong 🏓"
 	case "!time":
-		reply = time.Now().Format(time.RFC1123)
+		return time.Now().Format(time.RFC1123)
 	case "!help":
-		reply = "Commands: !ping, !time, !help"
-	default:
+		return "Commands: !ping, !time, !help"
+	}
+	return ""
+}
+
+// autoReply answers a command message in the background; anything else costs nothing.
+func (b *Bot) autoReply(m store.Message) {
+	reply := autoReplyText(m.Text)
+	if reply == "" {
 		return
 	}
 	if _, err := b.autoLimit.Reserve(m.Chat); err != nil {
 		b.Log.Debug("auto-reply dropped", "chat", m.Chat, "err", err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	_, err := b.SendText(ctx, "autoreply", m.Chat, reply, SendOptions{ReplyTo: m.ID})
-	if err != nil {
-		b.Log.Warn("auto-reply failed", "chat", m.Chat, "err", err)
-	}
+	b.Go(func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		if _, err := b.SendText(ctx, "autoreply", m.Chat, reply, SendOptions{ReplyTo: m.ID}); err != nil {
+			b.Log.Warn("auto-reply failed", "chat", m.Chat, "err", err)
+		}
+	})
 }

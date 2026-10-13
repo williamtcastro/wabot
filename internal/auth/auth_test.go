@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"path/filepath"
@@ -21,7 +20,7 @@ func newStore(t *testing.T) *store.Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	s, err := store.Open(context.Background(), db)
+	s, err := store.Open(t.Context(), db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,11 +79,10 @@ func TestIssueAndAuthenticate(t *testing.T) {
 
 func TestExpiryOwnerAndValidation(t *testing.T) {
 	st := newStore(t)
-	plain, _, err := Issue(st, Request{Name: "short", Scopes: []Scope{Read}, TTL: time.Millisecond})
+	plain, _, err := Issue(st, Request{Name: "short", Scopes: []Scope{Read}, NotAfter: time.Now().Add(-time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(5 * time.Millisecond)
 	a := &Authenticator{Store: st, Owner: "owner-secret"}
 	if _, err := a.Authenticate(plain); !errors.Is(err, ErrExpired) {
 		t.Fatalf("expired token: %v", err)
@@ -98,9 +96,10 @@ func TestExpiryOwnerAndValidation(t *testing.T) {
 		{Name: "ok", Scopes: nil},
 		{Name: "admin-chats", Scopes: []Scope{Admin}, Chats: []string{"5511999999999@s.whatsapp.net"}},
 		{Name: "neg", Scopes: []Scope{Read}, Rate: -1},
+		{Name: "short", Scopes: []Scope{Read}},
 	} {
-		if _, _, err := Issue(st, req); err == nil {
-			t.Errorf("Issue(%+v) should fail", req)
+		if _, _, err := Issue(st, req); !isInvalid(err) {
+			t.Errorf("Issue(%+v) = %v, want InvalidRequest", req, err)
 		}
 	}
 	if _, err := ParseScopes([]string{"read", "root"}); err == nil {
@@ -117,7 +116,7 @@ func TestF2RequiredFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	st, err := store.Open(context.Background(), db)
+	st, err := store.Open(t.Context(), db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,5 +141,28 @@ func TestTokensFromBeforeTheRenameStillWork(t *testing.T) {
 	p, err := (&Authenticator{Store: st}).Authenticate(plain)
 	if err != nil || p.Name != "old-agent" {
 		t.Fatalf("wabot_ token = %+v, %v", p, err)
+	}
+}
+
+func isInvalid(err error) bool {
+	_, ok := errors.AsType[InvalidRequest](err)
+	return ok
+}
+
+func TestIssueDatabaseErrorIsNotInvalid(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	st, err := store.Open(t.Context(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`ALTER TABLE wame_tokens RENAME TO gone`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Issue(st, Request{Name: "maria-bot", Scopes: []Scope{Read}}); err == nil || isInvalid(err) {
+		t.Fatalf("a database failure must not look like a bad request: %v", err)
 	}
 }

@@ -132,7 +132,8 @@ make the same choice for their generated tokens. This does **not** cover the own
 ### Rate limits
 
 - Per token: an optional `rate` sends per minute (`tokenLimits`, keyed by token id, 30 s max wait),
-  applied in `sendGuard`, which every `send`-scope route except `/check` passes through. **Now:**
+  applied in `sendGuard` (since split into `authorizeChat` and `throttle`, which runs inside the
+  idempotent part of a send, so a retried key doesn't spend a slot), which every `send`-scope route except `/check` passes through. **Now:**
   new tokens default to 10/min (`auth.DefaultRate`); an explicit `0` means global limit only (F11) The
   limiter now lives in `Bot.ThrottleToken` and the MCP send tools use it too (F13).
 - Global: `Bot.Limiter` (sends) and `Bot.Lookups` (number checks and presence) still apply to

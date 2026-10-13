@@ -4,14 +4,12 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/williamtcastro/wame/internal/store"
 )
@@ -41,7 +39,7 @@ func (b *Bot) React(ctx context.Context, actor, chat, id, emoji string) (store.M
 		if err != nil {
 			return store.Message{}, err
 		}
-		return b.deliver(ctx, jid, b.Client.BuildReaction(jid, senderJID(target), id, emoji), store.Message{Type: "reaction", Text: emoji, ReplyTo: id})
+		return b.deliver(ctx, jid, b.Client.BuildReaction(jid, senderJID(target), id, emoji), store.Message{Type: "reaction", Text: emoji, ReplyTo: id}, SendOptions{})
 	})
 }
 
@@ -61,7 +59,7 @@ func (b *Bot) Edit(ctx context.Context, actor, chat, id, text string) (store.Mes
 		case target.Type != "text":
 			return store.Message{}, BadInput("only text messages can be edited")
 		}
-		if err := b.sendControl(ctx, jid, b.Client.BuildEdit(jid, id, &waE2E.Message{Conversation: proto.String(text)})); err != nil {
+		if err := b.sendControl(ctx, jid, b.Client.BuildEdit(jid, id, &waE2E.Message{Conversation: new(text)})); err != nil {
 			return store.Message{}, err
 		}
 		b.applyEdit(target.Chat, id, text)
@@ -97,7 +95,10 @@ func (b *Bot) MarkRead(ctx context.Context, actor, chat string, ids []string) (i
 	var msgs []store.Message
 	if len(ids) == 0 {
 		f := false
-		msgs = b.Store.Query(store.Filter{Chat: key, ChatOnly: true, FromMe: &f}, 50, false)
+		if msgs, err = b.Store.Query(store.Filter{Chat: key, ChatOnly: true, FromMe: &f}, 50, false); err != nil {
+			b.Audit(actor, "read", key, "", err)
+			return 0, err
+		}
 	} else {
 		for _, id := range ids {
 			if m, err := b.Store.Get(key, id); err == nil && !m.FromMe {
@@ -141,7 +142,14 @@ func (b *Bot) MarkRead(ctx context.Context, actor, chat string, ids []string) (i
 }
 
 func (b *Bot) SetTyping(ctx context.Context, chat, state string) error {
-	if !slices.Contains([]string{"", "typing", "recording", "paused"}, state) {
+	presence, media := types.ChatPresenceComposing, types.ChatPresenceMediaText
+	switch state {
+	case "typing", "":
+	case "recording":
+		media = types.ChatPresenceMediaAudio
+	case "paused":
+		presence = types.ChatPresencePaused
+	default:
 		return BadInput("state must be typing, recording or paused")
 	}
 	jid, err := b.resolveOnline(ctx, chat)
@@ -151,13 +159,5 @@ func (b *Bot) SetTyping(ctx context.Context, chat, state string) error {
 	if err != nil {
 		return err
 	}
-	switch state {
-	case "typing", "":
-		return b.chatPresence(ctx, jid, types.ChatPresenceComposing, types.ChatPresenceMediaText)
-	case "recording":
-		return b.chatPresence(ctx, jid, types.ChatPresenceComposing, types.ChatPresenceMediaAudio)
-	case "paused":
-		return b.chatPresence(ctx, jid, types.ChatPresencePaused, types.ChatPresenceMediaText)
-	}
-	return BadInput("state must be typing, recording or paused")
+	return b.chatPresence(ctx, jid, presence, media)
 }

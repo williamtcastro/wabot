@@ -55,6 +55,17 @@ func run(m *model, cmd tea.Cmd) {
 	}
 }
 
+// settle is run followed to the end of the chain: each answer's command runs too, timers included.
+func settle(m *model, cmd tea.Cmd) {
+	for cmd != nil {
+		msg := cmd()
+		if _, isBatch := msg.(tea.BatchMsg); isBatch || msg == nil {
+			return
+		}
+		_, cmd = m.Update(msg)
+	}
+}
+
 func press(m *model, keys ...string) tea.Cmd {
 	var cmd tea.Cmd
 	for _, k := range keys {
@@ -369,7 +380,8 @@ func TestNewMessagesDivider(t *testing.T) {
 	incoming := slices.DeleteFunc(chatMessages(), func(x store.Message) bool { return x.FromMe })
 	m := newTestModel(t, incoming...)
 	var cutoff int64
-	for _, x := range m.bot.Store.Messages(maria, 100) {
+	msgs, _ := m.bot.Store.Messages(maria, 100)
+	for _, x := range msgs {
 		if x.ID == "M27" {
 			cutoff = x.Seq
 		}
@@ -418,12 +430,12 @@ func TestOpeningChatClearsBadgeOffline(t *testing.T) {
 	if i := chatIndex(m.chats, maria); i < 0 || m.chats[i].Unread == 0 {
 		t.Fatal("Maria should start unread")
 	}
-	_, followUp := m.Update(m.open(maria)())
-	run(m, followUp)
+	settle(m, m.open(maria))
 	if i := chatIndex(m.chats, maria); i < 0 || m.chats[i].Unread != 0 {
 		t.Fatal("badge should clear after opening the chat")
 	}
-	for _, c := range m.bot.Store.Messages(maria, 1) {
+	last, _ := m.bot.Store.Messages(maria, 1)
+	for _, c := range last {
 		if m.bot.Store.ReadSeq(maria) != c.Seq {
 			t.Fatal("opening the chat should mark it read locally even when not logged in")
 		}
@@ -443,5 +455,32 @@ func TestSearchWithNoResultsIgnoresKeys(t *testing.T) {
 	run(m, press(m, "esc"))
 	if m.searching {
 		t.Fatal("esc should close the results")
+	}
+}
+
+func TestChatReloadsAreDebouncedAndOrdered(t *testing.T) {
+	m := newTestModel(t, chatMessages()...)
+	run(m, m.open(ana))
+	var scheduled int
+	for i := range 5 {
+		if m.onEvent(store.Message{Seq: int64(100 + i), Chat: john, Sender: john, Type: "text", Text: "hi"}) != nil {
+			scheduled++
+		}
+	}
+	if scheduled != 1 || !m.chatsReload.Pending() {
+		t.Fatalf("5 messages scheduled %d reloads, want 1", scheduled)
+	}
+	settle(m, func() tea.Msg { return chatsReloadMsg{} })
+	if m.chatsReload.Pending() || len(m.chats) != 3 {
+		t.Fatalf("reload: pending %v, %d chats", m.chatsReload.Pending(), len(m.chats))
+	}
+
+	older, newer := m.loadChats(), m.loadChats()
+	m.Update(newer())
+	stale := older().(chatsMsg)
+	stale.chats = stale.chats[:1]
+	m.Update(stale)
+	if len(m.chats) != 3 {
+		t.Fatalf("an older chat list replaced a newer one: %d chats", len(m.chats))
 	}
 }

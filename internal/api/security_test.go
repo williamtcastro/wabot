@@ -3,6 +3,8 @@ package api
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,9 +19,7 @@ import (
 
 func fromLAN(hdr map[string]string) map[string]string {
 	out := map[string]string{"X-Remote": "192.168.1.66:4000"}
-	for k, v := range hdr {
-		out[k] = v
-	}
+	maps.Copy(out, hdr)
 	return out
 }
 
@@ -211,5 +211,55 @@ func TestMCPFailedAttemptsShareTheThrottle(t *testing.T) {
 	}
 	if rec := do(h, "POST", "/mcp", bearer("a-long-enough-owner-secret")); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("a blocked IP must be refused on /mcp too, got %d", rec.Code)
+	}
+}
+
+func TestFailureLimiterSurvivesIPSpray(t *testing.T) {
+	var f failureLimiter
+	for range failuresPerMinute {
+		f.record("192.168.1.66")
+	}
+	for i := range 3 * failureLimiterPrune {
+		f.record(fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255))
+	}
+	if !f.blocked("192.168.1.66") {
+		t.Fatal("a spray of other addresses must not clear an IP's block")
+	}
+	if f.blocked("192.168.1.77") || len(f.hits) != 3*failureLimiterPrune+1 {
+		t.Fatalf("a lookup must not add an entry: %d tracked", len(f.hits))
+	}
+
+	stale := time.Now().Add(-2 * time.Minute)
+	for k := range f.hits {
+		f.hits[k] = []time.Time{stale}
+	}
+	if f.blocked("192.168.1.66") || len(f.hits) != 3*failureLimiterPrune {
+		t.Fatalf("a lookup of a stale IP must drop it: %d tracked", len(f.hits))
+	}
+	f.pruneAt = 0
+	f.record("192.168.1.66")
+	if len(f.hits) != 1 {
+		t.Fatalf("stale entries must be pruned, %d left", len(f.hits))
+	}
+}
+
+func TestStopStreamsEndsOpenStreams(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "")
+	done := make(chan int, 2)
+	for _, target := range []string{"/events", "/messages/wait?timeout=60"} {
+		go func() { done <- doJSON(h, "GET", target, "", nil).Code }()
+	}
+	time.Sleep(100 * time.Millisecond)
+	h.StopStreams()
+	for range 2 {
+		select {
+		case code := <-done:
+			if code != 200 {
+				t.Fatalf("stream ended with %d", code)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("StopStreams didn't end an open stream")
+		}
 	}
 }

@@ -3,11 +3,13 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -33,7 +35,7 @@ const (
 
 func newTestBot(t *testing.T) *bot.Bot {
 	t.Helper()
-	b, err := bot.New(context.Background(), filepath.Join(t.TempDir(), "wame.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	b, err := bot.New(t.Context(), filepath.Join(t.TempDir(), "wame.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +132,7 @@ func TestLocalOnlyWithoutToken(t *testing.T) {
 
 func TestIdempotency(t *testing.T) {
 	s := idempotency{entries: map[string]*idemEntry{}}
-	ctx := context.Background()
+	ctx := t.Context()
 	calls := 0
 	send := func() (store.Message, error) {
 		calls++
@@ -158,7 +160,7 @@ func TestIdempotency(t *testing.T) {
 	}
 
 	_, err = s.do(ctx, "send", "boom", "fp", func() (store.Message, error) { panic("kaboom") })
-	if err == nil || !strings.Contains(err.Error(), "internal error: kaboom") {
+	if !errors.Is(err, errInternal) || strings.Contains(err.Error(), "kaboom") {
 		t.Fatalf("panic err = %v", err)
 	}
 	if _, err := s.do(ctx, "send", "boom", "fp", send); err != nil || calls != 4 {
@@ -167,10 +169,21 @@ func TestIdempotency(t *testing.T) {
 }
 
 func TestWriteErrorCodes(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, dbErr := db.Exec(`SELECT secret FROM wame_tokens`)
+	if dbErr == nil {
+		t.Fatal("want a database error")
+	}
 	for _, c := range []struct {
 		err  error
 		want int
 	}{
+		{fmt.Errorf("query: %w", dbErr), 500},
+		{errInternal, 500},
 		{bot.BadInput("nope"), 400},
 		{fmt.Errorf("wrapped: %w", store.ErrNotFound), 404},
 		{errConflict, 409},
@@ -182,6 +195,12 @@ func TestWriteErrorCodes(t *testing.T) {
 		writeError(w, c.err)
 		if w.Code != c.want {
 			t.Errorf("%v = %d, want %d", c.err, w.Code, c.want)
+		}
+		if c.want == 500 && strings.Contains(w.Body.String(), "wame_tokens") {
+			t.Errorf("internal errors must not reach the client: %s", w.Body)
+		}
+		if c.want == 502 && !strings.Contains(w.Body.String(), "whatsapp said no") {
+			t.Errorf("WhatsApp errors are shown: %s", w.Body)
 		}
 		if c.want == 429 && w.Header().Get("Retry-After") != "3" {
 			t.Errorf("Retry-After = %q", w.Header().Get("Retry-After"))
@@ -244,7 +263,7 @@ func TestMessagesWaitReturnsBacklog(t *testing.T) {
 
 func sseIDs(body string) []string {
 	var ids []string
-	for _, line := range strings.Split(body, "\n") {
+	for line := range strings.SplitSeq(body, "\n") {
 		if id, ok := strings.CutPrefix(line, "id: "); ok {
 			ids = append(ids, id)
 		}
@@ -257,7 +276,7 @@ func TestEventsLastEventIDReplay(t *testing.T) {
 	seed(t, b)
 	h := newHandler(b, "")
 	stream := func(target string, hdr map[string]string) string {
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 		defer cancel()
 		r := httptest.NewRequestWithContext(ctx, "GET", target, nil)
 		r.Host = "127.0.0.1:8080"
@@ -316,7 +335,7 @@ func TestMessagesSearch(t *testing.T) {
 	}
 }
 
-func newHandler(b *bot.Bot, owner string) http.Handler {
+func newHandler(b *bot.Bot, owner string) *Handler {
 	return NewHandler(b, &auth.Authenticator{Store: b.Store, Owner: owner}, "test")
 }
 
@@ -372,7 +391,8 @@ func TestScopedTokens(t *testing.T) {
 	if len(chats) != 1 || chats[0].JID != maria {
 		t.Errorf("restricted /chats = %+v", chats)
 	}
-	johnMsg := b.Store.Messages(john, 1)[0]
+	johnMsgs, _ := b.Store.Messages(john, 1)
+	johnMsg := johnMsgs[0]
 	if rec := do(h, "GET", fmt.Sprintf("/media/%d", johnMsg.Seq), bearer(mariaBot)); rec.Code != http.StatusNotFound {
 		t.Errorf("restricted /media of another chat = %d, want 404", rec.Code)
 	}
@@ -453,7 +473,7 @@ func TestMCPOverHTTPUsesTokenScopes(t *testing.T) {
 	reader := issue(t, b, "reader", []auth.Scope{auth.Read}, nil, 0)
 	srv := httptest.NewServer(newHandler(b, ""))
 	defer srv.Close()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	connect := func(token string) (*mcp.ClientSession, error) {
 		tr := &mcp.StreamableClientTransport{Endpoint: srv.URL + "/mcp", HTTPClient: &http.Client{Transport: headerTransport{token}}, MaxRetries: -1}
@@ -562,5 +582,222 @@ func TestStatsCountsCallers(t *testing.T) {
 	}
 	if got["claude"] != 3 || got["api"] != 1 || s.Callers[0].LastIP != "127.0.0.1" {
 		t.Fatalf("callers = %+v", s.Callers)
+	}
+}
+
+func TestQueueEndpoints(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "s3cret-owner-secret")
+	owner := bearer("s3cret-owner-secret")
+	sender := bearer(issue(t, b, "promo-bot", []auth.Scope{auth.Send}, nil, 0))
+	scoped := bearer(issue(t, b, "maria-only", []auth.Scope{auth.Send}, []string{maria}, 0))
+	reader := bearer(issue(t, b, "reader", []auth.Scope{auth.Read}, nil, 0))
+
+	body := `{"batch":"promo","text":"Hello!","messages":[{"to":"5511999999999"},{"to":"5511988887777","text":"Hi John"}]}`
+	if w := doBody(h, "POST", "/queue", body, reader); w.Code != 403 {
+		t.Fatalf("read token: %d", w.Code)
+	}
+	w := doBody(h, "POST", "/queue", body, sender)
+	var res struct {
+		Batch  string             `json:"batch"`
+		Queued int                `json:"queued"`
+		Items  []store.OutboxItem `json:"items"`
+	}
+	if w.Code != 202 || json.Unmarshal(w.Body.Bytes(), &res) != nil || res.Queued != 2 || res.Batch != "promo" || res.Items[0].Text != "" {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if it, _ := b.Store.OutboxItem(res.Items[0].ID); it.Text != "Hello!" {
+		t.Fatalf("default text not applied: %+v", it)
+	}
+	if w := doBody(h, "POST", "/queue", `{"messages":[{"to":"5511999999999","text":"ok"},{"to":"5511988887777","text":"no"}]}`, scoped); w.Code != 403 || !strings.Contains(w.Body.String(), "messages[1]") {
+		t.Fatalf("allowlist: %d %s", w.Code, w.Body)
+	}
+	if w := doBody(h, "POST", "/queue", `{"messages":[{"to":"5511999999999","text":"ok"}]}`, scoped); w.Code != 202 {
+		t.Fatalf("allowed chat: %d %s", w.Code, w.Body)
+	}
+	if w := doBody(h, "POST", "/queue", `{"messages":[]}`, sender); w.Code != 400 {
+		t.Fatalf("empty: %d", w.Code)
+	}
+	keyed := map[string]string{"Authorization": sender["Authorization"], "Idempotency-Key": "k1"}
+	if w := doBody(h, "POST", "/queue", `{"messages":[{"to":"5521987654321","text":"one"}]}`, keyed); w.Code != 202 {
+		t.Fatalf("keyed: %d %s", w.Code, w.Body)
+	}
+	if w := doBody(h, "POST", "/queue", `{"messages":[{"to":"5521987654321","text":"one"}]}`, keyed); w.Code != 202 || !strings.Contains(w.Body.String(), `"id":4`) {
+		t.Fatalf("a retry must return the same item: %d %s", w.Code, w.Body)
+	}
+	if w := doBody(h, "POST", "/queue", `{"messages":[{"to":"5521987654321","text":"two"}]}`, keyed); w.Code != 409 {
+		t.Fatalf("same key, other body: %d %s", w.Code, w.Body)
+	}
+	if w := doBody(h, "POST", "/queue", `{"text":"`+strings.Repeat("x", maxQueueBody)+`"}`, sender); w.Code != 413 {
+		t.Fatalf("huge body: %d", w.Code)
+	}
+
+	var list struct {
+		Items  []store.OutboxItem `json:"items"`
+		Counts store.OutboxCounts `json:"counts"`
+	}
+	w = do(h, "GET", "/queue", sender)
+	if json.Unmarshal(w.Body.Bytes(), &list) != nil || len(list.Items) != 3 || list.Counts.Queued != 3 {
+		t.Fatalf("own items only: %s", w.Body)
+	}
+	w = do(h, "GET", "/queue?status=queued", owner)
+	if json.Unmarshal(w.Body.Bytes(), &list) != nil || len(list.Items) != 4 {
+		t.Fatalf("admin sees all: %s", w.Body)
+	}
+	if w := do(h, "GET", "/queue?status=lost", owner); w.Code != 400 {
+		t.Fatalf("bad status: %d", w.Code)
+	}
+	if w := do(h, "GET", fmt.Sprintf("/queue/%d", res.Items[0].ID), scoped); w.Code != 404 {
+		t.Fatalf("someone else's item: %d", w.Code)
+	}
+	if w := do(h, "DELETE", fmt.Sprintf("/queue/%d", res.Items[0].ID), sender); w.Code != 200 {
+		t.Fatalf("cancel: %d %s", w.Code, w.Body)
+	}
+	if w := do(h, "DELETE", fmt.Sprintf("/queue/%d", res.Items[0].ID), sender); w.Code != 409 {
+		t.Fatalf("cancel again: %d %s", w.Code, w.Body)
+	}
+	if w := do(h, "DELETE", "/queue?batch=promo", scoped); !strings.Contains(w.Body.String(), `"canceled":0`) {
+		t.Fatalf("a token can only cancel its own batch: %s", w.Body)
+	}
+	if w := do(h, "DELETE", "/queue?batch=promo", sender); !strings.Contains(w.Body.String(), `"canceled":1`) {
+		t.Fatalf("cancel batch: %s", w.Body)
+	}
+
+	var stats Stats
+	if w := do(h, "GET", "/stats", owner); json.Unmarshal(w.Body.Bytes(), &stats) != nil || stats.Queue.Canceled != 2 || stats.Queue.Queued != 2 {
+		t.Fatalf("stats: %s", w.Body)
+	}
+}
+
+func TestJSONBodyMustBeOneValue(t *testing.T) {
+	h := newHandler(newTestBot(t), "a-long-enough-owner-secret")
+	owner := bearer("a-long-enough-owner-secret")
+	for _, c := range []struct {
+		body string
+		want int
+	}{
+		{`{"name":"helper","scopes":["read"]}garbage`, 400},
+		{`{"name":"helper","scopes":["read"]}{}`, 400},
+		{`{"name":"helper","scopes":["read"]}` + strings.Repeat(" ", 1<<20), 413},
+		{`{"name":"helper","scopes":["read"]}` + "\n", 201},
+	} {
+		if w := doJSON(h, "POST", "/tokens", c.body, owner); w.Code != c.want {
+			t.Errorf("%.60q = %d %s, want %d", c.body, w.Code, w.Body, c.want)
+		}
+	}
+}
+
+func TestTokenNameTakenIsBadInput(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "a-long-enough-owner-secret")
+	owner := bearer("a-long-enough-owner-secret")
+	body := `{"name":"helper","scopes":["read"]}`
+	if w := doJSON(h, "POST", "/tokens", body, owner); w.Code != 201 {
+		t.Fatalf("create = %d %s", w.Code, w.Body)
+	}
+	if w := doJSON(h, "POST", "/tokens", body, owner); w.Code != 400 || !strings.Contains(w.Body.String(), "already exists") {
+		t.Fatalf("taken name = %d %s, want 400", w.Code, w.Body)
+	}
+}
+
+func doMultipart(t *testing.T, h http.Handler, fields map[string]string, size int, hdr map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	for k, v := range fields {
+		_ = mw.WriteField(k, v)
+	}
+	fw, err := mw.CreateFormFile("file", "photo.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = fw.Write(bytes.Repeat([]byte{'x'}, size))
+	_ = mw.Close()
+	r := httptest.NewRequest("POST", "/send/file", &body)
+	r.Host = "127.0.0.1:8080"
+	r.RemoteAddr = "127.0.0.1:50000"
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func TestSendFileChecksBeforeReading(t *testing.T) {
+	old := maxUpload
+	maxUpload = 1 << 10
+	defer func() { maxUpload = old }()
+	b := newTestBot(t)
+	h := newHandler(b, "a-long-enough-owner-secret")
+	owner := bearer("a-long-enough-owner-secret")
+	mariaOnly := bearer(issue(t, b, "maria-only", []auth.Scope{auth.Send}, []string{maria}, 0))
+	for _, c := range []struct {
+		name   string
+		fields map[string]string
+		size   int
+		hdr    map[string]string
+		want   int
+	}{
+		{"forbidden chat", map[string]string{"to": john}, 2 << 10, mariaOnly, 403},
+		{"no recipient", nil, 2 << 10, owner, 400},
+		{"over the limit", map[string]string{"to": maria}, 2 << 10, owner, 413},
+		{"over the body limit", map[string]string{"to": maria}, 2 << 20, owner, 413},
+	} {
+		if w := doMultipart(t, h, c.fields, c.size, c.hdr); w.Code != c.want {
+			t.Errorf("%s = %d %s, want %d", c.name, w.Code, w.Body, c.want)
+		}
+	}
+}
+
+func TestIdempotentRetryDoesntSpendTheTokenRate(t *testing.T) {
+	a := &server{b: newTestBot(t), idem: idempotency{entries: map[string]*idemEntry{}}}
+	p := auth.Principal{Name: "slow", TokenID: "abcdefgh", Scopes: []auth.Scope{auth.Send}, Rate: 1}
+	done := make(chan struct{})
+	close(done)
+	a.idem.entries["slow:send:k1"] = &idemEntry{done: done, msg: store.Message{Seq: 7, ID: "M7"}, fp: fingerprint(maria, "hi", ""), at: time.Now()}
+	send := func(key string) *httptest.ResponseRecorder {
+		r := httptest.NewRequestWithContext(context.WithValue(t.Context(), principalKey{}, p), "POST", "/send", strings.NewReader(`{"to":"`+maria+`","text":"hi"}`))
+		if key != "" {
+			r.Header.Set("Idempotency-Key", key)
+		}
+		w := httptest.NewRecorder()
+		a.sendText(w, r)
+		return w
+	}
+	for range 3 {
+		if w := send("k1"); w.Code != 200 || !strings.Contains(w.Body.String(), `"M7"`) {
+			t.Fatalf("retry = %d %s, want the first result", w.Code, w.Body)
+		}
+	}
+	if w := send(""); w.Code == http.StatusTooManyRequests {
+		t.Fatal("retries that got the first result must not spend the token's rate")
+	}
+	if w := send(""); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("second new send at rate 1 = %d, want 429", w.Code)
+	}
+}
+
+func TestRestrictedChatsFilterBeforeLimit(t *testing.T) {
+	b := newTestBot(t)
+	seed(t, b)
+	johnOnly := issue(t, b, "john-only", []auth.Scope{auth.Read}, []string{john}, 0)
+	var chats []store.Chat
+	w := do(newHandler(b, ""), "GET", "/chats?limit=1", bearer(johnOnly))
+	if err := json.Unmarshal(w.Body.Bytes(), &chats); err != nil || len(chats) != 1 || chats[0].JID != john {
+		t.Fatalf("restricted /chats?limit=1 = %d %s", w.Code, w.Body)
+	}
+}
+
+func TestCheckIsAudited(t *testing.T) {
+	b := newTestBot(t)
+	doJSON(newHandler(b, ""), "POST", "/check", `{"phones":["5511999999999","5511988887777"]}`, nil)
+	entries, err := b.Store.AuditLog(10, 0)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("audit = %+v %v", entries, err)
+	}
+	if e := entries[0]; e.Action != "check" || e.Actor != "api" || e.Detail != "2 numbers" || strings.Contains(e.Target+e.Detail, "5511") {
+		t.Fatalf("check audit entry = %+v", e)
 	}
 }

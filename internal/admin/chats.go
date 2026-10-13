@@ -1,19 +1,32 @@
 package admin
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/williamtcastro/wame/internal/store"
+	"github.com/williamtcastro/wame/internal/termui"
 )
 
-const chatListWidth = 34
+const (
+	chatListWidth = 34
+	chatsDebounce = 200 * time.Millisecond
+)
+
+type chatsReloadMsg struct{}
+
+// chatsChanged reloads the chat list once per chatsDebounce, however many messages stream in.
+func (m *model) chatsChanged() tea.Cmd {
+	return m.chatsReload.Schedule(chatsDebounce, chatsReloadMsg{})
+}
 
 func (m *model) loadChats() tea.Cmd {
 	return m.call(func(ctx context.Context, c *Client) tea.Msg {
@@ -82,28 +95,20 @@ func (m *model) onMessage(msg store.Message) tea.Cmd {
 		}
 	}
 	if m.tab == tabChats {
-		return m.loadChats()
+		return m.chatsChanged()
 	}
 	return nil
 }
 
 func (m *model) chatsKey(k string) tea.Cmd {
-	move := func(d int) tea.Cmd {
-		m.chatSel = clamp(m.chatSel+d, len(m.chats))
+	if sel, ok := termui.ListMove(k, m.chatSel, len(m.chats), m.bodyHeight()/2); ok {
+		m.chatSel = sel
 		if chat := m.selectedChat(); chat != m.msgsChat {
 			return m.loadMessages(chat)
 		}
 		return nil
 	}
 	switch k {
-	case "j", "down":
-		return move(1)
-	case "k", "up":
-		return move(-1)
-	case "g", "home":
-		return move(-len(m.chats))
-	case "G", "end":
-		return move(len(m.chats))
 	case "i", "enter":
 		if m.msgsChat == "" {
 			return nil
@@ -130,10 +135,10 @@ func (m *model) chatName(jid string) string {
 
 func (m *model) viewChats() string {
 	if m.chatsErr != nil {
-		return indent(card("Chats", min(m.width-2, 90), styleErr.Render(m.chatsErr.Error())), " ")
+		return m.errCard("Chats", m.chatsErr, "")
 	}
 	if len(m.chats) == 0 {
-		return indent(card("Chats", min(m.width-2, 70), styleDim.Render("No chats stored on the server yet.")), " ")
+		return indent(card("Chats", m.cardWidth(cardNarrow), styleDim.Render("No chats stored on the server yet.")), " ")
 	}
 	h := m.bodyHeight()
 	listW := chatListWidth
@@ -145,7 +150,7 @@ func (m *model) viewChats() string {
 		if c.Unread > 0 {
 			badge = styleAccent.Render(fmt.Sprintf("%2d ", min(c.Unread, 99)))
 		}
-		name := fit(safe(cmpOr(c.Name, displayJID(c.JID))), listW-11)
+		name := fit(safe(cmp.Or(c.Name, displayJID(c.JID))), listW-11)
 		line := badge + pad(name, listW-11) + " " + styleDim.Render(pad(when(c.LastAt), 6))
 		if i == m.chatSel {
 			line = lipgloss.NewStyle().Background(colSel).Width(listW).Render(styleAccent.Render("▌") + line)
@@ -170,7 +175,7 @@ func (m *model) viewMessages(w, h int) string {
 	chat := m.selectedChat()
 	title := styleBold.Render(m.chatName(chat)) + "  " + styleDim.Render(chat)
 	if m.msgsErr != nil {
-		return title + "\n\n" + styleErr.Render(m.msgsErr.Error())
+		return title + "\n\n" + errText(m.msgsErr)
 	}
 	if m.msgsChat != chat {
 		return title + "\n\n" + styleDim.Render("loading…")
@@ -193,9 +198,9 @@ func (m *model) viewMessages(w, h int) string {
 func (m *model) messageLines(msg store.Message, w int) []string {
 	who := styleAccent.Render("me")
 	if !msg.FromMe {
-		who = lipgloss.NewStyle().Foreground(colInfo).Render(fit(safe(cmpOr(msg.PushName, displayJID(msg.Sender))), 18))
+		who = lipgloss.NewStyle().Foreground(colInfo).Render(fit(safe(cmp.Or(msg.PushName, displayJID(msg.Sender))), 18))
 	}
-	prefix := styleDim.Render(msg.Timestamp.Format("15:04")) + " " + who + " "
+	prefix := styleDim.Render(stamp(msg.Timestamp, "15:04")) + " " + who + " "
 	body := messageText(msg)
 	indentW := ansi.StringWidth(prefix)
 	wrapped := strings.Split(lipgloss.NewStyle().Width(max(w-indentW, 10)).Render(body), "\n")
@@ -228,7 +233,7 @@ func messageText(msg store.Message) string {
 func (m *model) viewSearch(w, h int) string {
 	title := styleBold.Render("Search: "+safe(m.search)) + "  " + styleDim.Render(plural(len(m.searchHits), "match")+" · esc clears")
 	if m.msgsErr != nil {
-		return title + "\n\n" + styleErr.Render(m.msgsErr.Error())
+		return title + "\n\n" + errText(m.msgsErr)
 	}
 	lines := []string{title, styleFaint.Render(strings.Repeat("─", w))}
 	for _, msg := range m.searchHits {
@@ -241,18 +246,6 @@ func (m *model) viewSearch(w, h int) string {
 	return strings.Join(lines, "\n")
 }
 
-// safe drops control characters and bidi overrides from text other people wrote, so it can't move
-// the cursor, recolor the screen or reorder what's around it.
-func safe(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case r == '\n' || r == '\t':
-			return ' '
-		case r < 0x20, r == 0x7f, r >= 0x80 && r < 0xa0:
-			return -1
-		case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069, r == 0x200e, r == 0x200f:
-			return -1
-		}
-		return r
-	}, s)
-}
+// safe sanitizes text that other people control (names, messages, file names, token names, server
+// and webhook errors) to one clean line before it's rendered; see termui.SafeLine.
+func safe(s string) string { return termui.SafeLine(s) }

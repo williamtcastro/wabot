@@ -22,17 +22,18 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 
 | Path | Package | Responsibility |
 |---|---|---|
-| `main.go` | `main` | subcommands (`login`, `serve`, `tui`, `send`, `token`, `mcp`, `admin`, `version`, `logout`), flags, env vars, `usage`, the default DB path (`defaultDB`, `legacyDBNotice`), `newLogger` (slog setup), wiring of limiters/webhook and then `Bot.InitSettings` (stored runtime settings win over flags), `adminCommand` (`-profile`, flags → env → `./.env` → `admin.env`, never opens the DB), the startup guard `guardPublicAddr` (owner secret ≥ 16 chars; non-loopback needs an owner secret or any token ever created; `isLoopbackAddr`), `tokenCommand`, `mcpCommand` (stdio MCP), resolving a `-webhook-filter` chat number after login (`resolveWebhookChat`, via `SetChatIf` so a runtime filter change wins) |
+| `main.go` | `main` | subcommands (`login`, `serve`, `tui`, `send`, `token`, `mcp`, `admin`, `version`, `logout`), flags, env vars, `usage`, the default DB path (`defaultDB`, `legacyDBNotice`), `newLogger` (slog setup), `run` (shared setup: logger, `bot.New` with `defer b.Close()`, `StartWebhook`, then `Bot.InitSettings`: stored runtime settings win over flags) and one function per command (`serveCommand`, `tuiCommand`, `sendCommand`, `logoutCommand`, …), `serve` (graceful: `Shutdown` with a 5 s limit, `RegisterOnShutdown(StopStreams)` so open streams end at once), `adminCommand` (`-profile`, flags → env → `./.env` → `admin.env`, never opens the DB), the startup guard `guardPublicAddr` (owner secret ≥ 16 chars; non-loopback needs an owner secret or any token ever created; `isLoopbackAddr`), `tokenCommand`, `mcpCommand` (stdio MCP), starting `Bot.RunOutbox` (through `b.Go`) in `serve` and `tui` |
 | `docs/docs.go` | `docs` | `//go:embed openapi.yaml` as `docs.OpenAPI` (embed can't reach a parent directory, so it lives next to the file) |
-| `internal/store/store.go` | `store` | `Store` (wraps `*sql.DB`, owns the LID relink cache key), `Open` (first `renameLegacyTables`, then each table's migration), `wame_messages` table and its migration from the old rowid schema, `Save`, `Import` (history sync, incl. edits), `Query`/`Messages`/`Get`/`GetBySeq`/`LastSeq`, `MarkEdited`/`MarkDeleted`, `RelinkLIDs`, `Chats` |
+| `internal/store/store.go` | `store` | `Store` (wraps `*sql.DB`, owns the LID relink cache key), `Open` (first `renameLegacyTables`, then each table's migration), `wame_messages` table and its migration from the old rowid schema, `Save`, `Import` (history sync, incl. edits), `Query`/`Messages`/`Get`/`GetBySeq`/`LastSeq`, `MarkEdited` (never on a deleted message)/`MarkDeleted`, `relinkLIDs` (one transaction, one at a time; `relinkLater` marks it due), `Chats` (names resolved after the cursor closes, since that may hit the network). Read methods return their errors; `placeholders` builds IN lists |
 | `internal/store/message.go` | `store` | `Message` (raw fields exported but `json:"-"`), `Media`, `MessageUpdate`, `Chat`, `ChatsChanged`, `ErrNotFound`, `Message.MediaFileName` |
 | `internal/store/filter.go` | `store` | `Filter`, `ParseFilter`, `Match` and its SQL twin `where` (shared by `/messages`, `/messages/wait`, `/events`, webhook), including the `q` text search (`textMatches` in Go mirrors the FTS query) |
 | `internal/store/state.go` | `store` | `migrateState`: `wame_chat_state` (read positions, `MarkReadUpTo`/`MarkChatRead`/`ReadSeq`), `wame_groups` (`SaveGroups`/`Groups`), the `wame_messages_fts` index and its triggers, `ftsQuery`; the `ChatRead` event |
 | `internal/store/audit.go` | `store` | `wame_audit` table, `AuditEntry`, `Store.Audit`, `Store.AuditLog` |
 | `internal/store/settings.go` | `store` | `wame_settings` (runtime overrides: key, value, updated_by, updated_at), `Settings`, `SetSettings` (nil deletes) |
-| `internal/store/tokens.go` | `store` | `wame_tokens` table, `Token`, `InsertToken` (`ErrTokenName` / `ErrTokenID`), `TokenByID`, `Tokens`, `RevokeToken` (cascades to tokens it created), `TouchToken`, `HasTokens` (any row ever) |
+| `internal/store/tokens.go` | `store` | `wame_tokens` table, `Token`, `Token.Usable` (the one revoked/expired check, used by auth, open streams and the outbox), `InsertToken` (`ErrTokenName` / `ErrTokenID`), `TokenByID`, `Tokens`, `RevokeToken` (cascades to tokens it created), `TouchToken`, `HasTokens` (any row ever) |
+| `internal/store/outbox.go` | `store` | `wame_outbox` (the send queue): `OutboxItem`, states, `OutboxFilter`, `OutboxCounts` (`Of`), `Enqueue` (`INSERT … ON CONFLICT DO NOTHING RETURNING`, per-actor keys), `ListOutbox`, `CountOutbox`, `DueOutbox`, `ClaimOutbox` (queued → sending, fixes the message id), `FinishOutbox` (`OutboxResult`; only on open items, so a cancel is never overwritten), `CancelOutbox` (one `UPDATE … RETURNING`), `RequeueSending`, `PruneOutbox` |
 | `internal/auth/auth.go` | `auth` | `Scope` (`read`/`send`/`admin`), `Principal` (`Has`, `Restricted`), `Owner()`, `Issue` (token format, reserved names, `DefaultRate`, child expiry), `Authenticator` (`Required` fails closed, `Authenticate`), `CheckOwnerSecret` (`MinOwnerSecret` = 16) |
-| `internal/bot/bot.go` | `bot` | `Bot` type, `New`, `Start`, `PairPhone`, `Status`, pub/sub (`Subscribe`, `publish`), `InputError`/`BadInput`, `SleepUntil`, DB file permissions |
+| `internal/bot/bot.go` | `bot` | `Bot` type, `New`, `Start`, `PairPhone`, `Status`, pub/sub (`Subscribe`, `publish`), `Go` (every background goroutine runs through it) and `Close` (cancel, disconnect, wait, close the DB), `InputError`/`BadInput`, `SleepUntil`, DB file permissions |
 | `internal/bot/events.go` | `bot` | whatsmeow event handler, incoming edits/deletes (`handleProtocol`), history import, auto-replies |
 | `internal/bot/message.go` | `bot` | `classify`, `toMessage`, `PhoneJID`, `save` (store + publish) |
 | `internal/bot/send.go` | `bot` | `SendText`, `SendFile`, replies (`prepare`, `quote`), `deliver`, `sendControl`, throttling |
@@ -42,23 +43,26 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `internal/bot/presence.go` | `bot` | presence (`-online`) and typing indicators |
 | `internal/bot/audit.go` | `bot` | `Bot.Audit`, `Bot.audited` |
 | `internal/bot/allow.go` | `bot` | chat allowlists for restricted tokens: `LocalChat` (no network), `ChatAllowed`, `ExpandAllowlist` (resolves the list's own phone entries, cached 10 min), `CanonicalChat` (unrestricted callers) |
-| `internal/bot/limit.go` | `bot` | `Limiter`: per-minute and per-chat spacing, `RateLimitError` (429), `Set` (limits change at runtime; every read is under the lock), `Stats`, `LookupsPerMinute`. Three instances: `Bot.Limiter` (sends), `Bot.Lookups` (number checks, presence; 3 × rate), `autoLimit` (auto-replies, drop instead of queue) |
-| `internal/bot/webhook.go` | `bot` | webhook queue and workers, retries with backoff, HMAC signing (`Sign`), `WebhookStats` (in memory), `SetFilter`/`SetChatIf`, `TestWebhook`, `ReplayWebhook` (only ids in the recent failures) |
+| `internal/bot/limit.go` | `bot` | `Limiter`: per-minute and per-chat spacing (`plan` computes, `commit` books), `ReserveN`, `Peek` and `TryReserve` (the outbox: never waits, never counts as a 429), `RateLimitError` (429), `Set` (limits change at runtime; every read is under the lock), `Stats`, `LookupsPerMinute`, `ThrottleToken` / `tokenLimiter` (per-token rate). Three instances: `Bot.Limiter` (sends), `Bot.Lookups` (number checks, presence; 3 × rate), `autoLimit` (auto-replies, drop instead of queue) |
+| `internal/bot/webhook.go` | `bot` | webhook queue and workers, retries with backoff, HMAC signing (`Sign`), `WebhookStats` (in memory), `Retry-After` on 429/503 (capped at 5 min), `StartWebhook`, `setWebhookFilter` (only when the raw filter changes; a `chat=` number is resolved in the background by `resolveWebhookChat`, however the filter was set), a short drain on `Close`, `TestWebhook`, `ReplayWebhook` (only ids in the recent failures) |
 | `internal/bot/settings.go` | `bot` | runtime settings: `Settings`, `SettingKeys`, `InitSettings` (flags + stored overrides), `UpdateSettings` (validate all, store, apply, audit once), `SettingsView`, `ParseWebhookFilter`, the auto-reply switch (`SetAutoReply`/`AutoReplyOn`, atomic) |
+| `internal/bot/outbox.go` | `bot` | the send queue: `Enqueue` (validation, per-actor cap, `ErrKeyReused` → 409), `CancelQueued`, `QueueStats`, `RunOutbox` (one step per wake or timer: resolve the recipient, take a slot under both the token's and the global limit, wait for it, `sendQueued` through `SendText` with the item's fixed message id), retries with backoff, the whole-queue cooldown after repeated errors, `QueueEvent` (published and sent to the webhook, never with text). See docs/QUEUE.md |
 | `internal/bot/usage.go` | `bot` | per-caller usage in hourly buckets for 24 h (`RecordRequest` from the API/MCP auth, sends from `audited`), `Usage` |
-| `internal/api/api.go` | `api` | `NewHandler` (the route table: every route wrapped in `need(scope, …)`), handlers, long-poll, SSE (with token re-checks), `/media`, `/mcp` mount, the `/docs` page, and the admin-only `/stats` (`Stats`, `CallerStats`), `/settings` (GET/PATCH; values may be strings, numbers, booleans or null) and `/webhook/test`, `/webhook/replay` (`webhookResult`: 200 with the attempt's outcome even when the receiver failed) |
-| `internal/api/authz.go` | `api` | `withAuth` (header/`?token=` rules, failed-login throttle, `seen` callback → `Bot.RecordRequest`), `need`, `unrestricted`, `visibleStatus`, `authorizeChat`, `restrictFilter`, `sendGuard` (allowlist + per-token rate), stream cap (per token ID) and open-stream counts (per name, owner included) and `stillValid`, `/tokens` handlers, `NormalizeChats` |
+| `internal/api/api.go` | `api` | `NewHandler` (the route table: every route wrapped in `need(scope, …)`), handlers, long-poll, SSE (with token re-checks), `/media`, `/mcp` mount, the `/docs` page, and the admin-only `/stats` (`Stats`, `CallerStats`), `/settings` (GET/PATCH; values may be strings, numbers, booleans or null) and `/webhook/test`, `/webhook/replay` (`webhookResult`: 200 with the attempt's outcome even when the receiver failed); SSE `queue` events (opt-in) |
+| `internal/api/queue.go` | `api` | `/queue` routes: `enqueue` (16 MB body, per-message allowlist check), list/get/cancel; `queueFilter` limits callers without admin to their own items |
+| `internal/api/authz.go` | `api` | `withAuth` (header/`?token=` rules, failed-login throttle, `seen` callback → `Bot.RecordRequest`), `need`, `unrestricted`, `visibleStatus`, `authorizeChat`, `restrictFilter`, `allowedChat` (the non-writing check), `throttle` (the per-token rate; sends call it inside the idempotent closure, so a retried key doesn't spend a slot), the failed-login limiter (never adds an entry on lookup, prunes stale IPs instead of resetting), stream cap (per token ID) and open-stream counts (per name, owner included) and `stillValid`, `/tokens` handlers, `NormalizeChats` |
 | `internal/api/mcp.go` | `api` | `/mcp`: streamable HTTP MCP handler; bearer verification puts the `Principal` in the SDK's `TokenInfo`; token-less mode via `localOnly` |
 | `internal/api/middleware.go` | `api` | `localOnly` (token-less mode: loopback RemoteAddr and Host, no cross-site), request logging |
 | `internal/mcpserver/server.go` | `mcpserver` | MCP tools (`status`, `list_chats`, `read_messages`, `search_messages`, `find_contact`, `send_message`, `react`, `mark_read`), server instructions, `require`/`chat` checks, `clean()` of untrusted text |
 | `internal/api/idempotency.go` | `api` | idempotency keys (bound to a request fingerprint; reuse for a different request → 409 `errConflict`) |
-| `internal/api/respond.go` | `api` | `readJSON`, `writeJSON`, error mapping (`writeError`) |
+| `internal/api/respond.go` | `api` | `readJSON` / `readJSONMax` (`http.MaxBytesReader`, 413 when too large), `writeJSON`, error mapping (`writeError`) |
 | `internal/tui/model.go` | `tui` | `Run`, the Bubble Tea model, `Update`, loading chats and messages |
 | `internal/tui/keys.go` | `tui` | key routing (`key`), focus, per-panel keys |
 | `internal/tui/commands.go` | `tui` | `tuiHelp`, `tuiCommands`, slash commands, sending, saving media |
 | `internal/tui/complete.go` | `tui` | autocomplete (`suggest`, `pathSuggestions`, `chatTarget`) |
 | `internal/tui/view.go` | `tui` | rendering: panes, sidebar, context bar, footer, styles |
-| `internal/tui/format.go` | `tui` | text helpers and `safe()` sanitizing of untrusted text |
+| `internal/tui/format.go` | `tui` | text helpers; `safe()` / `safeLine()` wrap `termui` |
+| `internal/termui/termui.go` | `termui` | shared by both terminal apps: `Safe` / `SafeLine` (strip ANSI, control and bidi characters from text strangers wrote), `UserOf`, the colour palette, `ListMove` (j/k, paging, g/G for any list), `Debounce` (coalesce reloads after bursts of events), `CopyToClipboard` |
 | `internal/admin/client.go` | `admin` | `wame admin`: HTTP client for a remote server (`NewClient` refuses plain http beyond loopback), typed on the server's own types (`bot.Status`, `bot.SettingView`, `bot.WebhookResult`, `store.*`, `api.Stats`), `APIError`, and `Events`: the SSE reader (separate client without a timeout, 60 s idle cut-off; the server pings every 25 s) |
 | `internal/admin/config.go` | `admin` | `ReadEnvFile` (`WAME_SERVER`, `WAME_TOKEN`, `WAME_INSECURE`), `Resolve` (precedence; a file's server and insecure flag need that file's token), `Profiles` (`~/.config/wame/servers/*.env`, both keys required) |
 | `internal/admin/model.go` | `admin` | the panel's Bubble Tea model: `Options`, tabs, modes, polling, `call` (every server answer is tagged with the client generation in a `genMsg`, so answers from a server the user switched away from are dropped), `applyStatus` (bell on a healthy → unhealthy change), server switching |
@@ -66,6 +70,7 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `internal/admin/chats.go` | `admin` | Chats tab: list, messages, search, sending, and `safe()` for text other people wrote |
 | `internal/admin/tokens.go` | `admin` | Tokens tab keys, the create form, rotation (`nextName`, `rotationRequest`, create-then-revoke) and `unused` |
 | `internal/admin/settings.go` | `admin` | Settings tab (`GET`/`PATCH /settings`), the Health tab's webhook keys (test, replay), and per-token usage from `/stats` callers |
+| `internal/admin/queue.go` | `admin` | Queue tab (`GET`/`DELETE /queue`, pause via the `queue_paused` setting), queue events debounced to one reload per second |
 | `internal/admin/health.go` | `admin` | Health tab (`GET /stats`), meters, and `grid`: panels laid out in equal-height rows |
 | `internal/admin/view.go` | `admin` | rendering: header (degrades by width), dialogs, the Status grid, tokens and audit tables |
 | `Dockerfile`, `compose.yaml` | | static build into distroless `nonroot`; `/data` volume with `WAME_DB=/data/wame.db`, `WAME_ADDR=0.0.0.0:8080` (so a token is required). CI builds it and smoke-tests `version` and the no-token refusal. Docs: `docs/DOCKER.md` |
@@ -81,7 +86,8 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 **Dependency direction:** `main` → `admin`, `api`, `mcpserver`, `auth`, `tui`, `bot`, `store`; `admin` →
 `api`, `bot`, `store` (for their types only: it never opens a database or a WhatsApp connection);
 `api` → `mcpserver`, `auth`, `bot`, `store`, `docs`; `mcpserver` → `auth`, `bot`, `store`; `tui` → `bot`,
-`store`; `auth` → `store`; `bot` → `store`; `store` → nothing internal. Never import upwards (Go
+`store`, `termui`; `admin` and `tui` → `termui` (sanitizing, colours, list keys, debounce, clipboard;
+it imports nothing internal); `auth` → `store`; `bot` → `store`; `store` → nothing internal. Never import upwards (Go
 rejects cycles anyway). `store` knows nothing about whatsmeow's client: it deals in plain strings.
 
 **Where new code goes:**
@@ -120,17 +126,20 @@ driven by feeding it `tea.WindowSizeMsg` / `tea.KeyMsg` and running the returned
 synchronously. Never point a test at a real `wame.db` or connect to WhatsApp. Use only the fake
 numbers and names below.
 
-- `internal/store`: the `wabot_*` → `wame_*` rename (`rename_test.go` builds a real pre-rename
+- `internal/store`: the outbox lifecycle and `BenchmarkEnqueue` / `BenchmarkDueAndClaim` (the numbers
+  in docs/QUEUE.md), the `wabot_*` → `wame_*` rename (`rename_test.go` builds a real pre-rename
   database from the current schema and checks rows, read positions, search, integrity, and that two
   copies are refused), v1 → current migration keeps rowids as `seq` and is idempotent, `Filter` SQL vs
   `Match`, `ChatOnly`, edit/delete/import, chats and audit.
-- `internal/bot`: `Limiter` (`ReserveN` is all-or-nothing, `Stats`), `ParseRecipient`, `handleProtocol`
+- `internal/bot`: `Limiter` (`ReserveN` is all-or-nothing, `Stats`), the outbox (`outbox_test.go`: validation and
+  idempotency, requeue while offline with the same message id, token rate and revocation, a late
+  result never overwriting a cancel, backoff, pause), `ParseRecipient`, `handleProtocol`
   ignoring forged edits and non-admin revokes, `audited`, `cappedBody` / `limitedTransport`, media
   checks, webhook signing, filtering and stats (never the URL or message text).
 - `internal/api`: token auth, token-less `localOnly`, idempotency (replay, 409, panic), error
   mapping, `/messages` cursors, `/events` `Last-Event-ID` replay, scoped tokens and allowlists
   (`TestScopedTokens`, `TestPerTokenRate`, `TestTokenAdminEndpointsAndRevocation`), MCP over HTTP with
-  token scopes, `/stats` (admin only, callers), `/settings` and the webhook routes, and one regression
+  token scopes, `/stats` (admin only, callers), `/settings` and the webhook routes, `/queue` (scopes, allowlist, own items only, 409, 413), and one regression
   test per security finding in `security_test.go` (`TestF1…`–`TestF10…`).
 - `internal/auth`: token issuing/parsing, `TestF2RequiredFailsClosed`.
 - `internal/mcpserver`: read-only and restricted callers, cleaning of untrusted text.
@@ -140,7 +149,7 @@ numbers and names below.
   the webhook filter setting vs a late number resolution, webhook test and replay, usage counting.
 - `internal/admin`: the client against the real `api.NewHandler` (tokens, audit paging, 401/403
   messages), the http guard, env files and profiles, and the panel: create → copy → revoke →
-  filter, rotation, the Chats tab (sanitizing), the Settings tab, webhook test and replay, usage columns, the live stream, the bell, Health, server switching
+  filter, rotation, the Chats tab (sanitizing), the Settings tab, the Queue tab (no text shown, cancel, batch cancel, pause, filter), webhook test and replay, usage columns, the live stream, the bell, Health, server switching
   (stale answers dropped) and that Status cards line up at 120 and 180 columns. Tests that build a
   model use `newTestModel`, which stops the live stream on cleanup (otherwise the test server
   can't close).
@@ -181,22 +190,30 @@ real API with fake data (run with `-v` to see the output).
 - Errors from the API are always `{"error": "..."}` via `writeError` (401/403 come from the auth
   middleware), which maps errors to codes:
   `bot.InputError` (build it with `bot.BadInput(...)`) → 400, `store.ErrNotFound` → 404, `errConflict` → 409,
-  `bot.RateLimitError` → 429 with `Retry-After`, context cancel/deadline → 504, anything else → 502 (WhatsApp failure). Return
+  `bot.RateLimitError` → 429 with `Retry-After`, context cancel/deadline → 504, a database error
+  (`*sqlite.Error`) or `errInternal` (a recovered panic) → 500 with only "internal error" (the cause is
+  logged, never sent), anything else → 502 (WhatsApp failure). Write error bodies with `writeErr`,
+  and read JSON with `readJSON` / `readJSONMax` (one value only; too large → 413). Return
   `BadInput` from `Bot` methods for caller mistakes so the API, TUI and CLI all report them the same way.
 - **Everything that sends a message goes through `Bot.deliver`** (or `Bot.sendControl` for edits and
   revokes, which don't create a stored message), so the rate limiter applies. Never call
   `b.Client.SendMessage` directly from new code paths. The limits exist because bursts get numbers banned.
+  The outbox is the one caller that books its slot itself (`outboxSlot`) and passes `queued` so
+  `deliver` doesn't book a second one. Bulk sends belong in the outbox, not in loops over `/send`.
 - **Number lookups and presence updates go through `Bot.lookup`** (`Resolve` on a cache miss, `/check`,
   `SetTyping`). Mass `IsOnWhatsApp` calls are another ban trigger.
-- Auto-replies run in a goroutine (`go b.autoReply`) and are budgeted by `autoLimit`; never block the
-  whatsmeow event handler.
+- **Background work goes through `b.Go`**, never a bare `go`, so `Close` can stop and wait for it.
+  Never block the whatsmeow event handler: network calls (group refreshes, admin checks for a revoke)
+  run in `b.Go`. Auto-replies are picked and budgeted (`autoLimit`) synchronously; only the send runs
+  in the background.
 - Presence: default is "unavailable" so the owner's phone keeps notifications. Use `chatPresence` for
-  typing indicators; it goes available and back when `-online` is off.
+  typing indicators; it goes available and back when `-online` is off. Presence is sent through
+  `sendPresence` (serialized, latest state wins), so quick typing/paused pairs can't arrive out of order.
 - **Wrap every control action in `Bot.audited(actor, action, target, detail, fn)`.** It runs `fn` and calls
   `Bot.Audit` exactly once with the outcome, so input-validation failures (empty text, not your message,
   edit window) are recorded too. Put the validation inside `fn`, not before it. Call `Bot.Audit` directly
   only for actions that don't return a `Message` (pair, logout, read, token_create, token_revoke,
-  settings, webhook_test, webhook_replay). `actor`
+  settings, webhook_test, webhook_replay, queue, queue_cancel, qr, check). `actor`
   is the caller's token name for API and MCP calls (`principal(r).Name`; `api` for the owner secret and
   token-less mode, `mcp` for stdio without a token), or `tui`, `cli`, `autoreply`, `whatsapp`. Those
   fixed names (plus `owner`, `local`) are reserved so no token can impersonate them. Pass the actor into
@@ -226,12 +243,12 @@ real API with fake data (run with `-v` to see the output).
 - Schema changes to `wame_messages`: new columns only need to be added to `messagesTable` (`internal/store/store.go`)
   (`addMissingColumns` adds them to existing databases on startup, so give them a DEFAULT). Anything else
   needs an upgrade step in `migrate` that keeps the `seq` numbers. Other tables go through
-  `migrateState` (`internal/store/state.go`), `migrateAudit`, `migrateTokens` or `migrateSettings`: create them idempotently and handle the
+  `migrateState` (`internal/store/state.go`), `migrateAudit`, `migrateTokens`, `migrateSettings` or `migrateOutbox`: create them idempotently and handle the
   first-run backfill there (as `wame_chat_state` does: existing history counts as read). Upgrades must
   run automatically on startup; there is no separate migrate command.
 - Tables: `wame_messages`, `wame_messages_fts` (FTS5 over `text`, external content, kept in sync by
   the `wame_messages_fts_insert/_delete/_update` triggers, so write `text` only through normal
-  UPDATE/INSERT), `wame_chat_state`, `wame_groups`, `wame_audit`, `wame_tokens`, `wame_settings`. Unread counts and search must
+  UPDATE/INSERT), `wame_chat_state`, `wame_groups`, `wame_audit`, `wame_tokens`, `wame_settings`, `wame_outbox`. Unread counts and search must
   agree with `Filter.Match` / `textMatches`, which the live paths use.
 - The TUI is designed for desktop terminals (~100+ columns). Don't spend effort on narrow layouts.
 - **Don't block in `Update`.** Network and DB calls go in a `tea.Cmd` that returns a message. Capture the
@@ -256,7 +273,7 @@ real API with fake data (run with `-v` to see the output).
 
 - **LIDs.** WhatsApp may identify a user by a hidden `…@lid` ID instead of a phone JID, especially for
   messages sent from the user's own phone. `toMessage` prefers `SenderAlt` / `RecipientAlt`, `Bot.PhoneJID`
-  maps through whatsmeow's `Client.Store.LIDs`, and `store.Store.RelinkLIDs` fixes stored rows once the mapping is learned. Any new code
+  maps through whatsmeow's `Client.Store.LIDs`, and `store.Store.relinkLIDs` fixes stored rows once the mapping is learned. Any new code
   that stores or compares chat JIDs must go through the same normalization, or chats split in two.
 - **Phone numbers aren't canonical.** Always send via `Bot.Resolve`, which asks WhatsApp (`IsOnWhatsApp`)
   for the real JID. For example, Brazilian numbers may be registered with or without the 9th digit.
@@ -280,7 +297,7 @@ real API with fake data (run with `-v` to see the output).
 - The bot can message real people. Don't send test messages to anyone except the account owner's own
   number, and only when asked.
 - **Every new route is wrapped in `need(scope, …)`** in `NewHandler`, and must handle tokens limited to
-  chats: check targets with `authorizeChat` / `sendGuard` (sends also get the per-token rate), limit
+  chats: check targets with `authorizeChat` (sends also call `throttle` for the per-token rate), limit
   queries with `restrictFilter`, or wrap the route in `unrestricted` if it can reveal data beyond the
   allowlist. Add it to the route table in `docs/API.md` and to `docs/openapi.yaml`.
 - **Never resolve a restricted caller's input on WhatsApp.** Use `Bot.LocalChat` + `Bot.ChatAllowed`
@@ -314,6 +331,10 @@ real API with fake data (run with `-v` to see the output).
 - In-memory admin data (`/stats`: webhook failures, limiter counts, per-caller usage with last IP)
   never holds the webhook URL, its secret or message text, and resets on restart. `/webhook/replay`
   only accepts delivery ids from the recent failures, so it can't push messages the filter excluded.
+- The outbox stores message text until the item is pruned (7 days after it finishes). Queue events,
+  the webhook `queue` delivery, the enqueue response and the admin panel never carry it; only
+  `GET /queue` and `GET /queue/{id}` do, and only to the token that queued it (or admin). Items from a
+  token revoked or expired before they go out fail instead of being sent.
 - `wame admin` sends the token on every request: keep `NewClient`'s refusal of plain http beyond
   loopback, and `Resolve`'s rule that a server (or insecure flag) read from a file is only used with
   a token from that same file, so a stray `.env` can't redirect a token from elsewhere.

@@ -2,12 +2,11 @@ package tui
 
 import (
 	"errors"
-	"os"
-	"os/exec"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/muesli/termenv"
+
+	"github.com/williamtcastro/wame/internal/termui"
 )
 
 // copyTarget is what Ctrl+Y copies for a chat: "+<number>" for people, the JID for groups.
@@ -37,18 +36,5 @@ func (m *model) copyNumber() tea.Cmd {
 	}
 }
 
-// CopyToClipboard uses the system clipboard tool, or the terminal's OSC 52 clipboard (works over SSH).
-func CopyToClipboard(text string) error {
-	for _, tool := range [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}, {"xsel", "--clipboard", "--input"}} {
-		if _, err := exec.LookPath(tool[0]); err != nil {
-			continue
-		}
-		cmd := exec.Command(tool[0], tool[1:]...)
-		cmd.Stdin = strings.NewReader(text)
-		if err := cmd.Run(); err == nil {
-			return nil
-		}
-	}
-	termenv.NewOutput(os.Stdout).Copy(text)
-	return nil
-}
+// CopyToClipboard copies text to the system or terminal clipboard (see termui.CopyToClipboard).
+func CopyToClipboard(text string) error { return termui.CopyToClipboard(text) }

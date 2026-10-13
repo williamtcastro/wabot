@@ -39,6 +39,7 @@ tags:
   - name: Messaging
   - name: Reading
   - name: Directory
+  - name: Queue
   - name: Admin
   - name: Tokens
   - name: Docs
@@ -389,7 +390,7 @@ paths:
         - $ref: "#/components/parameters/Q"
         - name: events
           in: query
-          description: "Comma-separated subset of message,update,status. Default: all."
+          description: "Comma-separated subset of message,update,status,queue. Default: message,update,status."
           schema: { type: string, example: "message,update" }
         - name: Last-Event-ID
           in: header
@@ -547,6 +548,117 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /queue:
+    post:
+      tags: [Queue]
+      summary: Queue texts for paced sending
+      description: |
+        Stores up to 1000 texts and answers at once; a worker sends them within the rate limits, retrying
+        and backing off on errors, and keeps going after a restart. Top-level text and send_at apply to
+        messages that leave theirs out. Tokens limited to chats can only queue to those. See docs/QUEUE.md.
+        Requires send.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messages]
+              properties:
+                batch: { type: string, pattern: "^[A-Za-z0-9._-]{1,64}$", description: "Groups the items; generated when left out" }
+                text: { type: string, description: "Default text" }
+                send_at: { type: string, format: date-time, description: "Default earliest send time, up to 30 days ahead" }
+                idempotency_key: { type: string }
+                messages:
+                  type: array
+                  maxItems: 1000
+                  items:
+                    type: object
+                    required: [to]
+                    properties:
+                      to: { type: string, example: "5511999999999" }
+                      text: { type: string }
+                      reply_to: { type: string }
+                      send_at: { type: string, format: date-time }
+            example: { batch: promo-october, text: "Hi! Our store opens at 9 tomorrow.", messages: [{ to: "5511999999999" }, { to: "5511988887777", text: "Hi John!" }] }
+      responses:
+        "202":
+          description: Queued (or, for a repeated idempotency key, the items queued the first time)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  batch: { type: string }
+                  queued: { type: integer }
+                  items: { type: array, items: { $ref: "#/components/schemas/OutboxItem" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    get:
+      tags: [Queue]
+      summary: Queued, sent and failed items
+      description: Newest first, with counts by state. Without admin, only the caller's own items. Requires send.
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [queued, sending, sent, failed, canceled] } }
+        - { name: batch, in: query, schema: { type: string } }
+        - { name: actor, in: query, description: "Admin only: one token's items", schema: { type: string } }
+        - { name: before, in: query, description: "Only ids lower than this, to page back", schema: { type: integer, format: int64 } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
+      responses:
+        "200":
+          description: Items and counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/OutboxItem" } }
+                  counts: { $ref: "#/components/schemas/QueueCounts" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      tags: [Queue]
+      summary: Cancel a batch
+      description: Cancels every still-queued item of the batch (the caller's own unless admin). Requires send.
+      parameters:
+        - { name: batch, in: query, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Canceled, content: { application/json: { schema: { type: object, properties: { canceled: { type: integer } } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /queue/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    get:
+      tags: [Queue]
+      summary: One queued item, with its text
+      description: Requires send; without admin, only the caller's own items.
+      responses:
+        "200":
+          description: The item
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OutboxItem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Queue]
+      summary: Cancel a queued item
+      description: Only items still queued; 409 once one is sending or finished. Requires send.
+      responses:
+        "200": { description: Canceled, content: { application/json: { schema: { type: object, properties: { canceled: { type: integer } } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "Already sending or finished", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
   /stats:
     get:
       tags: [Admin]
@@ -593,6 +705,8 @@ paths:
                 max_wait: { type: string, nullable: true, description: "How long a send may queue before a 429, up to 10m" }
                 auto_reply: { nullable: true, description: "true or false" }
                 webhook_filter: { type: string, nullable: true, description: "Same syntax as -webhook-filter; only has an effect with -webhook" }
+                queue_paused: { nullable: true, description: "true holds the send queue" }
+                queue_jitter: { type: string, nullable: true, description: "Random extra wait between queued sends, up to 10m" }
             example: { rate: 10, auto_reply: false, chat_gap: null }
       responses:
         "200":
@@ -992,10 +1106,48 @@ components:
               type: array
               description: Up to 20, newest first
               items: { $ref: "#/components/schemas/WebhookFailure" }
+        queue:
+          allOf:
+            - $ref: "#/components/schemas/QueueCounts"
+            - type: object
+              properties:
+                paused: { type: boolean }
+                running: { type: boolean, description: "A worker runs in this process (serve or tui)" }
+                jitter_ms: { type: integer }
+                cooldown_until: { type: string, format: date-time, description: "Backing off after repeated WhatsApp errors" }
+                last_error: { type: string }
+                last_error_at: { type: string, format: date-time }
         callers:
           type: array
           description: Everyone who called the API or /mcp since startup, by token name; in memory, last 24 hours
           items: { $ref: "#/components/schemas/CallerStats" }
+    OutboxItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        batch: { type: string }
+        actor: { type: string, description: "Token name that queued it" }
+        to: { type: string }
+        text: { type: string, description: "Only in GET /queue and GET /queue/{id}" }
+        reply_to: { type: string }
+        status: { type: string, enum: [queued, sending, sent, failed, canceled] }
+        attempts: { type: integer }
+        due: { type: string, format: date-time, description: "Earliest time it may go out" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        chat: { type: string, description: "The chat it went to, once sent" }
+        message_id: { type: string, description: "WhatsApp message id, the same on every attempt" }
+        error: { type: string, description: "Last error" }
+    QueueCounts:
+      type: object
+      properties:
+        queued: { type: integer }
+        sending: { type: integer }
+        sent: { type: integer }
+        failed: { type: integer }
+        canceled: { type: integer }
+        oldest_queued: { type: string, format: date-time }
+        next_due: { type: string, format: date-time }
     CallerStats:
       type: object
       properties:
@@ -1009,7 +1161,7 @@ components:
     SettingView:
       type: object
       properties:
-        key: { type: string, enum: [rate, chat_gap, max_wait, auto_reply, webhook_filter] }
+        key: { type: string, enum: [rate, chat_gap, max_wait, auto_reply, webhook_filter, queue_paused, queue_jitter] }
         value: { type: string, description: "Effective value" }
         default: { type: string, description: "The flag's value, used when not overridden" }
         overridden: { type: boolean }
@@ -1029,7 +1181,7 @@ components:
         id: { type: integer, format: int64 }
         at: { type: string, format: date-time }
         actor: { type: string, description: "Token name for API/MCP calls (api = owner secret or token-less, mcp = stdio without a token), or tui, cli, autoreply, whatsapp", example: "support-bot" }
-        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, token_create, token_revoke, settings, webhook_test, webhook_replay] }
+        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel] }
         target: { type: string, description: "Chat JID, when there is one" }
         detail: { type: string, example: "text, 6 chars" }
         ok: { type: boolean }

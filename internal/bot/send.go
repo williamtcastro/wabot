@@ -19,10 +19,17 @@ import (
 
 type SendOptions struct {
 	ReplyTo string
+
+	queued    int64
+	messageID types.MessageID
 }
 
 func (b *Bot) SendText(ctx context.Context, actor, to, text string, opt SendOptions) (store.Message, error) {
-	return b.audited(actor, "send", to, fmt.Sprintf("text, %d chars", len([]rune(text))), func() (store.Message, error) {
+	detail := fmt.Sprintf("text, %d chars", len([]rune(text)))
+	if opt.queued > 0 {
+		detail += fmt.Sprintf(", queue #%d", opt.queued)
+	}
+	return b.audited(actor, "send", to, detail, func() (store.Message, error) {
 		if strings.TrimSpace(text) == "" {
 			return store.Message{}, BadInput("text is empty")
 		}
@@ -30,11 +37,11 @@ func (b *Bot) SendText(ctx context.Context, actor, to, text string, opt SendOpti
 		if err != nil {
 			return store.Message{}, err
 		}
-		msg := &waE2E.Message{Conversation: proto.String(text)}
+		msg := &waE2E.Message{Conversation: new(text)}
 		if quote != nil {
-			msg = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(text), ContextInfo: quote}}
+			msg = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: new(text), ContextInfo: quote}}
 		}
-		return b.deliver(ctx, jid, msg, store.Message{Type: "text", Text: text, ReplyTo: opt.ReplyTo})
+		return b.deliver(ctx, jid, msg, store.Message{Type: "text", Text: text, ReplyTo: opt.ReplyTo}, opt)
 	})
 }
 
@@ -67,19 +74,19 @@ func (b *Bot) sendFile(ctx context.Context, jid types.JID, quote *waE2E.ContextI
 	msg := &waE2E.Message{}
 	if rec.Type == "image" {
 		msg.ImageMessage = &waE2E.ImageMessage{
-			Caption: proto.String(caption), Mimetype: proto.String(mime), ContextInfo: quote,
-			URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath), MediaKey: up.MediaKey,
-			FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256, FileLength: proto.Uint64(up.FileLength),
+			Caption: new(caption), Mimetype: new(mime), ContextInfo: quote,
+			URL: new(up.URL), DirectPath: new(up.DirectPath), MediaKey: up.MediaKey,
+			FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256, FileLength: new(up.FileLength),
 		}
 	} else {
 		msg.DocumentMessage = &waE2E.DocumentMessage{
-			Caption: proto.String(caption), Mimetype: proto.String(mime), ContextInfo: quote,
-			FileName: proto.String(fileName), Title: proto.String(fileName),
-			URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath), MediaKey: up.MediaKey,
-			FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256, FileLength: proto.Uint64(up.FileLength),
+			Caption: new(caption), Mimetype: new(mime), ContextInfo: quote,
+			FileName: new(fileName), Title: new(fileName),
+			URL: new(up.URL), DirectPath: new(up.DirectPath), MediaKey: up.MediaKey,
+			FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256, FileLength: new(up.FileLength),
 		}
 	}
-	return b.deliver(ctx, jid, msg, rec)
+	return b.deliver(ctx, jid, msg, rec, opt)
 }
 
 // prepare resolves the recipient and, for replies, builds the quote of the original message.
@@ -104,32 +111,35 @@ func (b *Bot) prepare(ctx context.Context, to string, opt SendOptions) (types.JI
 func (b *Bot) quote(orig store.Message) *waE2E.ContextInfo {
 	quoted := &waE2E.Message{}
 	if orig.Edited || len(orig.Raw) == 0 || proto.Unmarshal(orig.Raw, quoted) != nil {
-		quoted = &waE2E.Message{Conversation: proto.String(orig.Text)}
+		quoted = &waE2E.Message{Conversation: new(orig.Text)}
 	}
 	participant := orig.RawSender
 	if participant == "" {
 		participant = b.selfJID()
 	}
 	return &waE2E.ContextInfo{
-		StanzaID:      proto.String(orig.ID),
-		Participant:   proto.String(participant),
+		StanzaID:      new(orig.ID),
+		Participant:   new(participant),
 		QuotedMessage: quoted,
 	}
 }
 
-// deliver applies rate limiting and the optional typing indicator, sends, and stores the result.
-func (b *Bot) deliver(ctx context.Context, jid types.JID, msg *waE2E.Message, rec store.Message) (store.Message, error) {
+// deliver applies rate limiting (unless the outbox already took a slot) and the optional typing
+// indicator, sends, and stores the result.
+func (b *Bot) deliver(ctx context.Context, jid types.JID, msg *waE2E.Message, rec store.Message, opt SendOptions) (store.Message, error) {
 	self := b.selfJID()
 	if self == "" {
 		return store.Message{}, errors.New("not logged in")
 	}
-	if err := b.throttle(ctx, jid); err != nil {
-		return store.Message{}, err
+	if opt.queued == 0 {
+		if err := b.throttle(ctx, jid); err != nil {
+			return store.Message{}, err
+		}
 	}
 	if b.Typing && rec.Type == "text" {
 		b.simulateTyping(ctx, jid, rec.Text)
 	}
-	resp, err := b.Client.SendMessage(ctx, jid, msg)
+	resp, err := b.Client.SendMessage(ctx, jid, msg, whatsmeow.SendRequestExtra{ID: opt.messageID})
 	if err != nil {
 		return store.Message{}, err
 	}
@@ -155,11 +165,7 @@ func (b *Bot) simulateTyping(ctx context.Context, jid types.JID, text string) {
 }
 
 func (b *Bot) throttle(ctx context.Context, jid types.JID) error {
-	slot, err := b.Limiter.Reserve(b.PhoneJID(jid).String())
-	if err != nil {
-		return err
-	}
-	return SleepUntil(ctx, slot)
+	return b.Limiter.Wait(ctx, b.PhoneJID(jid).String(), 1)
 }
 
 // sendControl sends an edit or revoke, which bypass deliver because they don't create a stored message.

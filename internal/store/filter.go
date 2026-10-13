@@ -43,7 +43,7 @@ func ParseFilter(q url.Values, resolve func(string) (string, error)) (Filter, er
 		}
 		f.Chat = jid
 	}
-	for _, t := range strings.Split(q.Get("type"), ",") {
+	for t := range strings.SplitSeq(q.Get("type"), ",") {
 		if t = strings.TrimSpace(t); t == "" {
 			continue
 		}
@@ -106,7 +106,7 @@ func (f Filter) where() (string, []any) {
 		args = append(args, f.Chat, f.Chat)
 	}
 	if len(f.Types) > 0 {
-		conds = append(conds, "type IN (?"+strings.Repeat(",?", len(f.Types)-1)+")")
+		conds = append(conds, "type IN ("+placeholders(len(f.Types))+")")
 		for _, t := range f.Types {
 			args = append(args, t)
 		}
@@ -120,7 +120,7 @@ func (f Filter) where() (string, []any) {
 		args = append(args, *f.IsGroup)
 	}
 	if len(f.Chats) > 0 {
-		conds = append(conds, "chat IN (?"+strings.Repeat(",?", len(f.Chats)-1)+")")
+		conds = append(conds, "chat IN ("+placeholders(len(f.Chats))+")")
 		for _, c := range f.Chats {
 			args = append(args, c)
 		}
@@ -155,3 +155,6 @@ func tokens(s string) []string {
 	}
 	return strings.FieldsFunc(folded, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) })
 }
+
+// placeholders returns "?,?,…" with n marks, for an IN list.
+func placeholders(n int) string { return "?" + strings.Repeat(",?", n-1) }

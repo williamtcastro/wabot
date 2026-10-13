@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -12,14 +13,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/williamtcastro/wame/internal/store"
+	"github.com/williamtcastro/wame/internal/termui"
 )
 
 func (m *model) tokensKey(k string) tea.Cmd {
+	if sel, ok := termui.ListMove(k, m.tokSel, len(m.tokens), m.bodyHeight()/2); ok {
+		m.tokSel = sel
+		return nil
+	}
 	switch k {
-	case "j", "down":
-		m.tokSel = clamp(m.tokSel+1, len(m.tokens))
-	case "k", "up":
-		m.tokSel = clamp(m.tokSel-1, len(m.tokens))
 	case "n":
 		m.startForm()
 	case "x", "d", "R":
@@ -31,6 +33,7 @@ func (m *model) tokensKey(k string) tea.Cmd {
 			m.setNotice(t.Name+" is already revoked", true)
 			return nil
 		}
+		m.confirmTok = t
 		if k == "R" {
 			m.mode = modeConfirmRotate
 		} else {
@@ -162,23 +165,19 @@ func (m *model) formKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-type formError string
-
-func (e formError) Error() string { return string(e) }
-
 func (m *model) formRequest() (TokenRequest, error) {
 	v := func(i int) string { return strings.TrimSpace(m.form[i].Value()) }
 	r := TokenRequest{Name: v(0), Scopes: splitList(v(1)), Chats: splitList(v(2)), ExpiresIn: v(4)}
 	if r.Name == "" {
-		return r, formError("the token needs a name")
+		return r, errors.New("the token needs a name")
 	}
 	if len(r.Scopes) == 0 {
-		return r, formError("pick at least one scope: read, send or admin")
+		return r, errors.New("pick at least one scope: read, send or admin")
 	}
 	if s := v(3); s != "" {
 		n, err := strconv.Atoi(s)
 		if err != nil || n < 0 {
-			return r, formError("rate must be a whole number, 0 or more")
+			return r, errors.New("rate must be a whole number, 0 or more")
 		}
 		r.Rate = &n
 	}

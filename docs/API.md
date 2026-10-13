@@ -24,6 +24,9 @@ Base URL: whatever you passed to `-addr` (default `http://127.0.0.1:8080` for `s
 | POST | `/delete` | delete a message for everyone |
 | POST | `/read` | send read receipts |
 | POST | `/typing` | show "typing…" / "recording…" in a chat |
+| POST | `/queue` | queue up to 1000 texts for paced sending in the background |
+| GET | `/queue`, `/queue/{id}` | queued, sent and failed items with counts |
+| DELETE | `/queue/{id}`, `/queue?batch=` | cancel queued items |
 | GET | `/messages` | stored messages, filtered; newest first or cursor-paged |
 | GET | `/messages/wait` | long-poll until new matching messages arrive |
 | GET | `/events` | live SSE stream with resume |
@@ -34,7 +37,7 @@ Base URL: whatever you passed to `-addr` (default `http://127.0.0.1:8080` for `s
 | POST | `/check` | which numbers have WhatsApp |
 | GET | `/audit` | log of control actions (sends, edits, logins…) |
 | GET | `/stats` | limiter and webhook health, per-token usage |
-| GET, PATCH | `/settings` | read or change rate limits, auto-replies and the webhook filter without a restart |
+| GET, PATCH | `/settings` | read or change rate limits, auto-replies, the webhook filter and the send queue without a restart |
 | POST | `/webhook/test` | send a signed test delivery |
 | POST | `/webhook/replay` | send a recently failed delivery again |
 | GET | `/tokens` | list API tokens |
@@ -137,7 +140,8 @@ A missing scope is 403 `this token lacks the <scope> scope`.
   write in groups.
 - Phone entries also match the JID WhatsApp actually uses for that number (for example with or
   without Brazil's 9th digit). That resolution happens for the allowlist entries only, is cached for
-  10 minutes, and is never driven by the caller's input.
+  10 minutes (30 seconds when a lookup failed because the server was offline or busy, so a token
+  isn't locked out after a restart), and is never driven by the caller's input.
 - What a restricted token sends you (`to`, `chat`, `?chat=`) is **never looked up on WhatsApp**. It's
   parsed locally and compared with the list, so it can't probe numbers or spend the shared lookup
   budget. Anything outside the list gets the same 403: `this token can't access that chat`.
@@ -174,13 +178,15 @@ Non-2xx responses always look like this:
 
 | Code | Meaning |
 |---|---|
-| 400 | bad input: missing fields, invalid JSON, bad recipient, a number that isn't on WhatsApp, unknown or deleted `reply_to`, editing someone else's message or one older than 20 minutes, idempotency key over 200 characters, media over the 100 MB download cap |
+| 400 | bad input: missing fields, invalid JSON (or anything after the JSON value), bad recipient, a number that isn't on WhatsApp, unknown or deleted `reply_to`, editing someone else's message or one older than 20 minutes, idempotency key over 200 characters, media over the 100 MB download cap |
 | 401 | missing, malformed, unknown, revoked or expired token; or `?token=` on a route that doesn't accept it |
 | 403 | the token lacks the scope, or is limited to chats and the request is outside them (or uses `/contacts`, `/groups`, `/check`); a token tried to create an admin token; or token-less mode and the request isn't a local same-origin one |
 | 404 | not found: no QR pending, unknown message `id` in that chat, unknown `seq`, a message without media, or a deleted message's media |
-| 409 | an idempotency key was reused for a different request |
+| 409 | an idempotency key was reused for a different request; canceling a queued message that is already sending or finished |
 | 410 | media expired on WhatsApp's servers (`/media`) |
+| 413 | the body is too large: over 1 MB of JSON (16 MB for `/queue`), or a file over 64 MB |
 | 429 | rate limited (global sends or lookups, or the token's own rate), too many open streams for the token, or too many failed logins from your IP; see `Retry-After` (seconds) |
+| 500 | an internal error (the database, for instance). The message is just `internal error`; the details are in the server log |
 | 502 | WhatsApp rejected or failed the request (also "not logged in") |
 | 504 | the request timed out or was cancelled while waiting |
 
@@ -356,7 +362,8 @@ a different request within 24 hours is a **409**:
 ## `POST /send/file`
 
 Multipart upload. Images (detected from the file content) are sent as photos, everything
-else (including videos and audio) as a document. Max 64 MB.
+else (including videos and audio) as a document. Max 64 MB (413 above that). The recipient and
+the token's chat allowlist are checked before the file is read.
 
 ```sh
 curl -H "Authorization: Bearer $T" -X POST localhost:8080/send/file \
@@ -449,6 +456,28 @@ WhatsApp only relays typing indicators while the account is "available". Unless 
 once every indicator is `paused` or 25 seconds old, so a client that never sends `paused` can't
 leave you online.
 
+## `POST /queue`
+
+Queues texts in the database and answers **202** at once; a worker sends them in the background
+within the rate limits, retrying and backing off on errors, and keeps going after a restart. For
+bulk sends, where `POST /send` would hold the request open for minutes. Requires `send`; a token
+limited to some chats can only queue to those.
+
+```sh
+curl -H "$H" -X POST localhost:8080/queue -H "Idempotency-Key: promo-1" -d '{
+  "batch": "promo-october", "text": "Hi! Our store opens at 9 tomorrow.",
+  "messages": [{"to": "5511999999999"}, {"to": "5511988887777", "text": "Hi John!", "send_at": "2026-10-13T09:00:00-03:00"}]
+}'
+curl -H "$H" "localhost:8080/queue?batch=promo-october&status=failed"
+curl -H "$H" -X DELETE "localhost:8080/queue?batch=promo-october"     # cancel what hasn't gone out
+```
+
+`GET /queue` lists items newest first (`status`, `batch`, `actor`, `before`, `limit` ≤ 500) with
+`counts` by state; `GET /queue/{id}` shows one; `DELETE /queue/{id}` cancels one (409 once it's
+sending or finished). Without `admin`, a token sees and cancels only its own items.
+[QUEUE.md](QUEUE.md) has the details: states, retries, pacing, pausing, and the webhook `queue`
+event.
+
 ## `GET /messages`
 
 Stored messages (incoming and sent), filtered with the [shared filters](#filters).
@@ -504,7 +533,7 @@ done
 ## `GET /events`
 
 [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
-stream. Three event types:
+stream. Three event types, and a fourth on request:
 
 ```
 id: 1043
@@ -523,10 +552,11 @@ data: {"connected":true,"logged_in":true,"state":"connected", …}
 | `message` | a new message is stored (incoming, sent from your phone, or sent through wame) | carries `id: <seq>`; filtered |
 | `update` | a stored message is edited or deleted, by you or by someone else | the whole updated Message; filtered (except `since`); no `id`, not replayed |
 | `status` | connection or login state changes | a Status object; not filtered |
+| `queue` | a [queued](#post-queue) item changes state (sending, sent, failed, canceled, retry) | only with `events=queue`; the item without its text; your own items unless the token has `admin` |
 
 | Query | |
 |---|---|
-| `events` | comma-separated subset of `message,update,status`. Default: all three |
+| `events` | comma-separated subset of `message,update,status,queue`. Default: `message,update,status` |
 | `chat`, `type`, `from_me`, `is_group`, `since`, `q` | see [Filters](#filters) |
 
 **Resuming.** The stream first replays every stored matching message after a starting `seq`,
@@ -543,7 +573,9 @@ Messages imported by a history sync while you're connected are streamed as well.
 `message` events are read from the database, so a slow client doesn't lose them. `update` and
 `status` events can be dropped if the client falls far behind.
 
-A `: ping` comment goes out every 25 s to keep proxies from closing the connection.
+A `: ping` comment goes out every 25 s to keep proxies from closing the connection. When the
+server shuts down it ends open streams at once (and answers open `/messages/wait` calls with no
+messages), so reconnect with `Last-Event-ID` or your cursor.
 
 ```sh
 curl -N -H "Authorization: Bearer $T" "localhost:8080/events?from_me=false&events=message"
@@ -664,7 +696,9 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/check \
 ## `GET /audit`
 
 Control actions taken through wame, newest first: sends, files, reactions, edits, deletes,
-read receipts, pairing and logout, plus WhatsApp logging the device out. Every send, file,
+read receipts, pairing and logout, serving the login QR (`qr`), number checks (`check`, with the
+count but not the numbers), queuing and canceling (`queue`, `queue_cancel`), settings, tokens and
+webhook tests, plus WhatsApp logging the device out. Every send, file,
 reaction, edit and delete attempt is recorded exactly once, including ones rejected for bad
 input (`ok: false` with the error). Message text is never stored here.
 
@@ -729,6 +763,11 @@ when wame restarts. The webhook URL, its secret and message content are never in
     "recent_failures": [
       { "at": "2026-10-12T20:02:11-03:00", "delivery": "4711-message-a1b2c3d4", "event": "message", "attempt": 1, "status": 400, "gave_up": true }
     ]
+  },
+  "queue": {
+    "queued": 120, "sending": 1, "sent": 880, "failed": 3, "canceled": 0,
+    "oldest_queued": "2026-10-12T21:00:00-03:00", "next_due": "2026-10-12T21:41:03-03:00",
+    "paused": false, "running": true, "jitter_ms": 2000
   }
 }
 ```
@@ -742,11 +781,14 @@ when wame restarts. The webhook URL, its secret and message content are never in
 - `webhook` is `null` without `-webhook`. `failed` counts deliveries given up on (after 6 attempts,
   or at once on a 4xx other than 429); `recent_failures` keeps the last 20 failed attempts, newest
   first, including ones that were retried later.
+- `queue` counts [send queue](#post-queue) items by state (finished ones are kept 7 days) and says
+  whether it's `paused`, whether a worker is `running` in this process, and `cooldown_until` /
+  `last_error` while it backs off after WhatsApp errors.
 
 ## `GET /settings`, `PATCH /settings`
 
 Some flags can be changed while wame runs, without a restart: `rate`, `chat_gap`, `max_wait`,
-`auto_reply` and `webhook_filter`. Requires `admin`.
+`auto_reply`, `webhook_filter`, `queue_paused` and `queue_jitter`. Requires `admin`.
 
 ```sh
 curl -H "$H" localhost:8080/settings
@@ -760,14 +802,17 @@ curl -H "$H" -X PATCH localhost:8080/settings -d '{"rate": null}'     # back to 
   { "key": "chat_gap", "value": "1s", "default": "1s", "overridden": false },
   { "key": "max_wait", "value": "30s", "default": "30s", "overridden": false },
   { "key": "auto_reply", "value": "false", "default": "true", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" },
-  { "key": "webhook_filter", "value": "", "default": "", "overridden": false }
+  { "key": "webhook_filter", "value": "", "default": "", "overridden": false },
+  { "key": "queue_paused", "value": "false", "default": "false", "overridden": false },
+  { "key": "queue_jitter", "value": "2s", "default": "2s", "overridden": false }
 ]
 ```
 
 - Values may be strings, numbers or booleans; `null` removes the override. `rate` is 0 (unlimited) to
-  1000, and number lookups follow at 3×; `chat_gap` and `max_wait` are durations up to `10m`;
+  1000, and number lookups follow at 3×; `chat_gap`, `max_wait` and `queue_jitter` are durations up to `10m`;
   `webhook_filter` uses the [filter syntax](#filters) and only matters with `-webhook` (a `chat=`
-  number is taken as typed; use the JID if WhatsApp knows it differently).
+  number is taken as typed; use the JID if WhatsApp knows it differently). `queue_paused` holds the
+  [send queue](#post-queue); it has no flag.
 - Every value is checked before any is applied, so a bad one changes nothing (400).
 - Changes apply at once and are stored in the `wame_settings` table, so they **win over the flags
   on the next start too**, until reset with `null`. `default` shows the flag's value.
@@ -882,6 +927,10 @@ wame spaces out everything it sends: texts, files, reactions, edits, deletes and
   always wait.
 - `-typing`: show "typing…" for a moment (scaled to the text length, 0.8–4 s) before each text.
 
+For bulk sends, use the [send queue](#post-queue) instead of many `/send` calls: it takes only free
+slots (so interactive sends go first), adds a random gap (`-queue-jitter`), and backs off on its
+own when WhatsApp starts returning errors.
+
 `-rate`, `-chat-gap`, `-max-wait` and `-autoreply` can also be changed while wame runs with
 [`PATCH /settings`](#get-settings-patch-settings) (or the admin panel); a change applies to the
 next send and is kept over restarts. [`GET /stats`](#get-stats) shows how much of each limit is in
@@ -915,13 +964,15 @@ What gets delivered:
 - **not** messages sent through wame itself (API, TUI, CLI, auto-replies)
 - **not** duplicates WhatsApp sends again, protocol messages, or history-sync imports
 - edits and deletes, as `X-Wame-Event: update` with the updated Message
+- [queued](#post-queue) items when they're sent or fail, as `X-Wame-Event: queue` with the item
+  (without its text). The filter doesn't apply to these
 
 Headers on every request:
 
 | Header | |
 |---|---|
 | `Content-Type` | `application/json` |
-| `X-Wame-Event` | `message` or `update`; `test` for a [test delivery](#post-webhooktest-post-webhookreplay), whose body has no message. Ignore event types you don't know |
+| `X-Wame-Event` | `message`, `update` or `queue`; `test` for a [test delivery](#post-webhooktest-post-webhookreplay), whose body has no message. Ignore event types you don't know |
 | `X-Wame-Delivery` | unique ID for this delivery, the same on every retry. Use it to dedupe |
 | `X-Wame-Timestamp` | Unix seconds when this attempt was sent |
 | `X-Wame-Signature` | `sha256=<hex>`, only with `-webhook-secret` |
@@ -932,12 +983,14 @@ comparison and reject old timestamps. [BOT.md](BOT.md#verifying-webhook-signatur
 Python and Node code.
 
 **Delivery.** Any 2xx counts as delivered. Network errors, timeouts (10 s), 429 and 5xx are
-retried with exponential backoff and jitter (about 1, 2, 4, 8, 16 s), 6 attempts in total.
+retried with exponential backoff and jitter (about 1, 2, 4, 8, 16 s), 6 attempts in total; a
+`Retry-After` on a 429 or 503 is honoured (up to 5 minutes).
 Other statuses aren't retried. Redirects aren't followed: a 3xx counts as a failed delivery,
 so point `-webhook` at the final URL. Failures are logged with the delivery ID, status and
 error, but not the URL. Four workers send in parallel from an in-memory queue of 1000;
 when the queue is full, new deliveries are dropped and logged. So delivery is **at-least-once
-and unordered**, and anything still queued is lost when the process stops. If you can't afford
+and unordered**. When the process stops, queued deliveries get one attempt within 3 seconds and
+the rest are lost. If you can't afford
 gaps, use `/messages/wait` or `/events` with a cursor instead, or as a backfill.
 
 [`GET /stats`](#get-stats) counts deliveries and keeps the last 20 failed attempts (since the last

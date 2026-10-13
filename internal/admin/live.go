@@ -68,7 +68,7 @@ func (l *live) start(c *Client, gen int) tea.Cmd {
 		defer close(ch)
 		backoff := 2 * time.Second
 		for ctx.Err() == nil {
-			err := c.Events(ctx, "status,message", func() {
+			err := c.Events(ctx, "status,message,queue", func() {
 				backoff = 2 * time.Second
 				send(liveMsg{gen: gen, on: true})
 			}, func(ev Event) { send(eventMsg{gen, ev}) })
@@ -76,8 +76,7 @@ func (l *live) start(c *Client, gen int) tea.Cmd {
 				return
 			}
 			send(liveMsg{gen: gen, err: err})
-			var apiErr *APIError
-			if errors.As(err, &apiErr) && (apiErr.Code == http.StatusUnauthorized || apiErr.Code == http.StatusForbidden) {
+			if apiErr, ok := errors.AsType[*APIError](err); ok && (apiErr.Code == http.StatusUnauthorized || apiErr.Code == http.StatusForbidden) {
 				return
 			}
 			select {
@@ -188,6 +187,8 @@ func (m *model) handleLive(msg tea.Msg) tea.Cmd {
 				m.live.add(mm)
 				return tea.Batch(m.live.wait(), m.onMessage(mm))
 			}
+		case "queue":
+			return tea.Batch(m.live.wait(), m.queueChanged())
 		}
 	}
 	return m.live.wait()

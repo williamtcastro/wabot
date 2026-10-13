@@ -22,7 +22,7 @@ func TestSearch(t *testing.T) {
 	}
 	ids := func(f Filter) []string {
 		var out []string
-		for _, m := range s.Query(f, 10, true) {
+		for _, m := range query(t, s, f, 10, true) {
 			out = append(out, m.ID)
 		}
 		return out
@@ -43,7 +43,7 @@ func TestSearch(t *testing.T) {
 		if len(got) != len(c.want) || (len(got) > 0 && got[0] != c.want[0]) {
 			t.Errorf("Query(%+v) = %v, want %v", c.f, got, c.want)
 		}
-		for _, m := range s.Query(Filter{}, 10, true) {
+		for _, m := range query(t, s, Filter{}, 10, true) {
 			inSQL := false
 			for _, id := range got {
 				inSQL = inSQL || id == m.ID
@@ -148,7 +148,7 @@ func TestGroupsCache(t *testing.T) {
 	if err := s.SaveGroups(in); err != nil {
 		t.Fatal(err)
 	}
-	got := s.Groups()
+	got := must[[]Group](t)(s.Groups())
 	if len(got) != 1 || got[0].Name != "Família" || len(got[0].Admins) != 1 || got[0].Admins[0] != maria {
 		t.Fatalf("Groups() = %+v", got)
 	}

@@ -166,7 +166,8 @@ Details:
   `PgUp` `PgDn` scroll them, `Esc` closes them.
 - **Search.** `/search <words>` replaces the right-hand pane with up to 200 matching messages
   from every chat, newest first (date, chat, sender, text). `↑` `↓`, `j` `k` or `Ctrl+J` `Ctrl+K`
-  move, `g` / `G` jump to the first / last result, `Enter` opens that chat with the message
+  move, `Ctrl+D` / `Ctrl+U` or `PgDn` / `PgUp` page, `g` / `G` or `Home` / `End` jump to the first /
+  last result, `Enter` opens that chat with the message
   selected (loading further back if needed), and `Esc` or `q` closes the results. Matching follows
   the API's [`q` rule](API.md#filters): every word must match a whole word, the last one as a
   prefix (`bom di` finds "bom dia"); case and accents are ignored; deleted messages aren't found.

@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/williamtcastro/wame/internal/termui"
 )
 
 func (m *model) key(k tea.KeyMsg) tea.Cmd {
@@ -260,17 +262,21 @@ func (m *model) resultsKey(k tea.KeyMsg) tea.Cmd {
 	if len(m.results) == 0 && k.String() != "esc" && k.String() != "q" && k.String() != "ctrl+c" {
 		return nil
 	}
-	switch k.String() {
+	key := k.String()
+	switch key {
+	case "ctrl+j":
+		key = "j"
+	case "ctrl+k":
+		key = "k"
+	}
+	if sel, ok := termui.ListMove(key, m.resultSel, len(m.results), m.vp.Height/2); ok {
+		m.resultSel = sel
+		m.render(false)
+		return nil
+	}
+	switch key {
 	case "ctrl+c":
 		return tea.Quit
-	case "up", "k", "ctrl+k":
-		m.resultSel = max(0, m.resultSel-1)
-	case "down", "j", "ctrl+j":
-		m.resultSel = min(len(m.results)-1, m.resultSel+1)
-	case "g":
-		m.resultSel = 0
-	case "G":
-		m.resultSel = len(m.results) - 1
 	case "enter":
 		if m.resultSel < len(m.results) {
 			hit := m.results[m.resultSel]

@@ -19,10 +19,12 @@ type Settings struct {
 	MaxWait       time.Duration
 	AutoReply     bool
 	WebhookFilter string
+	QueuePaused   bool
+	QueueJitter   time.Duration
 }
 
 // SettingKeys are the names used by the API, the table and the audit log, in display order.
-var SettingKeys = []string{"rate", "chat_gap", "max_wait", "auto_reply", "webhook_filter"}
+var SettingKeys = []string{"rate", "chat_gap", "max_wait", "auto_reply", "webhook_filter", "queue_paused", "queue_jitter"}
 
 const maxSettingDuration = 10 * time.Minute
 
@@ -48,6 +50,10 @@ func (s Settings) get(key string) string {
 		return strconv.FormatBool(s.AutoReply)
 	case "webhook_filter":
 		return s.WebhookFilter
+	case "queue_paused":
+		return strconv.FormatBool(s.QueuePaused)
+	case "queue_jitter":
+		return s.QueueJitter.String()
 	}
 	return ""
 }
@@ -73,12 +79,18 @@ func (s *Settings) set(key, value string) error {
 		s.ChatGap, err = duration()
 	case "max_wait":
 		s.MaxWait, err = duration()
-	case "auto_reply":
+	case "auto_reply", "queue_paused":
 		b, perr := strconv.ParseBool(value)
 		if perr != nil {
-			return BadInput("auto_reply must be true or false")
+			return BadInput("%s must be true or false", key)
 		}
-		s.AutoReply = b
+		if key == "auto_reply" {
+			s.AutoReply = b
+		} else {
+			s.QueuePaused = b
+		}
+	case "queue_jitter":
+		s.QueueJitter, err = duration()
 	case "webhook_filter":
 		if _, err := ParseWebhookFilter(value); err != nil {
 			return BadInput("webhook_filter: %v", err)
@@ -91,7 +103,7 @@ func (s *Settings) set(key, value string) error {
 }
 
 // ParseWebhookFilter parses a -webhook-filter query. A phone number in chat= becomes a JID as typed;
-// main resolves it with WhatsApp once connected.
+// the bot resolves it with WhatsApp once logged in.
 func ParseWebhookFilter(raw string) (store.Filter, error) {
 	q, err := url.ParseQuery(raw)
 	if err != nil {
@@ -130,11 +142,8 @@ func (b *Bot) applySettings(s Settings) {
 	b.Limiter.Set(s.Rate, s.ChatGap, s.MaxWait)
 	b.Lookups.Set(LookupsPerMinute(s.Rate), 0, s.MaxWait)
 	b.replies.Store(s.AutoReply)
-	if b.Webhook != nil {
-		if f, err := ParseWebhookFilter(s.WebhookFilter); err == nil {
-			b.Webhook.SetFilter(f)
-		}
-	}
+	b.setWebhookFilter(s.WebhookFilter)
+	b.wakeOutbox()
 }
 
 // SetAutoReply turns the !ping / !time / !help replies on or off for this process only.
@@ -178,11 +187,6 @@ func (b *Bot) UpdateSettings(actor string, changes map[string]*string) error {
 	var detail []string
 	for _, k := range keys {
 		v := changes[k]
-		if !slices.Contains(SettingKeys, k) {
-			err := BadInput("unknown setting %q (known: %s)", k, strings.Join(SettingKeys, ", "))
-			b.Audit(actor, "settings", "", strings.Join(keys, ","), err)
-			return err
-		}
 		value := b.baseSettings.get(k)
 		if v != nil {
 			value = *v

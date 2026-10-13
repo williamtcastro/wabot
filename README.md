@@ -26,6 +26,7 @@ It's one Go binary and one SQLite file, with no cgo and no external services. Bu
 | 🤖 **Hand it to an AI agent** | A built-in MCP server (HTTP at `/mcp` or `wame mcp` on stdio) for Claude Code, Claude Desktop and other MCP clients. Message text comes back marked as untrusted |
 | 🔐 **Stay in control** | One token per agent or bot, with `read` / `send` / `admin` scopes, a chat allowlist, its own send rate, expiry and instant revocation. Every action is audited |
 | 🛰️ **Run it on a server** | A Docker image, and `wame admin`: a live terminal panel for a remote server with QR login, chats, token rotation and usage, the audit log, limiter and webhook health, and settings you can change without a restart |
+| 📬 **Queue bulk sends** | `POST /queue` takes up to 1000 messages at once and a worker sends them at a safe pace, with random gaps, scheduled times, retries and back-off. The queue survives restarts and can be paused or canceled by batch |
 | 🐢 **Avoid bans** | Sends are spaced out by default: 20 per minute and 1 s between messages to the same chat. Number lookups and auto-replies have their own caps |
 
 > [!WARNING]
@@ -109,6 +110,7 @@ curl -H "$H" -X POST localhost:8080/send/file -F to=5511999999999 -F caption="lo
 curl -H "$H" "localhost:8080/messages?q=boleto&limit=10"            # full-text search
 curl -H "$H" "localhost:8080/messages/wait?from_me=false&timeout=60" # wait for the next message
 curl -N -H "$H" localhost:8080/events                                # live stream (SSE)
+curl -H "$H" -X POST localhost:8080/queue -d '{"batch":"promo","text":"Hi!","messages":[{"to":"5511999999999"},{"to":"5511988887777"}]}'
 ```
 
 While it runs, open **http://localhost:8080/docs** to try every endpoint from the browser. Full
@@ -204,10 +206,11 @@ The most used global flags:
 | `-rate` / `-chat-gap` / `-max-wait` | `WAME_RATE` | `20` / `1s` / `30s` | send limits; a send that would wait longer than `-max-wait` gets a 429 |
 | `-online` | | `false` | appear online (off keeps notifications on your phone) |
 | `-autoreply` | | `true` | answer `!ping` / `!time` / `!help` |
+| `-queue-jitter` | `WAME_QUEUE_JITTER` | `2s` | random extra wait between [queued](docs/QUEUE.md) sends |
 | `-log-format` / `-log-file` / `-debug` | `WAME_LOG_*` | `text` / stderr | logging |
 
-`-rate`, `-chat-gap`, `-max-wait`, `-autoreply` and `-webhook-filter` can also be changed while it
-runs (`PATCH /settings` or the admin panel); such changes are saved and win over the flags until
+`-rate`, `-chat-gap`, `-max-wait`, `-autoreply`, `-webhook-filter` and `-queue-jitter` (plus pausing
+the send queue) can also be changed while it runs (`PATCH /settings` or the admin panel); such changes are saved and win over the flags until
 reset. All flags and commands: [docs/CLI.md](docs/CLI.md).
 
 ## Documentation
@@ -218,6 +221,7 @@ reset. All flags and commands: [docs/CLI.md](docs/CLI.md).
 | [HTTP API](docs/API.md) | every endpoint with curl examples, filters, events, tokens, rate limiting, webhooks |
 | [OpenAPI spec](docs/openapi.yaml) | for Postman, Insomnia or Bruno; also served live at `/docs` |
 | [TUI](docs/TUI.md) | layout, keys and commands |
+| [Send queue](docs/QUEUE.md) | bulk sends: pacing, retries, scheduling, canceling, and why it uses SQLite rather than Redis |
 | [Bots](docs/BOT.md) | your own bot logic via webhook, polling or Go, verifying signatures, running as a service |
 | [Docker](docs/DOCKER.md) | the image, keeping the database in a Docker volume or a host folder, login, backups |
 | [Admin panel](docs/ADMIN.md) | `wame admin`: manage a remote server from the terminal, connecting safely |

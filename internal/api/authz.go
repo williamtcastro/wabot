@@ -62,7 +62,7 @@ func withAuth(authn *auth.Authenticator, fails *failureLimiter, seen func(name, 
 		presented, ok := presentedToken(r)
 		if !ok {
 			fails.record(ip)
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "use 'Authorization: Bearer <token>'"})
+			writeErr(w, http.StatusUnauthorized, "use 'Authorization: Bearer <token>'")
 			return
 		}
 		if presented == "" && !authn.Required() {
@@ -72,7 +72,7 @@ func withAuth(authn *auth.Authenticator, fails *failureLimiter, seen func(name, 
 		p, err := authn.Authenticate(presented)
 		if err != nil {
 			fails.record(ip)
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			writeErr(w, http.StatusUnauthorized, err.Error())
 			return
 		}
 		seen(p.Name, ip)
@@ -88,17 +88,32 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// failureLimiter blocks an IP for a minute after too many failed authentications.
+// failureLimiter blocks an IP for a minute after too many failed authentications. Only IPs with recent
+// failures are tracked, and stale ones are pruned, so a spray of addresses can't grow the map for long
+// or clear another IP's block.
 type failureLimiter struct {
-	mu   sync.Mutex
-	hits map[string][]time.Time
+	mu      sync.Mutex
+	hits    map[string][]time.Time
+	pruneAt int
 }
+
+const failureLimiterPrune = 10000
 
 func (f *failureLimiter) record(ip string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.hits == nil || len(f.hits) > 10000 {
+	if f.hits == nil {
 		f.hits = map[string][]time.Time{}
+	}
+	if len(f.hits) >= max(f.pruneAt, failureLimiterPrune) {
+		for k, ts := range f.hits {
+			if ts = recent(ts); len(ts) == 0 {
+				delete(f.hits, k)
+			} else {
+				f.hits[k] = ts
+			}
+		}
+		f.pruneAt = 2 * len(f.hits)
 	}
 	f.hits[ip] = append(recent(f.hits[ip]), time.Now())
 }
@@ -106,11 +121,16 @@ func (f *failureLimiter) record(ip string) {
 func (f *failureLimiter) blocked(ip string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.hits == nil {
+	ts, ok := f.hits[ip]
+	if !ok {
 		return false
 	}
-	f.hits[ip] = recent(f.hits[ip])
-	return len(f.hits[ip]) >= failuresPerMinute
+	if ts = recent(ts); len(ts) == 0 {
+		delete(f.hits, ip)
+		return false
+	}
+	f.hits[ip] = ts
+	return len(ts) >= failuresPerMinute
 }
 
 // reject answers 429 when ip is blocked.
@@ -119,7 +139,7 @@ func (f *failureLimiter) reject(w http.ResponseWriter, ip string) bool {
 		return false
 	}
 	w.Header().Set("Retry-After", "60")
-	writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many failed attempts, try again in a minute"})
+	writeErr(w, http.StatusTooManyRequests, "too many failed attempts, try again in a minute")
 	return true
 }
 
@@ -132,7 +152,7 @@ func recent(ts []time.Time) []time.Time {
 func need(scope auth.Scope, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !principal(r).Has(scope) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "this token lacks the " + string(scope) + " scope"})
+			writeErr(w, http.StatusForbidden, "this token lacks the "+string(scope)+" scope")
 			return
 		}
 		h(w, r)
@@ -144,7 +164,7 @@ func need(scope auth.Scope, h http.HandlerFunc) http.HandlerFunc {
 func unrestricted(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if principal(r).Restricted() {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "not available to tokens limited to specific chats"})
+			writeErr(w, http.StatusForbidden, "not available to tokens limited to specific chats")
 			return
 		}
 		h(w, r)
@@ -167,13 +187,20 @@ func visibleStatus(p auth.Principal, s bot.Status) bot.Status {
 // For restricted tokens the target is never looked up on WhatsApp, so they can't probe numbers or spend
 // the shared lookup budget.
 func (a *server) authorizeChat(w http.ResponseWriter, r *http.Request, to string) (string, bool) {
+	chat, ok := a.allowedChat(r, to)
+	if !ok {
+		writeErr(w, http.StatusForbidden, errChatForbidden)
+	}
+	return chat, ok
+}
+
+func (a *server) allowedChat(r *http.Request, to string) (string, bool) {
 	p := principal(r)
 	if !p.Restricted() {
 		return to, true
 	}
 	chat, err := a.b.LocalChat(to)
 	if err != nil || !a.b.ChatAllowed(r.Context(), p.Chats, chat) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": errChatForbidden})
 		return "", false
 	}
 	return chat, true
@@ -188,7 +215,7 @@ func (a *server) restrictFilter(w http.ResponseWriter, r *http.Request, f *store
 	allowed := a.b.ExpandAllowlist(r.Context(), p.Chats)
 	if f.Chat != "" {
 		if !slices.Contains(allowed, f.Chat) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": errChatForbidden})
+			writeErr(w, http.StatusForbidden, errChatForbidden)
 			return false
 		}
 		f.ChatOnly = true
@@ -197,17 +224,11 @@ func (a *server) restrictFilter(w http.ResponseWriter, r *http.Request, f *store
 	return true
 }
 
-// sendGuard runs the chat allowlist and the per-token rate limit before a send-type action.
-func (a *server) sendGuard(w http.ResponseWriter, r *http.Request, chat string) (string, bool) {
-	chat, ok := a.authorizeChat(w, r, chat)
-	if !ok {
-		return "", false
-	}
-	if err := a.b.ThrottleToken(r.Context(), principal(r).TokenID, principal(r).Rate); err != nil {
-		writeError(w, err)
-		return "", false
-	}
-	return chat, true
+// throttle charges the caller's per-token send rate. Sends with an idempotency key call it inside the
+// idempotent step, so a retry that gets the first result doesn't spend another slot.
+func (a *server) throttle(r *http.Request) error {
+	p := principal(r)
+	return a.b.ThrottleToken(r.Context(), p.TokenID, p.Rate)
 }
 
 // streams caps how many /events and /messages/wait connections one token holds open, and counts
@@ -249,7 +270,7 @@ func (a *server) stillValid(p auth.Principal) bool {
 		return true
 	}
 	t, err := a.b.Store.TokenByID(p.TokenID)
-	return err == nil && !t.Revoked && (t.Expires.IsZero() || time.Now().Before(t.Expires))
+	return err == nil && t.Usable(time.Now()) == nil
 }
 
 var errTooManyStreams = errors.New("too many open streams for this token")
@@ -280,7 +301,7 @@ func (a *server) createToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if caller.TokenID != "" && slices.Contains(scopes, auth.Admin) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin tokens can only be created with 'wame token create' or the owner token"})
+		writeErr(w, http.StatusForbidden, "admin tokens can only be created with 'wame token create' or the owner token")
 		return
 	}
 	chats, err := NormalizeChats(req.Chats)
@@ -305,8 +326,11 @@ func (a *server) createToken(w http.ResponseWriter, r *http.Request) {
 	}
 	plain, t, err := auth.Issue(a.b.Store, issue)
 	a.b.Audit(caller.Name, "token_create", req.Name, strings.Join(req.Scopes, ","), err)
+	if _, ok := errors.AsType[auth.InvalidRequest](err); ok {
+		err = bot.BadInput("%v", err)
+	}
 	if err != nil {
-		writeError(w, bot.BadInput("%v", err))
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"token": plain, "details": t, "note": "store this token now; it can't be shown again"})

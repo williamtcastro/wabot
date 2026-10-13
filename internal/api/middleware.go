@@ -26,7 +26,7 @@ func localOnly(next http.Handler) http.Handler {
 		}
 		remote := net.ParseIP(clientIP(r))
 		if !loopback || crossSite || remote == nil || !remote.IsLoopback() {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "without -token only same-origin requests to localhost are allowed"})
+			writeErr(w, http.StatusForbidden, "without -token only same-origin requests to localhost are allowed")
 			return
 		}
 		next.ServeHTTP(w, r)

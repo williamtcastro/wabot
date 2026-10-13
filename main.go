@@ -18,12 +18,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/mdp/qrterminal/v3"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/williamtcastro/wame/internal/admin"
@@ -68,6 +68,7 @@ Flags (right after the command, before other arguments):
   -typing                show "typing…" before each text message
   -online                appear "online" while connected (off: your phone keeps getting notifications)
   -autoreply             answer !ping, !time and !help (default true)
+  -queue-jitter D        wait a random 0–D more between queued sends (env WAME_QUEUE_JITTER, default 2s)
   -log-format F          text or json (env WAME_LOG_FORMAT, default text)
   -log-file PATH         write app logs to PATH instead of stderr (env WAME_LOG_FILE)
   -debug                 verbose logs, including whatsmeow's
@@ -79,7 +80,7 @@ type config struct {
 	webhook, webhookSecret, webhookFilter string
 	logFormat, logFile                    string
 	rate                                  int
-	chatGap, maxWait                      time.Duration
+	chatGap, maxWait, queueJitter         time.Duration
 	autoreply, typing, online, debug      bool
 }
 
@@ -125,6 +126,12 @@ func main() {
 	fs.DurationVar(&c.chatGap, "chat-gap", time.Second, "")
 	fs.DurationVar(&c.maxWait, "max-wait", 30*time.Second, "")
 	fs.BoolVar(&c.autoreply, "autoreply", true, "")
+	queueJitter, err := time.ParseDuration(envOr("WAME_QUEUE_JITTER", "2s"))
+	if err != nil || queueJitter < 0 {
+		fmt.Fprintln(os.Stderr, "error: WAME_QUEUE_JITTER must be a duration like 2s")
+		os.Exit(2)
+	}
+	fs.DurationVar(&c.queueJitter, "queue-jitter", queueJitter, "")
 	fs.BoolVar(&c.typing, "typing", false, "")
 	fs.BoolVar(&c.online, "online", false, "")
 	fs.BoolVar(&c.debug, "debug", false, "")
@@ -135,9 +142,9 @@ func main() {
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	if err := run(ctx, cmd, fs.Args(), c); err != nil {
+	err = run(ctx, cmd, fs.Args(), c)
+	stop()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -170,113 +177,121 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 	if err != nil {
 		return err
 	}
+	defer b.Close()
 	b.Typing = c.typing
 	b.Online = c.online
-	b.Limiter = bot.NewLimiter(c.rate, c.chatGap, c.maxWait)
-	b.Lookups = bot.NewLimiter(bot.LookupsPerMinute(c.rate), 0, c.maxWait)
 	if c.webhook != "" {
 		if u, err := url.Parse(c.webhook); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-			return fmt.Errorf("-webhook must be an http(s) URL")
+			return errors.New("-webhook must be an http(s) URL")
 		}
-		f, err := bot.ParseWebhookFilter(c.webhookFilter)
-		if err != nil {
+		if _, err := bot.ParseWebhookFilter(c.webhookFilter); err != nil {
 			return fmt.Errorf("-webhook-filter: %w", err)
 		}
-		b.Webhook = bot.NewWebhook(ctx, c.webhook, c.webhookSecret, f, log)
+		b.StartWebhook(c.webhook, c.webhookSecret)
 	}
 	// Settings changed at runtime (GET/PATCH /settings) override these flags.
-	eff, err := b.InitSettings(bot.Settings{Rate: c.rate, ChatGap: c.chatGap, MaxWait: c.maxWait, AutoReply: c.autoreply, WebhookFilter: c.webhookFilter})
-	if err != nil {
+	if _, err := b.InitSettings(bot.Settings{Rate: c.rate, ChatGap: c.chatGap, MaxWait: c.maxWait, AutoReply: c.autoreply, WebhookFilter: c.webhookFilter, QueueJitter: c.queueJitter}); err != nil {
 		return err
 	}
-	if cmd == "send" {
-		b.SetAutoReply(false)
-	}
-	if b.Webhook != nil && eff.WebhookFilter == c.webhookFilter {
-		q, _ := url.ParseQuery(c.webhookFilter)
-		if chat := q.Get("chat"); chat != "" && !strings.Contains(chat, "@") {
-			go resolveWebhookChat(ctx, b, chat)
-		}
-	}
-	defer b.Client.Disconnect()
 
 	switch cmd {
 	case "login":
 		return login(ctx, b, c.phone)
-
 	case "serve":
-		if c.addr == "" {
-			c.addr = "127.0.0.1:8080"
-		}
+		return serveCommand(ctx, b, c)
+	case "tui":
+		return tuiCommand(ctx, b, c)
+	case "send":
+		b.SetAutoReply(false)
+		return sendCommand(ctx, b, args)
+	case "token":
+		return tokenCommand(b, args)
+	case "mcp":
+		return mcpCommand(ctx, b, args)
+	case "logout":
+		return logoutCommand(ctx, b)
+	}
+	return fmt.Errorf("unknown command %q (try 'wame help')", cmd)
+}
+
+func serveCommand(ctx context.Context, b *bot.Bot, c config) error {
+	if c.addr == "" {
+		c.addr = "127.0.0.1:8080"
+	}
+	if err := guardPublicAddr(b, c); err != nil {
+		return err
+	}
+	if err := b.Start(ctx); err != nil {
+		return err
+	}
+	go printQRUpdates(ctx, b)
+	b.Go(b.RunOutbox)
+	return serve(ctx, b, c)
+}
+
+// tuiCommand runs the terminal UI, plus the HTTP API when -addr is set; quitting stops both.
+func tuiCommand(ctx context.Context, b *bot.Bot, c config) error {
+	if c.addr != "" {
 		if err := guardPublicAddr(b, c); err != nil {
 			return err
 		}
-		if err := b.Start(ctx); err != nil {
-			return err
-		}
-		go printQRUpdates(ctx, b)
-		return serve(ctx, b, c)
-
-	case "tui":
-		if err := guardPublicAddr(b, c); c.addr != "" && err != nil {
-			return err
-		}
-
-		if err := b.Start(ctx); err != nil {
-			return err
-		}
-		if c.addr != "" {
-			go func() {
-				if err := serve(ctx, b, c); err != nil {
-					b.Log.Error("HTTP API stopped", "err", err)
-				}
-			}()
-		}
-		return tui.Run(b)
-
-	case "send":
-		if len(args) < 2 {
-			return errors.New("usage: wame send NUMBER|JID TEXT")
-		}
-		if b.Client.Store.ID == nil {
-			return errors.New("not logged in, run 'wame login' first")
-		}
-		if err := b.Start(ctx); err != nil {
-			return err
-		}
-		if err := waitLoggedIn(ctx, b, 20*time.Second); err != nil {
-			return err
-		}
-		m, err := b.SendText(ctx, "cli", args[0], strings.Join(args[1:], " "), bot.SendOptions{})
-		if err != nil {
-			return err
-		}
-		fmt.Printf("sent %s to %s\n", m.ID, m.Chat)
-		return nil
-
-	case "token":
-		return tokenCommand(b, args)
-
-	case "mcp":
-		return mcpCommand(ctx, b, args)
-
-	case "logout":
-		if b.Client.Store.ID == nil {
-			return errors.New("not logged in")
-		}
-		if err := b.Start(ctx); err != nil {
-			return err
-		}
-		_ = waitLoggedIn(ctx, b, 20*time.Second)
-		err := b.Client.Logout(ctx)
-		b.Audit("cli", "logout", "", "", err)
-		if err != nil {
-			return err
-		}
-		fmt.Println("logged out")
-		return nil
 	}
-	return fmt.Errorf("unknown command %q (try 'wame help')", cmd)
+	if err := b.Start(ctx); err != nil {
+		return err
+	}
+	b.Go(b.RunOutbox)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var served sync.WaitGroup
+	if c.addr != "" {
+		served.Go(func() {
+			if err := serve(ctx, b, c); err != nil {
+				b.Log.Error("HTTP API stopped", "err", err)
+			}
+		})
+	}
+	err := tui.Run(b)
+	cancel()
+	served.Wait()
+	return err
+}
+
+func sendCommand(ctx context.Context, b *bot.Bot, args []string) error {
+	if len(args) < 2 {
+		return errors.New("usage: wame send NUMBER|JID TEXT")
+	}
+	if b.Client.Store.ID == nil {
+		return errors.New("not logged in, run 'wame login' first")
+	}
+	if err := b.Start(ctx); err != nil {
+		return err
+	}
+	if err := waitLoggedIn(ctx, b, 20*time.Second); err != nil {
+		return err
+	}
+	m, err := b.SendText(ctx, "cli", args[0], strings.Join(args[1:], " "), bot.SendOptions{})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("sent %s to %s\n", m.ID, m.Chat)
+	return nil
+}
+
+func logoutCommand(ctx context.Context, b *bot.Bot) error {
+	if b.Client.Store.ID == nil {
+		return errors.New("not logged in")
+	}
+	if err := b.Start(ctx); err != nil {
+		return err
+	}
+	_ = waitLoggedIn(ctx, b, 20*time.Second)
+	err := b.Client.Logout(ctx)
+	b.Audit("cli", "logout", "", "", err)
+	if err != nil {
+		return err
+	}
+	fmt.Println("logged out")
+	return nil
 }
 
 func login(ctx context.Context, b *bot.Bot, phone string) error {
@@ -356,58 +371,34 @@ func waitLoggedIn(ctx context.Context, b *bot.Bot, timeout time.Duration) error 
 	return nil
 }
 
+// serve runs the HTTP API until ctx is done, then gives requests 5 seconds to finish.
 func serve(ctx context.Context, b *bot.Bot, c config) error {
-	if err := guardPublicAddr(b, c); err != nil {
-		return err
-	}
+	h := api.NewHandler(b, &auth.Authenticator{Store: b.Store, Owner: c.token}, version)
 	srv := &http.Server{
 		Addr:              c.addr,
-		Handler:           api.NewHandler(b, &auth.Authenticator{Store: b.Store, Owner: c.token}, version),
+		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    64 << 10,
 	}
-	go func() {
-		<-ctx.Done()
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(sctx)
-	}()
+	srv.RegisterOnShutdown(h.StopStreams)
 	if c.token == "" {
 		b.Log.Warn("API has no token: only local, same-origin requests are accepted", "addr", c.addr)
 	}
 	b.Log.Info("HTTP API listening", "addr", c.addr, "docs", "/docs")
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+	select {
+	case err := <-errc:
 		return err
+	case <-ctx.Done():
+	}
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(sctx); err != nil {
+		return errors.Join(fmt.Errorf("shut down HTTP API: %w", err), srv.Close())
 	}
 	return nil
-}
-
-// resolveWebhookChat swaps a phone number in -webhook-filter for the JID WhatsApp uses
-// (e.g. with or without Brazil's 9th digit) once the bot is connected.
-func resolveWebhookChat(ctx context.Context, b *bot.Bot, number string) {
-	if waitLoggedIn(ctx, b, 24*time.Hour) != nil {
-		return
-	}
-	var jid types.JID
-	var err error
-	for wait := 10 * time.Second; ; wait = min(wait*2, 10*time.Minute) {
-		if jid, err = b.Resolve(ctx, number); err == nil {
-			break
-		}
-		var in bot.InputError
-		if errors.As(err, &in) {
-			b.Log.Warn("webhook filter: chat isn't on WhatsApp, keeping it as typed", "chat", number, "err", err)
-			return
-		}
-		b.Log.Warn("webhook filter: chat lookup failed, retrying", "chat", number, "err", err, "retry_in", wait)
-		if bot.SleepUntil(ctx, time.Now().Add(wait)) != nil {
-			return
-		}
-	}
-	typed, _ := bot.ParseRecipient(number)
-	b.Webhook.SetChatIf(typed.String(), b.PhoneJID(jid).String())
-	b.Log.Info("webhook filter chat resolved", "chat", number, "jid", b.PhoneJID(jid).String())
 }
 
 // guardPublicAddr refuses a non-loopback listener unless tokens are required (an owner secret, or any

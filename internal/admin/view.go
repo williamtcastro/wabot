@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 	"time"
@@ -10,18 +11,19 @@ import (
 	"github.com/mdp/qrterminal/v3"
 
 	"github.com/williamtcastro/wame/internal/store"
+	"github.com/williamtcastro/wame/internal/termui"
 )
 
 var (
-	colAccent = lipgloss.Color("42")
-	colText   = lipgloss.Color("252")
-	colMuted  = lipgloss.Color("244")
-	colFaint  = lipgloss.Color("238")
-	colErr    = lipgloss.Color("203")
+	colAccent = termui.ColAccent
+	colText   = termui.ColText
+	colMuted  = termui.ColMuted
+	colFaint  = termui.ColFaint
+	colErr    = termui.ColErr
 	colWarn   = lipgloss.Color("214")
 	colInfo   = lipgloss.Color("39")
 	colPurple = lipgloss.Color("141")
-	colSel    = lipgloss.Color("236")
+	colSel    = termui.ColSel
 
 	styleDim    = lipgloss.NewStyle().Foreground(colMuted)
 	styleFaint  = lipgloss.NewStyle().Foreground(colFaint)
@@ -41,7 +43,31 @@ var (
 	scopeColors = map[string]lipgloss.Color{"read": colInfo, "send": colWarn, "admin": colErr}
 )
 
+// Widest a card of each kind gets on a wide terminal.
+const (
+	cardNarrow = 70
+	cardMedium = 90
+	cardWide   = 100
+	cardDetail = 130
+)
+
 func (m *model) bodyHeight() int { return max(m.height-5, 3) }
+
+func (m *model) cardWidth(w int) int { return min(m.width-2, w) }
+
+// errCard is what a tab shows when its data didn't load. For a server too old to have the route
+// (404), missing names it and the card asks for an update instead of showing the error.
+func (m *model) errCard(title string, err error, missing string) string {
+	body := errText(err)
+	if missing != "" && isNotFound(err) {
+		body = styleWarn.Render("This server doesn't have "+missing+" yet.") + "\n" +
+			styleDim.Render("Update wame on the server to use it.")
+	}
+	return indent(card(title, m.cardWidth(cardMedium), body), " ")
+}
+
+// errText renders an error, sanitized: its text often comes from the server.
+func errText(err error) string { return styleErr.Render(safe(err.Error())) }
 
 func (m *model) View() string {
 	if m.width == 0 {
@@ -63,6 +89,8 @@ func (m *model) View() string {
 		body = m.modal(styleDanger, m.viewConfirmRevoke())
 	case m.mode == modeConfirmRotate:
 		body = m.modal(styleModal, m.viewConfirmRotate())
+	case m.mode == modeConfirmCancelBatch:
+		body = m.modal(styleDanger, m.viewConfirmCancelBatch())
 	case m.tab == tabStatus:
 		body = m.viewStatus()
 	case m.tab == tabChats:
@@ -73,6 +101,8 @@ func (m *model) View() string {
 		body = m.viewAudit()
 	case m.tab == tabHealth:
 		body = m.viewHealth()
+	case m.tab == tabQueue:
+		body = m.viewQueue()
 	default:
 		body = m.viewSettings()
 	}
@@ -124,36 +154,44 @@ func (m *model) host() string {
 func (m *model) viewHeader() string {
 	parts := []string{" " + styleLogo.Render("◆ wame admin")}
 	for i, name := range tabNames {
-		label := fmt.Sprintf("%d %s", i+1, name)
+		var label strings.Builder
+		label.WriteString(fmt.Sprintf("%d %s", i+1, name))
 		switch tab(i) {
 		case tabChats:
 			if n := m.unreadChats(); n > 0 {
-				label += " " + styleAccent.Render(fmt.Sprint(n))
+				label.WriteString(" " + styleAccent.Render(fmt.Sprint(n)))
 			}
 		case tabTokens:
 			if n := m.activeTokens(); n > 0 {
-				label += " " + styleDim.Render(fmt.Sprint(n))
+				label.WriteString(" " + styleDim.Render(fmt.Sprint(n)))
 			}
 		case tabAudit:
 			if n := m.recentFailures(); n > 0 {
-				label += " " + styleErr.Render(fmt.Sprintf("✗%d", n))
+				label.WriteString(" " + styleErr.Render(fmt.Sprintf("✗%d", n)))
 			}
 		case tabHealth:
 			if m.healthWarning() {
-				label += " " + styleWarn.Render("!")
+				label.WriteString(" " + styleWarn.Render("!"))
+			}
+		case tabQueue:
+			switch q := m.stats.Queue; {
+			case q.Paused && q.Queued > 0:
+				label.WriteString(" " + styleWarn.Render(fmt.Sprintf("⏸%d", q.Queued)))
+			case q.Queued+q.Sending > 0:
+				label.WriteString(" " + styleAccent.Render(fmt.Sprint(q.Queued+q.Sending)))
 			}
 		case tabSettings:
 			for _, s := range m.settings {
 				if s.Overridden {
-					label += " " + styleWarn.Render("•")
+					label.WriteString(" " + styleWarn.Render("•"))
 					break
 				}
 			}
 		}
 		if tab(i) == m.tab {
-			parts = append(parts, styleTabOn.Render(label))
+			parts = append(parts, styleTabOn.Render(label.String()))
 		} else {
-			parts = append(parts, styleTab.Render(label))
+			parts = append(parts, styleTab.Render(label.String()))
 		}
 	}
 	left := strings.Join(parts, " ")
@@ -171,7 +209,7 @@ func (m *model) viewHeader() string {
 	}
 	host := ""
 	if m.c != nil {
-		host = styleDim.Render(cmpOr(m.profile, m.c.base.Host))
+		host = styleDim.Render(cmp.Or(m.profile, m.c.base.Host))
 	}
 	// Longest first; drop detail until it fits next to the tabs.
 	for _, items := range [][]string{
@@ -196,7 +234,8 @@ func (m *model) viewNotice() string {
 	case modeCompose:
 		return " " + styleAccent.Render("✎ "+m.chatName(m.msgsChat)) + " " + m.prompt.View()
 	case modeSetting:
-		return " " + styleAccent.Render("✎ "+settingLabels[m.editKey][0]) + " " + m.prompt.View()
+		label, _ := settingLabel(m.editKey)
+		return " " + styleAccent.Render("✎ "+safe(label)) + " " + m.prompt.View()
 	}
 	if m.notice == "" {
 		return ""
@@ -226,7 +265,7 @@ func (m *model) viewKeys() string {
 		keys = [][2]string{{"enter", "send"}, {"esc", "cancel"}}
 	case modeSetting:
 		keys = [][2]string{{"enter", "save"}, {"esc", "cancel"}}
-	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate:
+	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch:
 		keys = [][2]string{{"y", "confirm"}, {"any key", "cancel"}}
 	default:
 		switch m.tab {
@@ -246,8 +285,14 @@ func (m *model) viewKeys() string {
 			keys = [][2]string{{"j/k", "failure"}, {"t", "test webhook"}, {"R", "replay"}}
 		case tabSettings:
 			keys = [][2]string{{"j/k", "move"}, {"enter", "change"}, {"x", "reset"}}
+		case tabQueue:
+			pause := "pause"
+			if m.stats.Queue.Paused {
+				pause = "resume"
+			}
+			keys = [][2]string{{"j/k", "move"}, {"f", "filter"}, {"x", "cancel"}, {"X", "cancel batch"}, {"P", pause}}
 		}
-		keys = append(keys, [2]string{"1-6", "tabs"})
+		keys = append(keys, [2]string{fmt.Sprintf("1-%d", len(tabNames)), "tabs"})
 		if len(m.opts.Profiles) > 0 {
 			keys = append(keys, [2]string{"S", "servers"})
 		}
@@ -287,8 +332,8 @@ func (m *model) viewStatus() string {
 		return ""
 	}
 	if m.statusErr != nil && m.checked.IsZero() || m.statusErr != nil && m.status.State == "" {
-		return indent(card("Can't reach the server", min(m.width-2, 90),
-			styleErr.Render(m.statusErr.Error())+"\n\n"+
+		return indent(card("Can't reach the server", m.cardWidth(cardMedium),
+			errText(m.statusErr)+"\n\n"+
 				styleDim.Render("Check the URL and token. Retrying every few seconds.")), " ")
 	}
 	if m.checked.IsZero() {
@@ -316,13 +361,13 @@ func (m *model) viewStatus() string {
 	})}
 	liveState := styleDim.Render("○ polling every " + m.pollEvery().String())
 	if m.live.on {
-		liveState = styleAccent.Render("● live") + styleDim.Render(" since "+m.live.since.Format("15:04"))
+		liveState = styleAccent.Render("● live") + styleDim.Render(" since "+stamp(m.live.since, "15:04"))
 	} else if m.live.err != nil {
-		liveState += styleDim.Render(" (" + fit(m.live.err.Error(), 30) + ")")
+		liveState += styleDim.Render(" (" + fit(safe(m.live.err.Error()), 30) + ")")
 	}
 	version := styleDim.Render("?")
 	if m.stats.Version != "" {
-		version = m.stats.Version + styleDim.Render(", up "+strings.TrimSuffix(relTime(m.stats.Started), " ago"))
+		version = safe(m.stats.Version) + styleDim.Render(", up "+strings.TrimSuffix(relTime(m.stats.Started), " ago"))
 	}
 	server := panel{"Server", kv([][2]string{
 		{"URL", m.c.Server()},
@@ -389,7 +434,7 @@ func (m *model) healthWarning() bool {
 
 func (m *model) healthSummary() string {
 	switch {
-	case m.statsUnsupported():
+	case isNotFound(m.statsErr):
 		return styleDim.Render("Update wame on the server for limiter\nand webhook health.")
 	case m.statsAt.IsZero():
 		return styleDim.Render("loading…")
@@ -439,7 +484,7 @@ func tokenLive(t store.Token) bool {
 
 func (m *model) tokenSummary() string {
 	if m.tokensErr != nil {
-		return styleErr.Render(m.tokensErr.Error())
+		return errText(m.tokensErr)
 	}
 	var expiring, revoked, idle int
 	for _, t := range m.tokens {
@@ -480,7 +525,7 @@ func (m *model) recentFailures() int {
 
 func (m *model) activitySummary() string {
 	if m.auditErr != nil && len(m.audit) == 0 {
-		return styleErr.Render(m.auditErr.Error())
+		return errText(m.auditErr)
 	}
 	since := time.Now().Add(-24 * time.Hour)
 	var total int
@@ -508,7 +553,7 @@ func (m *model) activitySummary() string {
 func scopeBadges(scopes []string) string {
 	parts := make([]string, len(scopes))
 	for i, s := range scopes {
-		parts[i] = lipgloss.NewStyle().Foreground(scopeColors[s]).Render(s)
+		parts[i] = lipgloss.NewStyle().Foreground(scopeColors[s]).Render(safe(s))
 	}
 	return strings.Join(parts, " ")
 }
@@ -530,67 +575,66 @@ func (m *model) selectedRow(line string) string {
 	return " " + styleAccent.Render("▌") + " " + lipgloss.NewStyle().Background(colSel).Width(m.width-3).Render(ansi.Truncate(line, m.width-3, "…"))
 }
 
+var tokenCols = []int{18, 15, 8, 8, 10, 12, 7, 7, 4}
+
 func (m *model) viewTokens() string {
 	if m.tokensErr != nil {
-		return indent(card("Tokens", min(m.width-2, 90), styleErr.Render(m.tokensErr.Error())), " ")
+		return m.errCard("Tokens", m.tokensErr, "")
 	}
 	if len(m.tokens) == 0 {
-		return indent(card("No tokens yet", min(m.width-2, 70),
+		return indent(card("No tokens yet", m.cardWidth(cardNarrow),
 			styleDim.Render("Press n to create one for an agent, bot or script.\nEach gets its own scopes, chats, rate and expiry.")), " ")
 	}
-	cols := []int{18, 15, 8, 8, 10, 12, 7, 7, 4}
 	detail := m.tokenDetail()
-	lines := []string{"   " + styleHead.Render(table(cols, "NAME", "SCOPES", "CHATS", "RATE", "EXPIRES", "LAST USED", "REQ/24H", "SENT", "LIVE", "CREATED BY"))}
+	lines := []string{"   " + styleHead.Render(table(tokenCols, "NAME", "SCOPES", "CHATS", "RATE", "EXPIRES", "LAST USED", "REQ/24H", "SENT", "LIVE", "CREATED BY"))}
 	start, end := window(m.tokSel, len(m.tokens), m.bodyHeight()-2-lipgloss.Height(detail))
 	for i := start; i < end; i++ {
-		t := m.tokens[i]
-		chats := "all"
-		if len(t.Chats) > 0 {
-			chats = plural(len(t.Chats), "chat")
-		}
-		rate := "global"
-		if t.Rate > 0 {
-			rate = fmt.Sprintf("%d/min", t.Rate)
-		}
-		expires := "never"
-		switch {
-		case t.Revoked:
-			expires = styleErr.Render("revoked")
-		case !t.Expires.IsZero() && !tokenLive(t):
-			expires = styleErr.Render("expired")
-		case !t.Expires.IsZero() && time.Until(t.Expires) < 7*24*time.Hour:
-			expires = styleWarn.Render(relTime(t.Expires))
-		case !t.Expires.IsZero():
-			expires = relTime(t.Expires)
-		}
-		lastUsed := styleDim.Render("never")
-		if !t.LastUsed.IsZero() {
-			lastUsed = relTime(t.LastUsed)
-		}
-		if unused(t) {
-			lastUsed = styleWarn.Render(ansi.Strip(lastUsed) + " ⚠")
-		}
-		name, scopes := t.Name, scopeBadges(t.Scopes)
-		if !tokenLive(t) {
-			name, scopes = styleDim.Strikethrough(true).Render(name), styleDim.Render(strings.Join(t.Scopes, " "))
-		}
-		reqs, sent, live := styleFaint.Render("–"), styleFaint.Render("–"), styleFaint.Render("–")
-		if calls, sends, failed, streams, ok := m.callerUsage(t.Name); ok {
-			reqs, sent = usageCell(calls, 1000), usageCell(sends, 0)
-			if failed > 0 {
-				sent += styleErr.Render(fmt.Sprintf("/%d✗", failed))
-			}
-			live = usageCell(int64(streams), 0)
-		}
-		line := table(cols, name, scopes, chats, rate, expires, lastUsed, reqs, sent, live, styleDim.Render(cmpOr(t.CreatedBy, "owner")))
-		if i == m.tokSel {
-			lines = append(lines, m.selectedRow(line))
-		} else {
-			lines = append(lines, "   "+line)
-		}
+		lines = append(lines, m.row(m.tokenRow(m.tokens[i]), i == m.tokSel))
 	}
 	lines = append(lines, "", indent(detail, " "))
 	return strings.Join(lines, "\n")
+}
+
+func (m *model) tokenRow(t store.Token) string {
+	chats := "all"
+	if len(t.Chats) > 0 {
+		chats = plural(len(t.Chats), "chat")
+	}
+	rate := "global"
+	if t.Rate > 0 {
+		rate = fmt.Sprintf("%d/min", t.Rate)
+	}
+	expires := "never"
+	switch {
+	case t.Revoked:
+		expires = styleErr.Render("revoked")
+	case !t.Expires.IsZero() && !tokenLive(t):
+		expires = styleErr.Render("expired")
+	case !t.Expires.IsZero() && time.Until(t.Expires) < 7*24*time.Hour:
+		expires = styleWarn.Render(relTime(t.Expires))
+	case !t.Expires.IsZero():
+		expires = relTime(t.Expires)
+	}
+	lastUsed := styleDim.Render("never")
+	if !t.LastUsed.IsZero() {
+		lastUsed = relTime(t.LastUsed)
+	}
+	if unused(t) {
+		lastUsed = styleWarn.Render(ansi.Strip(lastUsed) + " ⚠")
+	}
+	name, scopes := safe(t.Name), scopeBadges(t.Scopes)
+	if !tokenLive(t) {
+		name, scopes = styleDim.Strikethrough(true).Render(name), styleDim.Render(safe(strings.Join(t.Scopes, " ")))
+	}
+	reqs, sent, live := styleFaint.Render("–"), styleFaint.Render("–"), styleFaint.Render("–")
+	if calls, sends, failed, streams, ok := m.callerUsage(t.Name); ok {
+		reqs, sent = usageCell(calls, 1000), usageCell(sends, 0)
+		if failed > 0 {
+			sent += styleErr.Render(fmt.Sprintf("/%d✗", failed))
+		}
+		live = usageCell(int64(streams), 0)
+	}
+	return table(tokenCols, name, scopes, chats, rate, expires, lastUsed, reqs, sent, live, styleDim.Render(safe(cmp.Or(t.CreatedBy, "owner"))))
 }
 
 func (m *model) tokenDetail() string {
@@ -602,15 +646,15 @@ func (m *model) tokenDetail() string {
 	if len(t.Chats) > 0 {
 		names := make([]string, len(t.Chats))
 		for i, c := range t.Chats {
-			names[i] = displayJID(c)
+			names[i] = displayJID(safe(c))
 		}
 		chats = strings.Join(names, ", ")
 	}
 	expires := "never"
 	if !t.Expires.IsZero() {
-		expires = t.Expires.Format("2006-01-02 15:04") + styleDim.Render(" ("+relTime(t.Expires)+")")
+		expires = stamp(t.Expires, "2006-01-02 15:04") + styleDim.Render(" ("+relTime(t.Expires)+")")
 	}
-	created := t.Created.Format("2006-01-02 15:04") + styleDim.Render(" by "+cmpOr(t.CreatedBy, "the owner"))
+	created := stamp(t.Created, "2006-01-02 15:04") + styleDim.Render(" by "+safe(cmp.Or(t.CreatedBy, "the owner")))
 	state := styleAccent.Render("● active")
 	switch {
 	case t.Revoked:
@@ -634,13 +678,13 @@ func (m *model) tokenDetail() string {
 	seen := styleDim.Render("not since the server started")
 	for _, c := range m.stats.Callers {
 		if c.Name == t.Name && !c.LastSeen.IsZero() {
-			seen = relTime(c.LastSeen) + styleDim.Render(" from "+cmpOr(c.LastIP, "?"))
+			seen = relTime(c.LastSeen) + styleDim.Render(" from "+safe(cmp.Or(c.LastIP, "?")))
 		}
 	}
-	left := kv([][2]string{{"ID", styleDim.Render(t.ID)}, {"State", state}, {"Scopes", scopeBadges(t.Scopes)}, {"Chats", chats}, {"Activity", activity}})
-	right := kv([][2]string{{"Created", created}, {"Expires", expires}, {"Rate", cmpOr(rateText(t.Rate), "global limit only")}, {"Last seen", seen}})
-	w := min(m.width-2, 130)
-	return card(t.Name, w, lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width((w-4)/2).Render(left), right))
+	left := kv([][2]string{{"ID", styleDim.Render(safe(t.ID))}, {"State", state}, {"Scopes", scopeBadges(t.Scopes)}, {"Chats", chats}, {"Activity", activity}})
+	right := kv([][2]string{{"Created", created}, {"Expires", expires}, {"Rate", cmp.Or(rateText(t.Rate), "global limit only")}, {"Last seen", seen}})
+	w := m.cardWidth(cardDetail)
+	return card(safe(t.Name), w, lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width((w-4)/2).Render(left), right))
 }
 
 func rateText(n int) string {
@@ -664,15 +708,15 @@ func actionStyle(action string) lipgloss.Style {
 
 func (m *model) viewAudit() string {
 	if m.auditErr != nil && len(m.audit) == 0 {
-		return indent(card("Audit log", min(m.width-2, 90), styleErr.Render(m.auditErr.Error())), " ")
+		return m.errCard("Audit log", m.auditErr, "")
 	}
 	entries := m.visibleAudit()
 	if len(entries) == 0 {
 		msg := "The audit log is empty."
 		if m.auditQuery != "" {
-			msg = fmt.Sprintf("Nothing matches %q in the loaded entries. Esc clears the filter.", m.auditQuery)
+			msg = fmt.Sprintf("Nothing matches %q in the loaded entries. Esc clears the filter.", safe(m.auditQuery))
 		}
-		return indent(card("Audit log", min(m.width-2, 90), styleDim.Render(msg)), " ")
+		return indent(card("Audit log", m.cardWidth(cardMedium), styleDim.Render(msg)), " ")
 	}
 	cols := []int{2, 13, 16, 13, 22}
 	detail := m.auditDetail(entries)
@@ -685,15 +729,11 @@ func (m *model) viewAudit() string {
 			icon, detail = styleErr.Render("✗"), styleErr.Render(strings.Join(nonEmpty(e.Detail, e.Error), " · "))
 		}
 		line := table(cols, icon, styleDim.Render(when(e.At)), e.Actor, actionStyle(e.Action).Render(e.Action), displayJID(e.Target), detail)
-		if i == m.auditSel {
-			lines = append(lines, m.selectedRow(line))
-		} else {
-			lines = append(lines, "   "+line)
-		}
+		lines = append(lines, m.row(line, i == m.auditSel))
 	}
 	footer := fmt.Sprintf("%d of %d loaded", len(entries), len(m.audit))
 	if m.auditQuery != "" {
-		footer += fmt.Sprintf(" · filtered by %q (esc clears)", m.auditQuery)
+		footer += fmt.Sprintf(" · filtered by %q (esc clears)", safe(m.auditQuery))
 	}
 	switch {
 	case m.auditBusy:
@@ -715,13 +755,13 @@ func (m *model) auditDetail(entries []store.AuditEntry) string {
 		result = styleErr.Render("✗ " + e.Error)
 	}
 	rows := [][2]string{
-		{"When", e.At.Format("2006-01-02 15:04:05") + styleDim.Render(" ("+relTime(e.At)+")")},
+		{"When", stamp(e.At, "2006-01-02 15:04:05") + styleDim.Render(" ("+relTime(e.At)+")")},
 		{"Who", e.Actor},
-		{"Target", cmpOr(displayJID(e.Target), styleDim.Render("none"))},
-		{"Detail", cmpOr(e.Detail, styleDim.Render("none"))},
+		{"Target", cmp.Or(displayJID(e.Target), styleDim.Render("none"))},
+		{"Detail", cmp.Or(e.Detail, styleDim.Render("none"))},
 		{"Result", result},
 	}
-	return card(fmt.Sprintf("#%d %s", e.ID, e.Action), min(m.width-2, 130), kv(rows))
+	return card(fmt.Sprintf("#%d %s", e.ID, e.Action), m.cardWidth(cardDetail), kv(rows))
 }
 
 func (m *model) viewServers() string {
@@ -789,27 +829,21 @@ func (m *model) viewConfirmLogout() string {
 }
 
 func (m *model) viewConfirmRevoke() string {
-	if m.tokSel >= len(m.tokens) {
-		return ""
-	}
-	t := m.tokens[m.tokSel]
-	return styleErr.Render("Revoke "+t.Name+"?") + "\n\n" +
+	t := m.confirmTok
+	return styleErr.Render("Revoke "+safe(t.Name)+"?") + "\n\n" +
 		"It stops working at once, with every token it created.\nOpen streams close within 10 s. This can't be undone.\n\n" +
 		styleKey.Render("y") + " revoke   " + styleKey.Render("any key") + " cancel"
 }
 
 func (m *model) viewConfirmRotate() string {
-	if m.tokSel >= len(m.tokens) {
-		return ""
-	}
-	t := m.tokens[m.tokSel]
+	t := m.confirmTok
 	r := rotationRequest(t, m.tokens)
 	life := "never expires"
 	if r.ExpiresIn != "" {
 		life = "expires in " + r.ExpiresIn
 	}
-	return styleBold.Render("Rotate "+t.Name+"?") + "\n\n" +
-		"Creates " + styleBold.Render(r.Name) + " with the same scopes, chats and rate\n(" + life + "), shows it once, then revokes " + t.Name + "\nand every token it created.\n\n" +
+	return styleBold.Render("Rotate "+safe(t.Name)+"?") + "\n\n" +
+		"Creates " + styleBold.Render(safe(r.Name)) + " with the same scopes, chats and rate\n(" + life + "), shows it once, then revokes " + safe(t.Name) + "\nand every token it created.\n\n" +
 		styleKey.Render("y") + " rotate   " + styleKey.Render("any key") + " cancel"
 }
 
@@ -855,19 +889,12 @@ func nonEmpty(parts ...string) []string {
 	return out
 }
 
-func cmpOr(s, def string) string {
-	if s == "" {
-		return def
-	}
-	return s
-}
-
 // when is a compact timestamp: the time today, the weekday this week, the date otherwise.
 func when(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
-	now := time.Now()
+	t, now := t.Local(), time.Now()
 	switch {
 	case t.YearDay() == now.YearDay() && t.Year() == now.Year():
 		return t.Format("15:04")
@@ -876,6 +903,9 @@ func when(t time.Time) string {
 	}
 	return t.Format("Jan 02")
 }
+
+// stamp formats a time from the server in the local zone; JSON keeps the server's (often UTC).
+func stamp(t time.Time, layout string) string { return t.Local().Format(layout) }
 
 func displayJID(jid string) string {
 	if strings.HasSuffix(jid, "@s.whatsapp.net") {
@@ -907,9 +937,4 @@ func relTime(t time.Time) string {
 	return s + " ago"
 }
 
-func userOf(jid string) string {
-	user, _, _ := strings.Cut(jid, "@")
-	user, _, _ = strings.Cut(user, ":")
-	user, _, _ = strings.Cut(user, ".")
-	return user
-}
+func userOf(jid string) string { return termui.UserOf(jid) }

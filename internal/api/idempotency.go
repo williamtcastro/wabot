@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
-	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -16,7 +16,7 @@ import (
 
 const idemTTL = 24 * time.Hour
 
-var errConflict = errors.New("idempotency key was already used for a different request")
+var errConflict = bot.ErrKeyReused
 
 func fingerprint(parts ...string) string {
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
@@ -43,8 +43,8 @@ func (s *idempotency) do(ctx context.Context, scope, key, fp string, fn func() (
 	if key == "" {
 		return fn()
 	}
-	if len(key) > 200 {
-		return store.Message{}, bot.BadInput("idempotency key is longer than 200 characters")
+	if len(key) > bot.MaxKeyLength {
+		return store.Message{}, bot.BadInput("idempotency key is longer than %d characters", bot.MaxKeyLength)
 	}
 	key = scope + ":" + key
 	s.mu.Lock()
@@ -73,7 +73,8 @@ func (s *idempotency) do(ctx context.Context, scope, key, fp string, fn func() (
 
 	defer func() {
 		if r := recover(); r != nil {
-			e.err = fmt.Errorf("internal error: %v", r)
+			slog.Error("api: panic in send", "panic", r, "stack", string(debug.Stack()))
+			e.err = errInternal
 		}
 		if e.err != nil {
 			s.mu.Lock()

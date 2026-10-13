@@ -3,6 +3,7 @@ package api
 
 import (
 	"cmp"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -25,10 +26,12 @@ import (
 )
 
 const (
-	maxUpload   = 64 << 20
 	maxPollWait = 120 * time.Second
 	maxPageSize = 1000
 )
+
+// maxUpload is the largest file POST /send/file accepts (a variable so tests can lower it).
+var maxUpload int64 = 64 << 20
 
 const docsPage = `<!doctype html>
 <html><head><meta charset="utf-8"><title>wame API</title>
@@ -46,11 +49,20 @@ type server struct {
 	version string
 	idem    idempotency
 	streams streams
+	closing context.Context
+}
+
+// Handler is the API. StopStreams ends open /events and /messages/wait connections, which
+// http.Server.Shutdown doesn't; register it with RegisterOnShutdown.
+type Handler struct {
+	http.Handler
+	StopStreams func()
 }
 
 // NewHandler serves the API. Every route requires a scope; see docs/API.md for the table.
-func NewHandler(b *bot.Bot, authn *auth.Authenticator, version string) http.Handler {
-	a := &server{b: b, version: version, idem: idempotency{entries: map[string]*idemEntry{}}}
+func NewHandler(b *bot.Bot, authn *auth.Authenticator, version string) *Handler {
+	closing, stop := context.WithCancel(context.Background())
+	a := &server{b: b, version: version, idem: idempotency{entries: map[string]*idemEntry{}}, closing: closing}
 	mux := http.NewServeMux()
 	read, send, admin := auth.Read, auth.Send, auth.Admin
 
@@ -68,6 +80,12 @@ func NewHandler(b *bot.Bot, authn *auth.Authenticator, version string) http.Hand
 	mux.HandleFunc("POST /delete", need(send, a.delete))
 	mux.HandleFunc("POST /read", need(send, a.read))
 	mux.HandleFunc("POST /typing", need(send, a.typing))
+
+	mux.HandleFunc("POST /queue", need(send, a.enqueue))
+	mux.HandleFunc("GET /queue", need(send, a.listQueue))
+	mux.HandleFunc("DELETE /queue", need(send, a.cancelBatch))
+	mux.HandleFunc("GET /queue/{id}", need(send, a.getQueued))
+	mux.HandleFunc("DELETE /queue/{id}", need(send, a.cancelQueued))
 
 	mux.HandleFunc("GET /messages", need(read, a.messages))
 	mux.HandleFunc("GET /messages/wait", need(read, a.wait))
@@ -101,7 +119,7 @@ func NewHandler(b *bot.Bot, authn *auth.Authenticator, version string) http.Hand
 		w.Header().Set("Content-Type", "application/yaml")
 		_, _ = w.Write(docs.OpenAPI)
 	})
-	return withRequestLog(b.Log, root)
+	return &Handler{Handler: withRequestLog(b.Log, root), StopStreams: stop}
 }
 
 func (a *server) qr(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +129,7 @@ func (a *server) qr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	code, err := qr.Encode(s.QR, qr.M)
+	a.b.Audit(principal(r).Name, "qr", "", "", err)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -152,12 +171,15 @@ func (a *server) sendText(w http.ResponseWriter, r *http.Request) {
 		writeError(w, bot.BadInput("'to' and 'text' are required"))
 		return
 	}
-	to, ok := a.sendGuard(w, r, req.To)
+	to, ok := a.authorizeChat(w, r, req.To)
 	if !ok {
 		return
 	}
 	key := cmp.Or(r.Header.Get("Idempotency-Key"), req.IdempotencyKey)
-	m, err := a.idem.do(r.Context(), principal(r).Name+":send", key, fingerprint(req.To, req.Text, req.ReplyTo), func() (store.Message, error) {
+	m, err := a.idem.do(r.Context(), principal(r).Name+":send", key, fingerprint(to, req.Text, req.ReplyTo), func() (store.Message, error) {
+		if err := a.throttle(r); err != nil {
+			return store.Message{}, err
+		}
 		return a.b.SendText(r.Context(), principal(r).Name, to, req.Text, bot.SendOptions{ReplyTo: req.ReplyTo})
 	})
 	respond(w, m, err)
@@ -166,6 +188,10 @@ func (a *server) sendText(w http.ResponseWriter, r *http.Request) {
 func (a *server) sendFile(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxUpload+1<<20)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			uploadTooLarge(w)
+			return
+		}
 		writeError(w, bot.BadInput("invalid multipart form: %v", err))
 		return
 	}
@@ -175,30 +201,41 @@ func (a *server) sendFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, maxUpload+1))
-	if err != nil {
-		writeError(w, bot.BadInput("read upload: %v", err))
-		return
-	}
-	if len(data) > maxUpload {
-		writeError(w, bot.BadInput("file is larger than %d MB", maxUpload>>20))
-		return
-	}
 	to := r.FormValue("to")
 	if to == "" {
 		writeError(w, bot.BadInput("'to' is required"))
 		return
 	}
-	to, ok := a.sendGuard(w, r, to)
+	to, ok := a.authorizeChat(w, r, to)
 	if !ok {
+		return
+	}
+	if hdr.Size > maxUpload {
+		uploadTooLarge(w)
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxUpload+1))
+	if err != nil {
+		writeError(w, bot.BadInput("read upload: %v", err))
+		return
+	}
+	if int64(len(data)) > maxUpload {
+		uploadTooLarge(w)
 		return
 	}
 	key := cmp.Or(r.Header.Get("Idempotency-Key"), r.FormValue("idempotency_key"))
 	sum := sha256.Sum256(data)
 	m, err := a.idem.do(r.Context(), principal(r).Name+":file", key, fingerprint(to, hdr.Filename, r.FormValue("caption"), r.FormValue("reply_to"), string(sum[:])), func() (store.Message, error) {
+		if err := a.throttle(r); err != nil {
+			return store.Message{}, err
+		}
 		return a.b.SendFile(r.Context(), principal(r).Name, to, data, hdr.Filename, r.FormValue("caption"), bot.SendOptions{ReplyTo: r.FormValue("reply_to")})
 	})
 	respond(w, m, err)
+}
+
+func uploadTooLarge(w http.ResponseWriter) {
+	writeErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("file is larger than %d MB", maxUpload>>20))
 }
 
 type targetReq struct {
@@ -219,9 +256,16 @@ func (a *server) target(w http.ResponseWriter, r *http.Request) (targetReq, bool
 		writeError(w, bot.BadInput("'chat' is required"))
 		return req, false
 	}
-	chat, ok := a.sendGuard(w, r, req.Chat)
+	chat, ok := a.authorizeChat(w, r, req.Chat)
+	if !ok {
+		return req, false
+	}
+	if err := a.throttle(r); err != nil {
+		writeError(w, err)
+		return req, false
+	}
 	req.Chat = chat
-	return req, ok
+	return req, true
 }
 
 func (a *server) react(w http.ResponseWriter, r *http.Request) {
@@ -294,8 +338,19 @@ func (a *server) messages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cursor := r.URL.Query().Has("since")
-	writeJSON(w, 200, a.b.Store.Query(f, intParam(r, "limit", 50, maxPageSize), cursor))
+	msgs, err := a.b.Store.Query(f, intParam(r, "limit", 50, maxPageSize), r.URL.Query().Has("since"))
+	respond(w, msgs, err)
+}
+
+// startAtLatest points f at the newest stored message, so only later ones match.
+func (a *server) startAtLatest(w http.ResponseWriter, f *store.Filter) bool {
+	seq, err := a.b.Store.LastSeq()
+	if err != nil {
+		writeError(w, err)
+		return false
+	}
+	f.Since = seq
+	return true
 }
 
 func (a *server) wait(w http.ResponseWriter, r *http.Request) {
@@ -303,15 +358,15 @@ func (a *server) wait(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !r.URL.Query().Has("since") {
-		f.Since = a.b.Store.LastSeq()
+	if !r.URL.Query().Has("since") && !a.startAtLatest(w, &f) {
+		return
 	}
 	limit := intParam(r, "limit", 100, maxPageSize)
 	timeout := time.Duration(intParam(r, "timeout", 30, int(maxPollWait/time.Second))) * time.Second
 	p := principal(r)
 	release, ok := a.streams.acquire(p)
 	if !ok {
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": errTooManyStreams.Error()})
+		writeErr(w, http.StatusTooManyRequests, errTooManyStreams.Error())
 		return
 	}
 	defer release()
@@ -322,15 +377,24 @@ func (a *server) wait(w http.ResponseWriter, r *http.Request) {
 	defer timer.Stop()
 	for {
 		if !a.stillValid(p) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "token revoked or expired"})
+			writeErr(w, http.StatusUnauthorized, "token revoked or expired")
 			return
 		}
-		if msgs := a.b.Store.Query(f, limit, true); len(msgs) > 0 {
+		msgs, err := a.b.Store.Query(f, limit, true)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if len(msgs) > 0 {
 			writeJSON(w, 200, map[string]any{"messages": msgs, "next_since": msgs[len(msgs)-1].Seq})
 			return
 		}
 		select {
 		case <-r.Context().Done():
+			return
+		case <-a.closing.Done():
+			// Shutting down: answer like a timeout, so the client polls again.
+			writeJSON(w, 200, map[string]any{"messages": []store.Message{}, "next_since": f.Since})
 			return
 		case <-timer.C:
 			writeJSON(w, 200, map[string]any{"messages": []store.Message{}, "next_since": f.Since})
@@ -350,13 +414,13 @@ func (a *server) events(w http.ResponseWriter, r *http.Request) {
 	// An EventSource reconnects to the same URL with Last-Event-ID, which must win over ?since=.
 	if last, err := strconv.ParseInt(r.Header.Get("Last-Event-ID"), 10, 64); err == nil && last >= 0 {
 		f.Since = last
-	} else if !q.Has("since") {
-		f.Since = a.b.Store.LastSeq()
+	} else if !q.Has("since") && !a.startAtLatest(w, &f) {
+		return
 	}
 	want := map[string]bool{"message": true, "update": true, "status": true}
 	if v := q.Get("events"); v != "" {
 		want = map[string]bool{}
-		for _, e := range strings.Split(v, ",") {
+		for e := range strings.SplitSeq(v, ",") {
 			want[strings.TrimSpace(e)] = true
 		}
 	}
@@ -364,7 +428,7 @@ func (a *server) events(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	release, ok := a.streams.acquire(p)
 	if !ok {
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": errTooManyStreams.Error()})
+		writeErr(w, http.StatusTooManyRequests, errTooManyStreams.Error())
 		return
 	}
 	defer release()
@@ -382,22 +446,31 @@ func (a *server) events(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
 	}
-	catchUp := func() {
+	// catchUp sends every stored match after f.Since; false ends the stream (the database failed).
+	catchUp := func() bool {
 		if !want["message"] {
-			return
+			return true
 		}
-		for {
-			msgs := a.b.Store.Query(f, 500, true)
+		for r.Context().Err() == nil {
+			msgs, err := a.b.Store.Query(f, 500, true)
+			if err != nil {
+				a.b.Log.Error("events: read messages", "err", err)
+				return false
+			}
 			for _, m := range msgs {
 				send("message", strconv.FormatInt(m.Seq, 10), m)
 				f.Since = m.Seq
 			}
+			_ = rc.Flush()
 			if len(msgs) < 500 {
-				return
+				return true
 			}
 		}
+		return false
 	}
-	catchUp()
+	if !catchUp() {
+		return
+	}
 	_ = rc.Flush()
 
 	unfiltered := f
@@ -409,6 +482,8 @@ func (a *server) events(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-a.closing.Done():
 			return
 		case <-recheck.C:
 			if !a.stillValid(p) {
@@ -423,7 +498,9 @@ func (a *server) events(w http.ResponseWriter, r *http.Request) {
 			}
 			switch v := v.(type) {
 			case store.Message, store.ChatsChanged:
-				catchUp()
+				if !catchUp() {
+					return
+				}
 			case store.MessageUpdate:
 				if want["update"] && unfiltered.Match(v.Message) {
 					send("update", "", v.Message)
@@ -431,6 +508,10 @@ func (a *server) events(w http.ResponseWriter, r *http.Request) {
 			case bot.Status:
 				if want["status"] {
 					send("status", "", visibleStatus(p, v))
+				}
+			case bot.QueueEvent:
+				if want["queue"] && (p.Has(auth.Admin) || v.Item.Actor == p.Name) {
+					send("queue", "", v.Item)
 				}
 			}
 		}
@@ -451,9 +532,8 @@ func (a *server) media(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	data, m, err := a.b.DownloadMedia(r.Context(), seq)
-	var dl whatsmeow.DownloadHTTPError
-	if errors.As(err, &dl) && dl.Response != nil && slices.Contains([]int{403, 404, 410}, dl.Response.StatusCode) {
-		writeJSON(w, http.StatusGone, map[string]string{"error": "media expired on WhatsApp's servers"})
+	if dl, ok := errors.AsType[whatsmeow.DownloadHTTPError](err); ok && dl.Response != nil && slices.Contains([]int{403, 404, 410}, dl.Response.StatusCode) {
+		writeErr(w, http.StatusGone, "media expired on WhatsApp's servers")
 		return
 	}
 	if err != nil {
@@ -486,12 +566,21 @@ func inlineSafe(mimetype string) bool {
 }
 
 func (a *server) chats(w http.ResponseWriter, r *http.Request) {
-	chats, err := a.b.Chats(r.Context(), intParam(r, "limit", 50, maxPageSize))
-	if p := principal(r); err == nil && p.Restricted() {
-		allowed := a.b.ExpandAllowlist(r.Context(), p.Chats)
-		chats = slices.DeleteFunc(chats, func(c store.Chat) bool { return !slices.Contains(allowed, c.JID) })
+	limit := intParam(r, "limit", 50, maxPageSize)
+	p := principal(r)
+	if !p.Restricted() {
+		chats, err := a.b.Chats(r.Context(), limit)
+		respond(w, chats, err)
+		return
 	}
-	respond(w, chats, err)
+	chats, err := a.b.Chats(r.Context(), maxPageSize)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	allowed := a.b.ExpandAllowlist(r.Context(), p.Chats)
+	chats = slices.DeleteFunc(chats, func(c store.Chat) bool { return !slices.Contains(allowed, c.JID) })
+	writeJSON(w, 200, chats[:min(len(chats), limit)])
 }
 
 func (a *server) contacts(w http.ResponseWriter, r *http.Request) {
@@ -529,6 +618,7 @@ func (a *server) check(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, err := a.b.Check(r.Context(), req.Phones)
+	a.b.Audit(principal(r).Name, "check", "", fmt.Sprintf("%d numbers", len(req.Phones)), err)
 	respond(w, out, err)
 }
 
@@ -545,6 +635,7 @@ type Stats struct {
 	AutoReply bool              `json:"auto_reply"`
 	Limits    StatsLimits       `json:"limits"`
 	Webhook   *bot.WebhookStats `json:"webhook"`
+	Queue     bot.QueueStats    `json:"queue"`
 	Callers   []CallerStats     `json:"callers"`
 }
 
@@ -564,6 +655,7 @@ func (a *server) stats(w http.ResponseWriter, r *http.Request) {
 	out := Stats{
 		Version: a.version, Started: a.b.Started, AutoReply: a.b.AutoReplyOn(),
 		Limits: StatsLimits{Send: a.b.Limiter.Stats(), Lookups: a.b.Lookups.Stats(), AutoReply: a.b.AutoReplyStats()},
+		Queue:  a.b.QueueStats(),
 	}
 	if a.b.Webhook != nil {
 		s := a.b.Webhook.Stats()

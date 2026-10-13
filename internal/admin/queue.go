@@ -1,0 +1,183 @@
+package admin
+
+import (
+	"cmp"
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/store"
+	"github.com/williamtcastro/wame/internal/termui"
+)
+
+const (
+	queueLimit    = 200
+	queueDebounce = time.Second
+)
+
+type (
+	queueMsg struct {
+		page QueuePage
+		err  error
+	}
+	queueReloadMsg struct{}
+)
+
+// queueChanged reloads the queue and stats once per queueDebounce however many queue events arrive:
+// a large batch sends two per message.
+func (m *model) queueChanged() tea.Cmd {
+	return m.queueReload.Schedule(queueDebounce, queueReloadMsg{})
+}
+
+func (m *model) reloadQueue() tea.Cmd {
+	m.queueReload.Done()
+	if m.tab != tabQueue {
+		return m.loadStats()
+	}
+	return tea.Batch(m.loadQueue(), m.loadStats())
+}
+
+// queueFilters is the order f cycles through on the Queue tab; "" shows every state.
+var queueFilters = append([]string{""}, store.OutboxStates...)
+
+func (m *model) loadQueue() tea.Cmd {
+	status := m.queueStatus
+	return m.call(func(ctx context.Context, c *Client) tea.Msg {
+		p, err := c.Queue(ctx, status, queueLimit)
+		return queueMsg{p, err}
+	})
+}
+
+func (m *model) applyQueue(msg queueMsg) {
+	m.queueErr = msg.err
+	if msg.err == nil {
+		m.queue = msg.page
+		m.queueSel = clamp(m.queueSel, len(m.queue.Items))
+	}
+}
+
+func (m *model) selectedQueued() (store.OutboxItem, bool) {
+	if m.queueSel < len(m.queue.Items) {
+		return m.queue.Items[m.queueSel], true
+	}
+	return store.OutboxItem{}, false
+}
+
+func (m *model) cancelQueued(id int64, batch, what string) tea.Cmd {
+	return m.call(func(ctx context.Context, c *Client) tea.Msg {
+		n, err := c.CancelQueued(ctx, id, batch)
+		return doneMsg{"canceled " + plural(n, "queued message") + " (" + what + ")", err}
+	})
+}
+
+func (m *model) queueKey(k string) tea.Cmd {
+	if sel, ok := termui.ListMove(k, m.queueSel, len(m.queue.Items), m.bodyHeight()/2); ok {
+		m.queueSel = sel
+		return nil
+	}
+	it, ok := m.selectedQueued()
+	switch k {
+	case "f":
+		for i, s := range queueFilters {
+			if s == m.queueStatus {
+				m.queueStatus = queueFilters[(i+1)%len(queueFilters)]
+				break
+			}
+		}
+		m.queueSel = 0
+		return m.loadQueue()
+	case "P":
+		next := strconv.FormatBool(!m.stats.Queue.Paused)
+		return m.changeSetting("queue_paused", &next, map[string]string{"true": "queue paused", "false": "queue resumed"}[next])
+	case "x":
+		if !ok || it.Status != store.OutboxQueued {
+			m.setNotice("only queued messages can be canceled", true)
+			return nil
+		}
+		return m.cancelQueued(it.ID, "", fmt.Sprintf("#%d", it.ID))
+	case "X":
+		if !ok {
+			return nil
+		}
+		m.confirmBatch = it.Batch
+		m.mode = modeConfirmCancelBatch
+	}
+	return nil
+}
+
+var queueStyles = map[string]func(...string) string{
+	store.OutboxQueued:   styleAccent.Render,
+	store.OutboxSending:  styleWarn.Render,
+	store.OutboxSent:     styleDim.Render,
+	store.OutboxFailed:   styleErr.Render,
+	store.OutboxCanceled: styleFaint.Render,
+}
+
+func queueBody(q bot.QueueStats) string {
+	state := styleAccent.Render("sending")
+	switch {
+	case !q.Running:
+		state = styleWarn.Render("no worker") + styleDim.Render(" (serve or tui must be running)")
+	case q.Paused:
+		state = styleWarn.Render("paused")
+	case !q.CooldownUntil.IsZero():
+		state = styleWarn.Render("backing off") + styleDim.Render(" until "+stamp(q.CooldownUntil, "15:04:05"))
+	case q.Queued == 0:
+		state = styleDim.Render("idle")
+	}
+	rows := [][2]string{
+		{"State", state},
+		{"Waiting", styleBold.Render(fmt.Sprint(q.Queued+q.Sending)) + styleDim.Render(fmt.Sprintf("  (%d sent, %d failed, %d canceled, kept a week)", q.Sent, q.Failed, q.Canceled))},
+	}
+	if !q.OldestQueued.IsZero() && q.Queued > 0 {
+		rows = append(rows, [2]string{"Oldest", relTime(q.OldestQueued)})
+	}
+	if !q.NextDue.IsZero() && q.Queued > 0 && time.Until(q.NextDue) > time.Second {
+		rows = append(rows, [2]string{"Next due", relTime(q.NextDue)})
+	}
+	rows = append(rows, [2]string{"Jitter", "0–" + (time.Duration(q.JitterMS) * time.Millisecond).String()})
+	if q.LastError != "" {
+		rows = append(rows, [2]string{"Last error", styleErr.Render(fit(safe(q.LastError), 50)) + styleDim.Render(" "+relTime(q.LastErrorAt))})
+	}
+	return kv(rows)
+}
+
+func (m *model) viewQueue() string {
+	if m.queueErr != nil {
+		return m.errCard("Queue", m.queueErr, "the send queue (GET /queue)")
+	}
+	lines := []string{indent(card("Send queue", m.cardWidth(cardWide), queueBody(m.stats.Queue)), " "), ""}
+	filter := "all"
+	if m.queueStatus != "" {
+		filter = m.queueStatus
+	}
+	lines = append(lines, "   "+styleDim.Render(fmt.Sprintf("showing %s · %d of %d", filter, len(m.queue.Items), m.queue.Counts.Of(m.queueStatus))))
+	cols := []int{6, 14, 18, 9, 4, 12, 12}
+	lines = append(lines, "   "+styleHead.Render(table(cols, "ID", "BATCH", "TO", "STATE", "TRY", "BY", "DUE", "ERROR")))
+	if len(m.queue.Items) == 0 {
+		return strings.Join(append(lines, "   "+styleDim.Render("nothing here")), "\n")
+	}
+	start, end := window(m.queueSel, len(m.queue.Items), max(m.bodyHeight()-len(lines)-1, 3))
+	for i := start; i < end; i++ {
+		it := m.queue.Items[i]
+		due := relTime(it.Due)
+		if it.Status != store.OutboxQueued {
+			due = styleDim.Render(relTime(it.Updated))
+		}
+		line := table(cols, fmt.Sprint(it.ID), fit(safe(it.Batch), 13), displayJID(safe(cmp.Or(it.Chat, it.To))),
+			queueStyles[it.Status](it.Status), fmt.Sprint(it.Attempts), fit(safe(it.Actor), 11), due, styleErr.Render(safe(it.Error)))
+		lines = append(lines, m.row(line, i == m.queueSel))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *model) viewConfirmCancelBatch() string {
+	return styleBold.Render("Cancel batch "+safe(m.confirmBatch)+"?") + "\n\n" +
+		styleDim.Render("Every message of it still queued is canceled. Sent ones stay sent.") + "\n\n" +
+		styleKey.Render("y") + styleDim.Render(" cancel the batch   any other key: keep it")
+}

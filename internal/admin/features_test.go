@@ -161,16 +161,16 @@ func TestBellWhenTheServerGoesDown(t *testing.T) {
 	rang := 0
 	m := newTestModel(t, Options{Client: c, Bell: func() { rang++ }})
 	healthy := bot.Status{State: "connected", Connected: true, LoggedIn: true, JID: "5521987654321@s.whatsapp.net"}
-	m.Update(statusMsg{s: healthy})
-	m.Update(statusMsg{s: healthy})
+	m.Update(statusMsg{seq: m.statusReq.start(), s: healthy})
+	m.Update(statusMsg{seq: m.statusReq.start(), s: healthy})
 	if rang != 0 {
 		t.Fatal("rang while healthy")
 	}
-	m.Update(statusMsg{s: bot.Status{State: "disconnected", LoggedIn: true}})
+	m.Update(statusMsg{seq: m.statusReq.start(), s: bot.Status{State: "disconnected", LoggedIn: true}})
 	if rang != 1 || !m.noticeErr {
 		t.Fatalf("rang %d times, notice %q", rang, m.notice)
 	}
-	m.Update(statusMsg{s: bot.Status{State: "disconnected", LoggedIn: true}})
+	m.Update(statusMsg{seq: m.statusReq.start(), s: bot.Status{State: "disconnected", LoggedIn: true}})
 	if rang != 1 {
 		t.Fatal("rang again while still down")
 	}
@@ -186,7 +186,7 @@ func TestHealthTab(t *testing.T) {
 			t.Errorf("health view lacks %q:\n%s", want, view)
 		}
 	}
-	m.Update(statsMsg{err: &APIError{Code: 404}})
+	m.Update(statsMsg{seq: m.statsReq.start(), err: &APIError{Code: 404}})
 	m.statsAt = time.Time{}
 	if !strings.Contains(ansi.Strip(m.View()), "doesn't have GET /stats") {
 		t.Fatal("an older server isn't explained")
@@ -198,12 +198,12 @@ func TestStatusCardsLineUp(t *testing.T) {
 	for _, width := range []int{120, 180} {
 		m := newTestModel(t, Options{Client: c})
 		m.Update(tea.WindowSizeMsg{Width: width, Height: 50})
-		m.Update(statusMsg{s: bot.Status{State: "connected", Connected: true, LoggedIn: true, JID: "5521987654321@s.whatsapp.net", PushName: "Ana"}})
+		m.Update(statusMsg{seq: m.statusReq.start(), s: bot.Status{State: "connected", Connected: true, LoggedIn: true, JID: "5521987654321@s.whatsapp.net", PushName: "Ana"}})
 		cols := 2
 		if width >= 150 {
 			cols = 3
 		}
-		for _, line := range strings.Split(ansi.Strip(m.View()), "\n") {
+		for line := range strings.SplitSeq(ansi.Strip(m.View()), "\n") {
 			if ansi.StringWidth(line) > width {
 				t.Fatalf("line wider than %d: %q", width, line)
 			}
@@ -242,7 +242,7 @@ func TestSwitchingServers(t *testing.T) {
 }
 
 func TestSafe(t *testing.T) {
-	if got := safe("a\x1b[2Jb\u202ec\nd\x07"); got != "a[2Jbc d" {
+	if got := safe("a\x1b[2Jb\u202ec\nd\x07"); got != "abc d" {
 		t.Fatalf("safe = %q", got)
 	}
 }
@@ -251,7 +251,7 @@ func TestSettingsTab(t *testing.T) {
 	b, c := newServer(t)
 	m := newTestModel(t, Options{Client: c})
 	press(m, "6")
-	if len(m.settings) != 5 || !strings.Contains(ansi.Strip(m.View()), "Send rate") {
+	if len(m.settings) != len(bot.SettingKeys) || !strings.Contains(ansi.Strip(m.View()), "Send rate") {
 		t.Fatalf("settings = %+v\n%s", m.settings, ansi.Strip(m.View()))
 	}
 	press(m, "enter")
@@ -345,5 +345,44 @@ func TestTokensShowUsage(t *testing.T) {
 	view := ansi.Strip(m.View())
 	if !strings.Contains(view, "REQ/24H") || !strings.Contains(view, "4 requests") || !strings.Contains(view, "from 127.0.0.1") {
 		t.Fatalf("usage not shown:\n%s", view)
+	}
+}
+
+func TestQueueTab(t *testing.T) {
+	b, c := newServer(t)
+	items, err := b.Enqueue("api", "", "promo", "", []bot.QueueRequest{{To: "5511999999999", Text: "Hi Maria"}, {To: "5511988887777", Text: "Hi John"}, {To: "5521987654321", Text: "Hi Ana"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newTestModel(t, Options{Client: c})
+	press(m, "7")
+	view := ansi.Strip(m.View())
+	if len(m.queue.Items) != 3 || !strings.Contains(view, "promo") || !strings.Contains(view, "7 Queue 3") {
+		t.Fatalf("queue = %+v\n%s", m.queue, view)
+	}
+	if strings.Contains(view, "Hi Maria") {
+		t.Fatal("the list must not show message text")
+	}
+
+	press(m, "x")
+	if it, _ := b.Store.OutboxItem(items[2].ID); it.Status != store.OutboxCanceled {
+		t.Fatalf("x on the newest: %+v, notice %q", it, m.notice)
+	}
+	press(m, "x")
+	if !m.noticeErr {
+		t.Fatal("canceling a canceled item must say no")
+	}
+	press(m, "X", "y")
+	if cnt, _ := b.Store.CountOutbox(store.OutboxFilter{}); cnt.Canceled != 3 {
+		t.Fatalf("X y: %+v", cnt)
+	}
+
+	press(m, "P")
+	if !b.QueueStats().Paused || !m.stats.Queue.Paused {
+		t.Fatalf("P didn't pause: notice %q", m.notice)
+	}
+	press(m, "f")
+	if m.queueStatus != store.OutboxQueued || len(m.queue.Items) != 0 {
+		t.Fatalf("filter: %q %d", m.queueStatus, len(m.queue.Items))
 	}
 }

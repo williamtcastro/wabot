@@ -84,13 +84,57 @@ func (l *Limiter) Reserve(chat string) (time.Time, error) { return l.ReserveN(ch
 
 // ReserveN reserves n consecutive slots, all or none, and returns when the last one is due.
 func (l *Limiter) ReserveN(chat string, n int) (time.Time, error) {
-	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.PerMinute > 0 && n > l.PerMinute {
 		return time.Time{}, BadInput("at most %d per minute", l.PerMinute)
 	}
+	now := time.Now()
+	at, slots := l.plan(chat, n, now)
+	if wait := at.Sub(now); l.MaxWait > 0 && wait > l.MaxWait {
+		l.rejected++
+		l.lastRejected = now
+		return time.Time{}, RateLimitError{RetryAfter: wait}
+	}
+	l.commit(chat, at, slots, now)
+	return at, nil
+}
 
+// Wait reserves n slots for chat and waits until the last one is due.
+func (l *Limiter) Wait(ctx context.Context, chat string, n int) error {
+	at, err := l.ReserveN(chat, n)
+	if err != nil {
+		return err
+	}
+	return SleepUntil(ctx, at)
+}
+
+// Peek says how long until a slot for chat would be due, without taking it.
+func (l *Limiter) Peek(chat string) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	at, _ := l.plan(chat, 1, now)
+	return at.Sub(now)
+}
+
+// TryReserve takes a slot for chat only if it's due within within, and otherwise says how long until
+// one is. It never counts as a rejection: the outbox uses it to take only free slots, so it doesn't
+// push interactive sends back.
+func (l *Limiter) TryReserve(chat string, within time.Duration) (time.Duration, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	at, slots := l.plan(chat, 1, now)
+	if wait := at.Sub(now); wait > within {
+		return wait, false
+	}
+	l.commit(chat, at, slots, now)
+	return at.Sub(now), true
+}
+
+// plan works out when n slots for chat would be due and the slot list that would result.
+func (l *Limiter) plan(chat string, n int, now time.Time) (time.Time, []time.Time) {
 	cutoff := now.Add(-time.Minute)
 	i := 0
 	for i < len(l.slots) && l.slots[i].Before(cutoff) {
@@ -103,7 +147,7 @@ func (l *Limiter) ReserveN(chat string, n int) (time.Time, error) {
 	if last, ok := l.byChat[chat]; ok && l.ChatGap > 0 {
 		at = later(at, last.Add(l.ChatGap))
 	}
-	for k := 0; k < n; k++ {
+	for k := range n {
 		if k > 0 && l.ChatGap > 0 {
 			at = at.Add(l.ChatGap)
 		}
@@ -114,22 +158,20 @@ func (l *Limiter) ReserveN(chat string, n int) (time.Time, error) {
 			slots = append(slots, at)
 		}
 	}
-	if wait := at.Sub(now); l.MaxWait > 0 && wait > l.MaxWait {
-		l.rejected++
-		l.lastRejected = now
-		return time.Time{}, RateLimitError{RetryAfter: wait}
-	}
+	return at, slots
+}
 
+func (l *Limiter) commit(chat string, at time.Time, slots []time.Time, now time.Time) {
 	l.slots = slots
 	l.byChat[chat] = at
 	if len(l.byChat) > 10000 {
+		cutoff := now.Add(-time.Minute)
 		for k, t := range l.byChat {
 			if t.Before(cutoff) {
 				delete(l.byChat, k)
 			}
 		}
 	}
-	return at, nil
 }
 
 func later(a, b time.Time) time.Time {
@@ -148,7 +190,12 @@ func (b *Bot) ThrottleToken(ctx context.Context, id string, rate int) error {
 	if rate <= 0 || id == "" {
 		return nil
 	}
+	return b.tokenLimiter(id, rate).Wait(ctx, id, 1)
+}
+
+func (b *Bot) tokenLimiter(id string, rate int) *Limiter {
 	b.tokenMu.Lock()
+	defer b.tokenMu.Unlock()
 	if b.tokenRate == nil {
 		b.tokenRate = map[string]*Limiter{}
 	}
@@ -157,10 +204,5 @@ func (b *Bot) ThrottleToken(ctx context.Context, id string, rate int) error {
 		l = NewLimiter(rate, 0, 30*time.Second)
 		b.tokenRate[id] = l
 	}
-	b.tokenMu.Unlock()
-	slot, err := l.Reserve(id)
-	if err != nil {
-		return err
-	}
-	return SleepUntil(ctx, slot)
+	return l
 }

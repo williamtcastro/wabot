@@ -1,9 +1,8 @@
 package admin
 
 import (
-	"errors"
+	"cmp"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -27,11 +26,6 @@ func bar(used, total, w int) string {
 	}
 	return style.Render(strings.Repeat("█", filled)) + styleFaint.Render(strings.Repeat("░", w-filled)) +
 		fmt.Sprintf(" %d/%d", used, total)
-}
-
-func (m *model) statsUnsupported() bool {
-	var apiErr *APIError
-	return errors.As(m.statsErr, &apiErr) && apiErr.Code == http.StatusNotFound
 }
 
 func limiterBody(s bot.LimiterStats, unit string) string {
@@ -81,11 +75,8 @@ func (m *model) webhookBody() string {
 
 func (m *model) viewHealth() string {
 	switch {
-	case m.statsUnsupported():
-		return indent(card("Health", min(m.width-2, 90), styleWarn.Render("This server doesn't have GET /stats yet.")+"\n"+
-			styleDim.Render("Update wame on the server to see limiter and webhook health.")), " ")
-	case m.statsErr != nil && m.statsAt.IsZero():
-		return indent(card("Health", min(m.width-2, 90), styleErr.Render(m.statsErr.Error())), " ")
+	case m.statsErr != nil && (m.statsAt.IsZero() || isNotFound(m.statsErr)):
+		return m.errCard("Health", m.statsErr, "GET /stats")
 	case m.statsAt.IsZero():
 		return "  " + styleDim.Render("loading…")
 	}
@@ -95,10 +86,10 @@ func (m *model) viewHealth() string {
 		auto = styleDim.Render("off")
 	}
 	server := panel{"Server", kv([][2]string{
-		{"Version", cmpOr(s.Version, "?")},
-		{"Up since", s.Started.Format("2006-01-02 15:04") + styleDim.Render(" ("+strings.TrimSuffix(relTime(s.Started), " ago")+")")},
+		{"Version", cmp.Or(safe(s.Version), "?")},
+		{"Up since", stamp(s.Started, "2006-01-02 15:04") + styleDim.Render(" ("+strings.TrimSuffix(relTime(s.Started), " ago")+")")},
 		{"Auto-replies", auto},
-		{"Updated", styleDim.Render(m.statsAt.Format("15:04:05"))},
+		{"Updated", styleDim.Render(stamp(m.statsAt, "15:04:05"))},
 	})}
 	return m.grid([]panel{
 		server,
@@ -122,7 +113,7 @@ func (m *model) webhookFailures() string {
 	start, end := window(m.healthSel, len(w.Recent), 6)
 	for i := start; i < end; i++ {
 		f := w.Recent[i]
-		what := cmpOr(f.Error, fmt.Sprintf("HTTP %d", f.Status))
+		what := cmp.Or(safe(f.Error), fmt.Sprintf("HTTP %d", f.Status))
 		state := styleWarn.Render("retrying")
 		switch {
 		case f.Replayed:

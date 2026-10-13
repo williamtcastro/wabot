@@ -10,15 +10,16 @@ import (
 	"github.com/mdp/qrterminal/v3"
 
 	"github.com/williamtcastro/wame/internal/store"
+	"github.com/williamtcastro/wame/internal/termui"
 )
 
 var (
-	colAccent = lipgloss.Color("42")
-	colMuted  = lipgloss.Color("244")
-	colFaint  = lipgloss.Color("238")
-	colErr    = lipgloss.Color("203")
+	colAccent = termui.ColAccent
+	colMuted  = termui.ColMuted
+	colFaint  = termui.ColFaint
+	colErr    = termui.ColErr
 	colMe     = lipgloss.Color("114")
-	colSel    = lipgloss.Color("236")
+	colSel    = termui.ColSel
 
 	styleDim    = lipgloss.NewStyle().Foreground(colMuted)
 	styleFaint  = lipgloss.NewStyle().Foreground(colFaint)
@@ -27,7 +28,7 @@ var (
 	styleBold   = lipgloss.NewStyle().Bold(true)
 	styleAccent = lipgloss.NewStyle().Foreground(colAccent)
 	styleBadge  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(colAccent).Padding(0, 1)
-	styleKey    = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
+	styleKey    = lipgloss.NewStyle().Foreground(termui.ColText).Bold(true)
 	styleItalic = lipgloss.NewStyle().Foreground(colMuted).Italic(true)
 
 	senderColors = []lipgloss.Color{"39", "213", "208", "141", "80", "220", "174", "111"}
@@ -187,28 +188,7 @@ func (m *model) renderChat(width int) string {
 		} else if x.ReplyTo != "" {
 			block = append(block, styleFaint.Render("┃ ↩ reply to an earlier message"))
 		}
-		body := m.bodyOf(x)
-		meta := x.Timestamp.Local().Format("15:04")
-		if x.Edited && !x.Deleted {
-			meta = "edited " + meta
-		}
-		if x.FromMe {
-			meta += " ✓"
-		}
-		if r := joinReactions(reacts[x.ID]); r != "" {
-			meta = "│ " + r + "  " + meta
-		}
-		wrapped := strings.Split(lipgloss.NewStyle().Width(bubbleW).Render(body), "\n")
-		for j := range wrapped {
-			wrapped[j] = strings.TrimRight(wrapped[j], " ")
-		}
-		last := len(wrapped) - 1
-		if lipgloss.Width(wrapped[last])+2+lipgloss.Width(meta) <= bubbleW {
-			wrapped[last] += "  " + styleDim.Render(meta)
-		} else {
-			wrapped = append(wrapped, styleDim.Render(meta))
-		}
-		block = append(block, wrapped...)
+		block = append(block, m.bubble(x, reacts[x.ID], bubbleW)...)
 
 		selected := i == m.sel && m.focus == focusMessages
 		m.starts = append(m.starts, len(out))
@@ -224,6 +204,32 @@ func (m *model) renderChat(width int) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// bubble is a message's body wrapped to w, with its time, edit mark, tick and reactions on the last
+// line when they fit, or on a line of their own.
+func (m *model) bubble(x store.Message, reactions map[string]string, w int) []string {
+	meta := x.Timestamp.Local().Format("15:04")
+	if x.Edited && !x.Deleted {
+		meta = "edited " + meta
+	}
+	if x.FromMe {
+		meta += " ✓"
+	}
+	if r := joinReactions(reactions); r != "" {
+		meta = "│ " + r + "  " + meta
+	}
+	wrapped := strings.Split(lipgloss.NewStyle().Width(w).Render(m.bodyOf(x)), "\n")
+	for j := range wrapped {
+		wrapped[j] = strings.TrimRight(wrapped[j], " ")
+	}
+	last := len(wrapped) - 1
+	if lipgloss.Width(wrapped[last])+2+lipgloss.Width(meta) <= w {
+		wrapped[last] += "  " + styleDim.Render(meta)
+	} else {
+		wrapped = append(wrapped, styleDim.Render(meta))
+	}
+	return wrapped
 }
 
 func (m *model) bodyOf(x store.Message) string {

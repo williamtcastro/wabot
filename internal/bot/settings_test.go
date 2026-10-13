@@ -1,7 +1,6 @@
 package bot
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,7 +13,8 @@ import (
 	"github.com/williamtcastro/wame/internal/store"
 )
 
-func ptr(s string) *string { return &s }
+//go:fix inline
+func ptr(s string) *string { return new(s) }
 
 func TestRuntimeSettings(t *testing.T) {
 	b := newTestBot(t)
@@ -22,14 +22,14 @@ func TestRuntimeSettings(t *testing.T) {
 	if _, err := b.InitSettings(base); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.UpdateSettings("ops", map[string]*string{"rate": ptr("5"), "auto_reply": ptr("false"), "chat_gap": ptr("3s")}); err != nil {
+	if err := b.UpdateSettings("ops", map[string]*string{"rate": new("5"), "auto_reply": new("false"), "chat_gap": new("3s")}); err != nil {
 		t.Fatal(err)
 	}
 	if s := b.Limiter.Stats(); s.PerMinute != 5 || s.ChatGapMS != 3000 || b.Lookups.Stats().PerMinute != 15 || b.AutoReplyOn() {
 		t.Fatalf("not applied: %+v, auto-reply %v", s, b.AutoReplyOn())
 	}
 	for _, bad := range []map[string]*string{
-		{"rate": ptr("-1")}, {"chat_gap": ptr("1h")}, {"auto_reply": ptr("maybe")}, {"webhook_filter": ptr("from_me=perhaps")}, {"token": ptr("x")},
+		{"rate": new("-1")}, {"chat_gap": new("1h")}, {"auto_reply": new("maybe")}, {"webhook_filter": new("from_me=perhaps")}, {"token": new("x")},
 	} {
 		if err := b.UpdateSettings("ops", bad); err == nil {
 			t.Errorf("%v was accepted", bad)
@@ -70,24 +70,41 @@ func TestRuntimeSettings(t *testing.T) {
 
 func TestWebhookFilterSetting(t *testing.T) {
 	b := newTestBot(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	b.Webhook = NewWebhook(ctx, "http://127.0.0.1:1", "", store.Filter{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if _, err := b.InitSettings(Settings{}); err != nil {
+	b.StartWebhook("http://127.0.0.1:1", "")
+	if _, err := b.InitSettings(Settings{WebhookFilter: "from_me=false"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.UpdateSettings("ops", map[string]*string{"webhook_filter": ptr("chat=5511999999999&from_me=false")}); err != nil {
+	if f := b.Webhook.currentFilter(); f.FromMe == nil || *f.FromMe {
+		t.Fatalf("the flag's filter wasn't applied: %+v", f)
+	}
+	if err := b.UpdateSettings("ops", map[string]*string{"webhook_filter": new("chat=5511999999999&from_me=false")}); err != nil {
 		t.Fatal(err)
 	}
-	b.Webhook.mu.RLock()
-	f := b.Webhook.Filter
-	b.Webhook.mu.RUnlock()
+	f := b.Webhook.currentFilter()
 	if f.Chat != maria || f.FromMe == nil || *f.FromMe {
 		t.Fatalf("filter = %+v", f)
 	}
-	b.Webhook.SetChatIf("5511999999999@s.whatsapp.net-old", john)
-	if b.Webhook.Filter.Chat != maria {
-		t.Fatal("a stale resolution overwrote the new filter")
+
+	// Pretend WhatsApp resolved the number to another JID: changing another setting must keep it.
+	b.Webhook.mu.Lock()
+	b.Webhook.filter.Chat = john
+	b.Webhook.mu.Unlock()
+	if err := b.UpdateSettings("ops", map[string]*string{"rate": new("5")}); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Webhook.currentFilter().Chat; got != john {
+		t.Fatalf("a rate change reset the resolved chat to %s", got)
+	}
+
+	b.resolveWebhookChat(t.Context(), "chat=5511988887777", "5511988887777")
+	if got := b.Webhook.currentFilter().Chat; got != john {
+		t.Fatalf("a stale resolution changed the filter to %s", got)
+	}
+	if err := b.UpdateSettings("ops", map[string]*string{"webhook_filter": nil}); err != nil {
+		t.Fatal(err)
+	}
+	if f := b.Webhook.currentFilter(); f.Chat != "" || f.FromMe == nil {
+		t.Fatalf("reset filter = %+v", f)
 	}
 }
 
@@ -103,8 +120,7 @@ func TestWebhookTestAndReplay(t *testing.T) {
 	}))
 	defer srv.Close()
 	b := newTestBot(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if _, err := b.TestWebhook(ctx, "ops"); err == nil {
 		t.Fatal("tested a webhook that isn't configured")

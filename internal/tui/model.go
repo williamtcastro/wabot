@@ -14,11 +14,19 @@ import (
 
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/store"
+	"github.com/williamtcastro/wame/internal/termui"
 )
 
 const (
-	sidebarWidth = 34
-	actor        = "tui"
+	sidebarWidth  = 34
+	actor         = "tui"
+	chatsLoad     = 300
+	feedLoad      = 200
+	feedCap       = 500
+	openLimit     = 400
+	receiptsMax   = 20
+	searchLimit   = 200
+	chatsDebounce = 200 * time.Millisecond
 )
 
 type focus int
@@ -30,9 +38,14 @@ const (
 )
 
 type (
-	eventMsg  struct{ v any }
-	chatsMsg  []store.Chat
-	noticeMsg struct {
+	eventMsg struct{ v any }
+	chatsMsg struct {
+		seq   int
+		chats []store.Chat
+	}
+	chatsStaleMsg  struct{}
+	chatsReloadMsg struct{}
+	noticeMsg      struct {
 		text string
 		err  bool
 	}
@@ -66,9 +79,12 @@ type model struct {
 	ready  bool
 	focus  focus
 
-	chats  []store.Chat
-	cursor int
-	filter string
+	chats       []store.Chat
+	cursor      int
+	filter      string
+	chatsSeq    int
+	chatsSeen   int
+	chatsReload termui.Debounce
 
 	active, activeName string
 	msgs               []store.Message
@@ -130,19 +146,31 @@ func (m *model) wait() tea.Cmd {
 	return func() tea.Msg { return eventMsg{<-m.sub} }
 }
 
+// loadChats reloads the chat list. Answers carry a sequence number so an older list never replaces
+// a newer one.
 func (m *model) loadChats() tea.Cmd {
+	m.chatsSeq++
+	seq, b := m.chatsSeq, m.bot
 	return func() tea.Msg {
-		chats, err := m.bot.Chats(context.Background(), 300)
+		chats, err := b.Chats(context.Background(), chatsLoad)
 		if err != nil {
 			return noticeMsg{"load chats: " + err.Error(), true}
 		}
-		return chatsMsg(chats)
+		return chatsMsg{seq, chats}
 	}
+}
+
+// chatsChanged reloads the chat list once per chatsDebounce, however many events ask for it.
+func (m *model) chatsChanged() tea.Cmd {
+	return m.chatsReload.Schedule(chatsDebounce, chatsReloadMsg{})
 }
 
 func (m *model) loadFeed() tea.Cmd {
 	return func() tea.Msg {
-		msgs := m.bot.Store.Messages("", 200)
+		msgs, err := m.bot.Store.Messages("", feedLoad)
+		if err != nil {
+			return noticeMsg{"load activity: " + err.Error(), true}
+		}
 		slices.Reverse(msgs)
 		return feedMsg(msgs)
 	}
@@ -162,11 +190,14 @@ func (m *model) load(seq int, jid string, jump int64) tea.Cmd {
 		if jid == "" {
 			return openedMsg{seq: seq}
 		}
-		limit := 400
+		limit := openLimit
 		if jump > 0 {
 			limit = max(limit, m.bot.Store.CountFrom(jid, jump)+20)
 		}
-		msgs := m.bot.Store.Messages(jid, limit)
+		msgs, err := m.bot.Store.Messages(jid, limit)
+		if err != nil {
+			return noticeMsg{"load chat: " + err.Error(), true}
+		}
 		slices.Reverse(msgs)
 		return openedMsg{seq: seq, jid: jid, name: m.bot.ChatName(context.Background(), jid, ""), msgs: msgs,
 			readSeq: m.bot.Store.ReadSeq(jid), jump: jump}
@@ -243,21 +274,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.suggest()
 
 	case chatsMsg:
-		for i := range msg {
-			msg[i].Name, msg[i].LastText = safeLine(msg[i].Name), safeLine(msg[i].LastText)
-		}
-		keep := m.cursorJID()
-		m.chats = msg
-		if m.focus == focusChats && keep != "" {
-			m.cursor = chatIndex(m.filteredChats(), keep) + 1
-		} else {
-			m.syncCursor()
-		}
-		if i := chatIndex(m.chats, m.active); i >= 0 {
-			m.activeName = m.chats[i].Name
-		}
-		m.render(m.sel < 0 && m.vp.AtBottom())
+		m.applyChats(msg)
 		return m, nil
+
+	case chatsStaleMsg:
+		return m, m.chatsChanged()
+
+	case chatsReloadMsg:
+		m.chatsReload.Done()
+		return m, m.loadChats()
 
 	case feedMsg:
 		m.feed = safeAll(slices.DeleteFunc(msg, isReaction))
@@ -268,79 +293,110 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq != m.openSeq {
 			return m, nil
 		}
-		if m.editing != nil {
-			m.input.SetValue("")
-		}
-		m.replyTo, m.editing, m.panelTitle = nil, nil, ""
-		m.active, m.activeName, m.msgs, m.sel = msg.jid, safeLine(msg.name), safeAll(msg.msgs), -1
-		if i := chatIndex(m.chats, msg.jid); i >= 0 {
-			m.activeName = m.chats[i].Name
-		}
-		if msg.jid != "" {
-			last := int64(0)
-			if len(m.msgs) > 0 {
-				last = m.msgs[len(m.msgs)-1].Seq
-			}
-			for _, x := range m.feed {
-				if x.Chat == msg.jid && x.Seq > last {
-					m.msgs = append(m.msgs, x)
-				}
-			}
-		}
-		m.newAfter = msg.readSeq
-		m.syncCursor()
-		m.layout()
-		m.render(true)
-		if msg.jump > 0 {
-			if i := slices.IndexFunc(m.visible, func(x store.Message) bool { return x.Seq == msg.jump }); i >= 0 {
-				m.sel, m.focus = i, focusMessages
-				m.input.Blur()
-				m.render(false)
-			}
-		}
-		return m, m.markRead(msg.msgs)
+		return m, m.applyOpened(msg)
 
 	case eventMsg:
-		cmds := []tea.Cmd{m.wait()}
-		switch v := msg.v.(type) {
-		case bot.Status:
-			m.status = v
-			if v.LoggedIn {
-				cmds = append(cmds, m.loadChats())
-			}
-			m.render(false)
-		case store.ChatRead, bot.NamesChanged:
-			cmds = append(cmds, m.loadChats())
-		case store.ChatsChanged:
-			cmds = append(cmds, m.loadChats(), m.loadFeed())
-			if m.active != "" {
-				cmds = append(cmds, m.open(m.active))
-			}
-		case store.Message:
-			v = safeMessage(v)
-			if v.Type != "reaction" {
-				m.feed = append(m.feed, v)
-				if len(m.feed) > 500 {
-					m.feed = m.feed[len(m.feed)-500:]
-				}
-			}
-			if v.Chat == m.active && !slices.ContainsFunc(m.msgs, func(x store.Message) bool { return x.Seq == v.Seq }) {
-				m.msgs = append(m.msgs, v)
-				cmds = append(cmds, m.markRead([]store.Message{v}))
-			}
-			cmds = append(cmds, m.loadChats())
-			m.render(m.sel < 0)
-		case store.MessageUpdate:
-			replaceMessage(m.msgs, safeMessage(v.Message))
-			replaceMessage(m.feed, safeMessage(v.Message))
-			cmds = append(cmds, m.loadChats())
-			m.render(false)
-		}
-		return m, tea.Batch(cmds...)
+		return m, tea.Batch(m.wait(), m.onEvent(msg.v))
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+func (m *model) applyChats(msg chatsMsg) {
+	if msg.seq < m.chatsSeen {
+		return
+	}
+	m.chatsSeen = msg.seq
+	for i := range msg.chats {
+		msg.chats[i].Name, msg.chats[i].LastText = safeLine(msg.chats[i].Name), safeLine(msg.chats[i].LastText)
+	}
+	keep := m.cursorJID()
+	m.chats = msg.chats
+	if m.focus == focusChats && keep != "" {
+		m.cursor = chatIndex(m.filteredChats(), keep) + 1
+	} else {
+		m.syncCursor()
+	}
+	if i := chatIndex(m.chats, m.active); i >= 0 {
+		m.activeName = m.chats[i].Name
+	}
+	m.render(m.sel < 0 && m.vp.AtBottom())
+}
+
+func (m *model) applyOpened(msg openedMsg) tea.Cmd {
+	if m.editing != nil {
+		m.input.SetValue("")
+	}
+	m.replyTo, m.editing, m.panelTitle = nil, nil, ""
+	m.active, m.activeName, m.msgs, m.sel = msg.jid, safeLine(msg.name), safeAll(msg.msgs), -1
+	if i := chatIndex(m.chats, msg.jid); i >= 0 {
+		m.activeName = m.chats[i].Name
+	}
+	if msg.jid != "" {
+		last := int64(0)
+		if len(m.msgs) > 0 {
+			last = m.msgs[len(m.msgs)-1].Seq
+		}
+		for _, x := range m.feed {
+			if x.Chat == msg.jid && x.Seq > last {
+				m.msgs = append(m.msgs, x)
+			}
+		}
+	}
+	m.newAfter = msg.readSeq
+	m.syncCursor()
+	m.layout()
+	m.render(true)
+	if msg.jump > 0 {
+		if i := slices.IndexFunc(m.visible, func(x store.Message) bool { return x.Seq == msg.jump }); i >= 0 {
+			m.sel, m.focus = i, focusMessages
+			m.input.Blur()
+			m.render(false)
+		}
+	}
+	return m.markRead(msg.msgs)
+}
+
+// onEvent applies something the bot published.
+func (m *model) onEvent(v any) tea.Cmd {
+	switch v := v.(type) {
+	case bot.Status:
+		m.status = v
+		m.render(false)
+		if v.LoggedIn {
+			return m.chatsChanged()
+		}
+	case store.ChatRead, bot.NamesChanged:
+		return m.chatsChanged()
+	case store.ChatsChanged:
+		cmds := []tea.Cmd{m.chatsChanged(), m.loadFeed()}
+		if m.active != "" {
+			cmds = append(cmds, m.open(m.active))
+		}
+		return tea.Batch(cmds...)
+	case store.Message:
+		v = safeMessage(v)
+		var cmds []tea.Cmd
+		if v.Type != "reaction" {
+			m.feed = append(m.feed, v)
+			if len(m.feed) > feedCap {
+				m.feed = m.feed[len(m.feed)-feedCap:]
+			}
+		}
+		if v.Chat == m.active && !slices.ContainsFunc(m.msgs, func(x store.Message) bool { return x.Seq == v.Seq }) {
+			m.msgs = append(m.msgs, v)
+			cmds = append(cmds, m.markRead([]store.Message{v}))
+		}
+		m.render(m.sel < 0)
+		return tea.Batch(append(cmds, m.chatsChanged())...)
+	case store.MessageUpdate:
+		replaceMessage(m.msgs, safeMessage(v.Message))
+		replaceMessage(m.feed, safeMessage(v.Message))
+		m.render(false)
+		return m.chatsChanged()
+	}
+	return nil
 }
 
 func (m *model) filteredChats() []store.Chat {

@@ -1,7 +1,6 @@
 package mcpserver
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -9,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -25,7 +25,7 @@ const (
 
 func newBot(t *testing.T) *bot.Bot {
 	t.Helper()
-	b, err := bot.New(context.Background(), filepath.Join(t.TempDir(), "wame.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	b, err := bot.New(t.Context(), filepath.Join(t.TempDir(), "wame.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func newBot(t *testing.T) *bot.Bot {
 func connect(t *testing.T, b *bot.Bot, p auth.Principal) *mcp.ClientSession {
 	t.Helper()
 	st, ct := mcp.NewInMemoryTransports()
-	ctx := context.Background()
+	ctx := t.Context()
 	if _, err := New(b, "test", &p).Connect(ctx, st, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func connect(t *testing.T, b *bot.Bot, p auth.Principal) *mcp.ClientSession {
 
 func call(t *testing.T, cs *mcp.ClientSession, tool string, args map[string]any) (map[string]any, string, bool) {
 	t.Helper()
-	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool, Arguments: args})
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: tool, Arguments: args})
 	if err != nil {
 		t.Fatalf("%s: %v", tool, err)
 	}
@@ -81,7 +81,7 @@ func call(t *testing.T, cs *mcp.ClientSession, tool string, args map[string]any)
 func TestReadOnlyCaller(t *testing.T) {
 	cs := connect(t, newBot(t), auth.Principal{Name: "mcp", Scopes: []auth.Scope{auth.Read}})
 
-	tools, err := cs.ListTools(context.Background(), nil)
+	tools, err := cs.ListTools(t.Context(), nil)
 	if err != nil || len(tools.Tools) < 8 {
 		t.Fatalf("tools/list: %v (%d tools)", err, len(tools.Tools))
 	}
@@ -171,5 +171,19 @@ func TestRevokedTokenStopsWorking(t *testing.T) {
 	}
 	if _, text, isErr := call(t, cs, "list_chats", nil); !isErr || !strings.Contains(text, "revoked") {
 		t.Fatalf("revoked token over a running connection = %q", text)
+	}
+}
+
+func TestCleanDropsInvisibleRunes(t *testing.T) {
+	for _, r := range []rune{0x1b, 0x200b, 0x200e, 0x200f, 0x061c, 0x2060, 0x2064, 0x00ad, 0x180e, 0x202e, 0x2066, 0xfeff, 0xfe0f, 0xe0001, 0xe0041, 0xe007f, 0xe0100} {
+		if got := clean("Ana" + string(r) + "!"); got != "Ana!" {
+			t.Errorf("clean(U+%04X) = %q", r, got)
+		}
+	}
+	if got := clean("linha 1\nlinha 2\tok"); got != "linha 1\nlinha 2\tok" {
+		t.Errorf("newlines and tabs must stay: %q", got)
+	}
+	if got := cleanID("M1\n\u202e" + strings.Repeat("é", 100)); strings.ContainsAny(got, "\n\u202e") || len(got) > maxIDLen || !utf8.ValidString(got) {
+		t.Errorf("cleanID = %q (%d bytes)", got, len(got))
 	}
 }

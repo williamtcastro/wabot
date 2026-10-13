@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/store"
+	"github.com/williamtcastro/wame/internal/termui"
 )
 
 func formatContacts(cs []bot.Contact, limit int) string {
@@ -89,7 +89,7 @@ func colorFor(s string) lipgloss.Color {
 	return senderColors[h.Sum32()%uint32(len(senderColors))]
 }
 
-func userOf(jid string) string { return strings.SplitN(jid, "@", 2)[0] }
+func userOf(jid string) string { return termui.UserOf(jid) }
 
 func prefixed(prefix, s string) string {
 	if s == "" {
@@ -140,24 +140,11 @@ var mediaLabels = map[string]string{
 	"location": "📍", "reaction": "reacted",
 }
 
-// safe strips terminal control sequences and bidi overrides from text that strangers control
-// (messages, names, file names) so it can't rewrite the screen, clipboard or window title.
-func safe(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case r == '\n' || r == '\t':
-			return r
-		case r < 0x20, r >= 0x7f && r < 0xa0, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
-			return -1
-		}
-		return r
-	}, ansi.Strip(s))
-}
+// safe and safeLine sanitize text that strangers control (messages, names, file names) before it's
+// rendered; see termui.Safe.
+func safe(s string) string { return termui.Safe(s) }
 
-// safeLine is safe for names and other single-line fields: newlines and tabs become spaces.
-func safeLine(s string) string {
-	return strings.Join(strings.Fields(safe(s)), " ")
-}
+func safeLine(s string) string { return termui.SafeLine(s) }
 
 func safeMessage(x store.Message) store.Message {
 	x.Text, x.PushName = safe(x.Text), safeLine(x.PushName)

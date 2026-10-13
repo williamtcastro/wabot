@@ -79,6 +79,12 @@ func (e *APIError) Error() string {
 	return e.Msg
 }
 
+// isNotFound reports a 404, which is how an older server answers a route it doesn't have yet.
+func isNotFound(err error) bool {
+	apiErr, ok := errors.AsType[*APIError](err)
+	return ok && apiErr.Code == http.StatusNotFound
+}
+
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
 	u := c.base.JoinPath(path)
 	u.RawQuery = query.Encode()
@@ -100,8 +106,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		var ue *url.Error
-		if errors.As(err, &ue) {
+		if ue, ok := errors.AsType[*url.Error](err); ok {
 			return ue.Err
 		}
 		return err
@@ -247,8 +252,7 @@ func (c *Client) Events(ctx context.Context, events string, connected func(), ou
 	req.Header.Set("Accept", "text/event-stream")
 	resp, err := c.stream.Do(req)
 	if err != nil {
-		var ue *url.Error
-		if errors.As(err, &ue) {
+		if ue, ok := errors.AsType[*url.Error](err); ok {
 			return ue.Err
 		}
 		return err
@@ -316,4 +320,33 @@ func (c *Client) WebhookReplay(ctx context.Context, delivery string) (bot.Webhoo
 	var out bot.WebhookResult
 	err := c.do(ctx, "POST", "webhook/replay", nil, map[string]string{"delivery": delivery}, &out)
 	return out, err
+}
+
+// QueuePage is the body of GET /queue.
+type QueuePage struct {
+	Items  []store.OutboxItem `json:"items"`
+	Counts store.OutboxCounts `json:"counts"`
+}
+
+func (c *Client) Queue(ctx context.Context, status string, limit int) (QueuePage, error) {
+	q := url.Values{"limit": {strconv.Itoa(limit)}}
+	if status != "" {
+		q.Set("status", status)
+	}
+	var out QueuePage
+	err := c.do(ctx, "GET", "queue", q, nil, &out)
+	return out, err
+}
+
+// CancelQueued cancels one queued message, or with batch set, every queued one in that batch.
+func (c *Client) CancelQueued(ctx context.Context, id int64, batch string) (int, error) {
+	path, q := "queue/"+strconv.FormatInt(id, 10), url.Values(nil)
+	if batch != "" {
+		path, q = "queue", url.Values{"batch": {batch}}
+	}
+	var out struct {
+		Canceled int `json:"canceled"`
+	}
+	err := c.do(ctx, "DELETE", path, q, nil, &out)
+	return out.Canceled, err
 }

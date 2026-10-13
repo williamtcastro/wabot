@@ -50,6 +50,7 @@ type Bot struct {
 	autoLimit *Limiter
 	replies   atomic.Bool
 	usage     usage
+	outbox    outbox
 
 	settingsMu   sync.Mutex
 	settings     Settings
@@ -62,13 +63,25 @@ type Bot struct {
 	groups       map[string]groupInfo
 	typingIn     map[string]*time.Timer
 	groupsAt     time.Time
-	groupsBusy   atomic.Bool
 	allowlists   map[string]expandedAllowlist
 	tokenMu      sync.Mutex
 	tokenRate    map[string]*Limiter
+
+	db            *sql.DB
+	groupsRefresh chan struct{}
+	presenceMu    sync.Mutex
+	presenceSent  types.Presence
+
+	ctx       context.Context
+	cancel    context.CancelFunc
+	goMu      sync.Mutex
+	wg        sync.WaitGroup
+	closeOnce sync.Once
+	closeErr  error
 }
 
-func New(ctx context.Context, dbPath string, waLogger waLog.Logger, log *slog.Logger) (*Bot, error) {
+// New opens the database and builds the client without connecting. Call Close when done.
+func New(ctx context.Context, dbPath string, waLogger waLog.Logger, log *slog.Logger) (_ *Bot, err error) {
 	abs, _ := filepath.Abs(dbPath)
 	if err := restrictPerms(abs); err != nil {
 		return nil, err
@@ -77,6 +90,11 @@ func New(ctx context.Context, dbPath string, waLogger waLog.Logger, log *slog.Lo
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err != nil {
+			db.Close()
+		}
+	}()
 	container := sqlstore.NewWithDB(db, "sqlite3", waLogger.Sub("DB"))
 	if err := container.Upgrade(ctx); err != nil {
 		return nil, fmt.Errorf("upgrade store: %w", err)
@@ -101,7 +119,10 @@ func New(ctx context.Context, dbPath string, waLogger waLog.Logger, log *slog.Lo
 		Started:   time.Now(),
 		subs:      map[chan any]struct{}{},
 		jids:      map[string]types.JID{},
+		outbox:    outbox{wake: make(chan struct{}, 1)},
+		db:        db,
 	}
+	b.ctx, b.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	b.loadCachedGroups()
 	b.Client.AddEventHandler(b.handle)
 	b.Client.SetMediaHTTPClient(&http.Client{Transport: limitedTransport{http.DefaultTransport}})
@@ -121,25 +142,67 @@ func (b *Bot) Start(ctx context.Context) error {
 	if err := b.Client.Connect(); err != nil {
 		return err
 	}
-	go func() {
-		for item := range qrChan {
+	b.Go(func(bctx context.Context) {
+		loopCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		defer context.AfterFunc(bctx, cancel)()
+		for {
+			var item whatsmeow.QRChannelItem
+			select {
+			case <-loopCtx.Done():
+				return
+			case it, ok := <-qrChan:
+				if !ok {
+					return
+				}
+				item = it
+			}
 			switch item.Event {
 			case whatsmeow.QRChannelEventCode:
 				b.setState("waiting_for_qr_scan", item.Code)
-			case "success":
+			case whatsmeow.QRChannelSuccess.Event:
 				b.setState("paired", "")
-			case "timeout":
+			case whatsmeow.QRChannelTimeout.Event:
 				b.setState("qr_timeout", "")
 				b.Client.Disconnect()
-				time.Sleep(time.Second)
-				_ = b.Start(ctx)
+				if SleepUntil(loopCtx, time.Now().Add(time.Second)) != nil {
+					return
+				}
+				if err := b.Start(ctx); err != nil {
+					b.Log.Error("restart login failed", "err", err)
+				}
 			default:
 				b.setState("login_error: "+item.Event, "")
 				b.Log.Error("login failed", "event", item.Event, "err", item.Error)
 			}
 		}
-	}()
+	})
 	return nil
+}
+
+// Go runs f in the background until Close, which cancels its ctx and waits for it. After Close it
+// does nothing.
+func (b *Bot) Go(f func(ctx context.Context)) {
+	b.goMu.Lock()
+	defer b.goMu.Unlock()
+	if b.ctx.Err() != nil {
+		return
+	}
+	b.wg.Go(func() { f(b.ctx) })
+}
+
+// Close stops the background work started with Go, disconnects from WhatsApp and closes the
+// database. Queued webhook deliveries get one quick attempt first.
+func (b *Bot) Close() error {
+	b.closeOnce.Do(func() {
+		b.goMu.Lock()
+		b.cancel()
+		b.goMu.Unlock()
+		b.Client.Disconnect()
+		b.wg.Wait()
+		b.closeErr = b.db.Close()
+	})
+	return b.closeErr
 }
 
 func (b *Bot) PairPhone(ctx context.Context, actor, phone string) (code string, err error) {

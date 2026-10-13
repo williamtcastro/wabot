@@ -20,7 +20,7 @@ const (
 	group = "120363000000000001@g.us"
 )
 
-func openDB(t *testing.T) *sql.DB {
+func openDB(t testing.TB) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "test.db")+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
@@ -30,7 +30,7 @@ func openDB(t *testing.T) *sql.DB {
 	return db
 }
 
-func openStore(t *testing.T) *Store {
+func openStore(t testing.TB) *Store {
 	t.Helper()
 	s, err := Open(context.Background(), openDB(t))
 	if err != nil {
@@ -69,7 +69,7 @@ func TestMigrateFromV1KeepsRowids(t *testing.T) {
 		}
 	}
 	s := &Store{db: db}
-	got := s.Query(Filter{}, 10, true)
+	got := query(t, s, Filter{}, 10, true)
 	if !slices.Equal(seqs(got), []int64{1, 3}) {
 		t.Fatalf("seqs after upgrade = %v, want [1 3]", seqs(got))
 	}
@@ -83,7 +83,7 @@ func TestMigrateFromV1KeepsRowids(t *testing.T) {
 	if err := migrate(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(s.Query(Filter{}, 10, true)); n != 3 {
+	if n := len(query(t, s, Filter{}, 10, true)); n != 3 {
 		t.Fatalf("rows after re-migrate = %d, want 3", n)
 	}
 }
@@ -153,7 +153,7 @@ func TestFilterSQLAgreesWithMatch(t *testing.T) {
 				want = append(want, m.Seq)
 			}
 		}
-		got := seqs(s.Query(f, 100, true))
+		got := seqs(query(t, s, f, 100, true))
 		if !slices.Equal(got, append([]int64{}, want...)) {
 			t.Errorf("filter %+v: SQL %v, Match %v", f, got, want)
 		}
@@ -163,11 +163,11 @@ func TestFilterSQLAgreesWithMatch(t *testing.T) {
 func TestChatOnly(t *testing.T) {
 	s := openStore(t)
 	fixtures(t, s)
-	withSender := seqs(s.Query(Filter{Chat: maria}, 100, true))
+	withSender := seqs(query(t, s, Filter{Chat: maria}, 100, true))
 	if !slices.Equal(withSender, []int64{1, 2, 3}) {
 		t.Fatalf("chat=maria = %v, want [1 2 3] (incl. her group message)", withSender)
 	}
-	only := seqs(s.Messages(maria, 100))
+	only := seqs(must[[]Message](t)(s.Messages(maria, 100)))
 	if !slices.Equal(only, []int64{2, 1}) {
 		t.Fatalf("Messages(maria) = %v, want [2 1] (newest first, no group)", only)
 	}
@@ -229,8 +229,8 @@ func TestSaveEditDeleteImport(t *testing.T) {
 		t.Fatalf("history edit = %+v", m)
 	}
 	h, _ := s.Get(ana, "H1")
-	if h.Seq <= 6 || s.LastSeq() != h.Seq {
-		t.Fatalf("history row seq %d, LastSeq %d", h.Seq, s.LastSeq())
+	if h.Seq <= 6 || lastSeq(t, s) != h.Seq {
+		t.Fatalf("history row seq %d, LastSeq %d", h.Seq, lastSeq(t, s))
 	}
 }
 
@@ -265,5 +265,52 @@ func TestChatsAndAudit(t *testing.T) {
 	older, _ := s.AuditLog(10, log[1].ID)
 	if len(older) != 1 || older[0].Action != "send" {
 		t.Fatalf("before cursor = %+v", older)
+	}
+}
+
+func query(t testing.TB, s *Store, f Filter, limit int, oldestFirst bool) []Message {
+	t.Helper()
+	msgs, err := s.Query(f, limit, oldestFirst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msgs
+}
+
+func lastSeq(t testing.TB, s *Store) int64 {
+	t.Helper()
+	seq, err := s.LastSeq()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return seq
+}
+
+func must[T any](t testing.TB) func(T, error) T {
+	return func(v T, err error) T {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+}
+
+func TestLateEditKeepsDeleted(t *testing.T) {
+	s := openStore(t)
+	if _, _, err := s.Save(Message{ID: "M1", Chat: maria, Sender: maria, Type: "text", Text: "oi", Timestamp: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkDeleted(maria, "M1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkEdited(maria, "M1", "back"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Import([]Message{{ID: "M1", Chat: maria, Sender: maria, Type: "text", Text: "again", Edited: true, Timestamp: time.Now()}}); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := s.Get(maria, "M1"); m.Text != "" || !m.Deleted {
+		t.Fatalf("a late edit brought a deleted message back: %+v", m)
 	}
 }
