@@ -322,6 +322,11 @@ func (c *Client) WebhookReplay(ctx context.Context, delivery string) (bot.Webhoo
 	return out, err
 }
 
+// AlertTest sends a test alert through the server's alert backend.
+func (c *Client) AlertTest(ctx context.Context) error {
+	return c.do(ctx, "POST", "alerts/test", nil, struct{}{}, nil)
+}
+
 // QueuePage is the body of GET /queue.
 type QueuePage struct {
 	Items  []store.OutboxItem `json:"items"`

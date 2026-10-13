@@ -1,10 +1,17 @@
 package admin
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 
@@ -132,5 +139,140 @@ func TestLogsTabOnAnOlderServer(t *testing.T) {
 	}
 	if m.logsReq.busy() {
 		t.Fatal("a server without /logs must not be polled")
+	}
+}
+
+func TestLogsFollowAfterAServerRestart(t *testing.T) {
+	var mu sync.Mutex
+	entries := []bot.LogEntry{{ID: 3, Msg: "three"}, {ID: 2, Msg: "two"}, {ID: 1, Msg: "one"}}
+	var asked []int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+		asked = append(asked, since)
+		out := []bot.LogEntry{}
+		for _, e := range entries {
+			if e.ID > since {
+				out = append(out, e)
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"entries": out})
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(srv.URL, "t", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(Options{Client: c})
+	m.width, m.height, m.tab, m.mode = 120, 40, tabLogs, modeNormal
+	m.stats.Started = time.Now().Add(-time.Hour)
+	tick := func() {
+		_, cmd := m.Update(genMsg{m.gen, logsTickMsg{}})
+		run(m, cmd)
+	}
+	tick()
+	if len(m.logs) != 3 {
+		t.Fatalf("first load: %+v", m.logs)
+	}
+	tick()
+	if asked[len(asked)-1] != 3 {
+		t.Fatalf("follow must tail since the newest id, asked %v", asked)
+	}
+
+	mu.Lock()
+	entries = []bot.LogEntry{{ID: 2, Msg: "after restart"}, {ID: 1, Msg: "starting"}}
+	mu.Unlock()
+	m.stats.Started = time.Now()
+	tick()
+	if len(m.logs) != 2 || m.logs[0].Msg != "after restart" {
+		t.Fatalf("after a restart the logs must reload: %+v (asked %v)", m.logs, asked)
+	}
+	mu.Lock()
+	entries = append([]bot.LogEntry{{ID: 3, Msg: "later"}}, entries...)
+	mu.Unlock()
+	tick()
+	if len(m.logs) != 3 || m.logs[0].Msg != "later" || asked[len(asked)-1] != 2 {
+		t.Fatalf("follow must tail the new server: %+v (asked %v)", m.logs, asked)
+	}
+}
+
+func logPage(from, to int64, msg func(int64) string) []bot.LogEntry {
+	var out []bot.LogEntry
+	for id := from; id >= to; id-- {
+		out = append(out, bot.LogEntry{ID: id, Level: "info", Msg: msg(id)})
+	}
+	return out
+}
+
+func TestLogSelectionStaysPutAtTheCap(t *testing.T) {
+	parity := func(id int64) string { return map[bool]string{true: "even", false: "odd"}[id%2 == 0] }
+	for _, query := range []string{"", "even"} {
+		m := newModel(Options{})
+		m.width, m.height, m.tab, m.mode = 120, 40, tabLogs, modeNormal
+		m.applyLogs(logsMsg{seq: m.logsReq.start(), entries: logPage(logsLimit, 1, parity)})
+		m.logsQuery = query
+		m.logsSel = 250
+		want := m.visibleLogs()[m.logsSel].ID
+		m.applyLogs(logsMsg{seq: m.logsReq.start(), since: logsLimit, entries: logPage(logsLimit+5, logsLimit+1, parity)})
+		if len(m.logs) != logsLimit {
+			t.Fatalf("%q: %d entries, want the cap", query, len(m.logs))
+		}
+		if got := m.visibleLogs()[m.logsSel].ID; got != want {
+			t.Fatalf("filter %q: selection moved from #%d to #%d", query, want, got)
+		}
+	}
+}
+
+func TestLogDetailCardFits(t *testing.T) {
+	long := strings.Repeat("x", 1024)
+	for _, n := range []int{4, 40} {
+		m := newModel(Options{})
+		m.width, m.height, m.tab, m.mode = 100, 40, tabLogs, modeNormal
+		e := bot.LogEntry{ID: 1, Level: "error", Msg: strings.Repeat("long message ", 20), Time: time.Now(), Attrs: map[string]string{}}
+		for i := range n {
+			e.Attrs[fmt.Sprintf("attr%02d", i)] = long
+		}
+		m.applyLogs(logsMsg{seq: m.logsReq.start(), entries: []bot.LogEntry{e, {ID: 0, Msg: "older"}}})
+		view := ansi.Strip(m.View())
+		if !strings.Contains(view, "╰") {
+			t.Fatalf("%d attrs: the detail card's bottom border is cut off:\n%s", n, view)
+		}
+		for _, l := range strings.Split(view, "\n") {
+			if ansi.StringWidth(l) > m.width {
+				t.Fatalf("line wider than %d: %q", m.width, l)
+			}
+		}
+		if n == 40 && !strings.Contains(view, "more attribute") {
+			t.Fatalf("hidden attributes aren't counted:\n%s", view)
+		}
+	}
+}
+
+func TestLogLevelIsSanitized(t *testing.T) {
+	m := newModel(Options{})
+	m.width, m.height, m.tab, m.mode = 120, 40, tabLogs, modeNormal
+	m.applyLogs(logsMsg{seq: m.logsReq.start(), entries: []bot.LogEntry{{ID: 1, Level: "\x1b]52;c;cHduZWQ=\x07warn", Msg: "hi"}}})
+	if strings.ContainsAny(m.logs[0].Level, "\x1b\x07") || strings.Contains(m.View(), "]52;") {
+		t.Fatalf("level not sanitized: %q", m.logs[0].Level)
+	}
+}
+
+func TestReturningToLogsKeepsTheSelection(t *testing.T) {
+	b, c := newServer(t)
+	buf := bot.NewLogBuffer(100)
+	b.Logs = buf
+	log := slog.New(buf.Wrap(slog.NewTextHandler(io.Discard, nil)))
+	for i := range 5 {
+		log.Info("entry", "n", i)
+	}
+	m := newTestModel(t, Options{Client: c})
+	press(m, "8", "j", "j")
+	want := m.visibleLogs()[m.logsSel].ID
+	press(m, "1")
+	log.Info("while away")
+	press(m, "8")
+	if len(m.logs) != 6 || m.visibleLogs()[m.logsSel].ID != want {
+		t.Fatalf("back on Logs: %d entries, selected #%d, want #%d", len(m.logs), m.visibleLogs()[m.logsSel].ID, want)
 	}
 }

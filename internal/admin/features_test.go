@@ -607,3 +607,120 @@ func TestTimeColumnsLineUp(t *testing.T) {
 		check(t, width, ansi.Strip(m.View()), "", "")
 	}
 }
+
+func TestHeaderKeepsTheStateWithEveryBadge(t *testing.T) {
+	c, err := NewClient("http://127.0.0.1:1", "t", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, width := range []int{100, 120} {
+		for tb := range tabNames {
+			m := newModel(Options{Client: c, Profile: "maria-server"})
+			m.width, m.height, m.tab = width, 30, tab(tb)
+			m.status, m.checked, m.latency = bot.Status{Connected: true, LoggedIn: true}, now, 42*time.Millisecond
+			m.chats = []store.Chat{{JID: maria, Unread: 3}, {JID: john, Unread: 1}}
+			m.tokens = []store.Token{{Name: "support-bot"}, {Name: "ana-bot"}}
+			m.audit = []store.AuditEntry{{At: now, Action: "send", Actor: "ana-bot"}}
+			m.statsAt = now
+			m.stats.Limits.Send.LastRejected = now
+			m.stats.Queue = bot.QueueStats{OutboxCounts: store.OutboxCounts{Queued: 12}, Paused: true}
+			m.settings = []bot.SettingView{{Key: "rate", Overridden: true}}
+			header := ansi.Strip(m.viewHeader())
+			if !strings.Contains(header, "● connected") || ansi.StringWidth(header) > width {
+				t.Fatalf("width %d, tab %d: %q (%d wide)", width, tb+1, header, ansi.StringWidth(header))
+			}
+			if strings.Contains(header, "…") || !strings.Contains(header, fmt.Sprintf("%d %s", tb+1, tabNames[tb])) {
+				t.Fatalf("width %d: a tab label is cut or the open one lost its name: %q", width, header)
+			}
+			for _, badge := range []string{"✗1", "!", "⏸12", "•"} {
+				if !strings.Contains(header, badge) {
+					t.Fatalf("width %d: badge %q missing: %q", width, badge, header)
+				}
+			}
+		}
+	}
+	m := newModel(Options{Client: c})
+	m.width, m.status, m.checked = 50, bot.Status{Connected: true, LoggedIn: true}, now
+	if header := ansi.Strip(m.viewHeader()); !strings.Contains(header, "● connected") || ansi.StringWidth(header) > 50 {
+		t.Fatalf("narrow: tabs must be cut, not the state: %q", header)
+	}
+}
+
+func TestQueueStateFromANewerServer(t *testing.T) {
+	got := queueState(store.OutboxItem{Status: "held\x1b]52;c;cHduZWQ=\x07"})
+	if !strings.Contains(ansi.Strip(got), "held") || strings.Contains(got, "]52;") {
+		t.Fatalf("unknown status: %q", got)
+	}
+	body := queueBody(bot.QueueStats{Running: true, QuietHours: "21:00\x1b[2J-08:00"})
+	if strings.Contains(body, "[2J") || !strings.Contains(ansi.Strip(body), "21:00") {
+		t.Fatalf("quiet hours not sanitized: %q", body)
+	}
+}
+
+func TestChatTitleJIDIsSanitized(t *testing.T) {
+	m := newModel(Options{})
+	m.width, m.height, m.tab, m.mode = 120, 30, tabChats, modeNormal
+	m.chats = []store.Chat{{JID: "120363000000000000\x1b]52;c;cHduZWQ=\x07@g.us"}}
+	if strings.Contains(m.View(), "]52;") {
+		t.Fatal("the chat's JID reached the screen unsanitized")
+	}
+}
+
+type fakeNotifier struct{ fail atomic.Bool }
+
+func (f *fakeNotifier) Name() string { return "gotify" }
+
+func (f *fakeNotifier) Notify(context.Context, bot.Alert) error {
+	if f.fail.Load() {
+		return fmt.Errorf("gotify answered 500 \x1b[31mboom")
+	}
+	return nil
+}
+
+func TestHealthAlerts(t *testing.T) {
+	b, c := newServer(t)
+	n := &fakeNotifier{}
+	b.SetAlerts(n, 30*time.Second)
+	m := newTestModel(t, Options{Client: c})
+	press(m, "5")
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"Alerts", "gotify", "30s", "never", "test alert"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("health view lacks %q:\n%s", want, view)
+		}
+	}
+	press(m, "a")
+	if m.noticeErr || m.notice != "test alert sent" || m.stats.Alerts.Sent != 1 {
+		t.Fatalf("test alert: %q, %+v", m.notice, m.stats.Alerts)
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "wame: test alert") {
+		t.Fatalf("last alert not shown:\n%s", ansi.Strip(m.View()))
+	}
+	n.fail.Store(true)
+	press(m, "a")
+	view = m.View()
+	if !m.noticeErr || !strings.Contains(m.notice, "test alert failed") || strings.Contains(view, "\x1b[31mboom") {
+		t.Fatalf("failed alert: %q", m.notice)
+	}
+	if !strings.Contains(ansi.Strip(view), "Last error") || !strings.Contains(ansi.Strip(view), "1 failed") || !m.healthWarning() {
+		t.Fatalf("alert error not shown or not flagged:\n%s", ansi.Strip(view))
+	}
+	m.Update(alertMsg{&APIError{Code: 404}})
+	if !m.noticeErr || !strings.Contains(m.notice, "can't send test alerts yet") {
+		t.Fatalf("older server: %q", m.notice)
+	}
+}
+
+func TestHealthWithoutAlerts(t *testing.T) {
+	_, c := newServer(t)
+	m := newTestModel(t, Options{Client: c})
+	press(m, "5")
+	if !strings.Contains(ansi.Strip(m.View()), "No alerts configured") {
+		t.Fatalf("missing the not-configured hint:\n%s", ansi.Strip(m.View()))
+	}
+	press(m, "a")
+	if !m.noticeErr || !strings.Contains(m.notice, "no alerts are configured") {
+		t.Fatalf("test alert without a backend: %q", m.notice)
+	}
+}

@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/termui"
@@ -36,10 +37,35 @@ var logLevels = []string{"", "info", "warn", "error"}
 
 var logStyles = map[string]lipgloss.Style{
 	"debug": styleFaint,
-	"info":  lipgloss.NewStyle().Foreground(colInfo),
+	"info":  styleInfo,
 	"warn":  styleWarn,
 	"error": styleErr,
 }
+
+// logEntry is a sanitized entry with its attributes rendered and its filter haystack, worked out
+// once as it arrives rather than on every key and frame.
+type logEntry struct {
+	bot.LogEntry
+	attrs, hay string
+}
+
+func newLogEntry(e bot.LogEntry) logEntry {
+	e.Msg, e.Level = safe(e.Msg), safe(e.Level)
+	attrs := make(map[string]string, len(e.Attrs))
+	for k, v := range e.Attrs {
+		attrs[safe(k)] = safe(v)
+	}
+	e.Attrs = attrs
+	parts := make([]string, 0, len(attrs))
+	for _, k := range slices.Sorted(maps.Keys(attrs)) {
+		parts = append(parts, k+"="+attrs[k])
+	}
+	le := logEntry{LogEntry: e, attrs: strings.Join(parts, " ")}
+	le.hay = strings.ToLower(e.Msg + " " + le.attrs)
+	return le
+}
+
+func logHay(e logEntry) string { return e.hay }
 
 func (m *model) newestLog() int64 {
 	if len(m.logs) == 0 {
@@ -56,6 +82,19 @@ func (m *model) loadLogs(since int64) tea.Cmd {
 		e, err := c.Logs(ctx, level, since, logsLimit)
 		return logsMsg{seq, level, since, e, err}
 	})
+}
+
+// refreshLogs tails the loaded entries, or loads the newest page when there are none or the server
+// restarted since they loaded: its log ids start again at 1, so a tail would never match.
+func (m *model) refreshLogs() tea.Cmd {
+	started := m.stats.Started
+	if m.logsStarted.IsZero() {
+		m.logsStarted = started
+	}
+	if len(m.logs) == 0 || !started.IsZero() && !started.Equal(m.logsStarted) {
+		return m.loadLogs(0)
+	}
+	return m.loadLogs(m.newestLog())
 }
 
 // followLogs starts the poll that tails the logs while the tab is open and follow is on. The tick
@@ -76,7 +115,7 @@ func (m *model) logsTick() tea.Cmd {
 	}
 	var load tea.Cmd
 	if !m.logsReq.busy() && !isNotFound(m.logsErr) {
-		load = m.loadLogs(m.newestLog())
+		load = m.refreshLogs()
 	}
 	return tea.Batch(load, m.followLogs())
 }
@@ -92,24 +131,21 @@ func (m *model) applyLogs(msg logsMsg) {
 	if msg.err != nil {
 		return
 	}
-	for i := range msg.entries {
-		e := &msg.entries[i]
-		e.Msg = safe(e.Msg)
-		attrs := make(map[string]string, len(e.Attrs))
-		for k, v := range e.Attrs {
-			attrs[safe(k)] = safe(v)
-		}
-		e.Attrs = attrs
+	fresh := make([]logEntry, len(msg.entries))
+	for i, e := range msg.entries {
+		fresh[i] = newLogEntry(e)
 	}
-	before := len(m.visibleLogs())
-	if msg.since == 0 || len(msg.entries) >= logsLimit {
-		m.logs = msg.entries
-		m.logsSel = 0
-	} else {
-		m.logs = append(msg.entries, m.logs...)[:min(len(msg.entries)+len(m.logs), logsLimit)]
+	switch {
+	case msg.since == 0:
+		m.logs, m.logsSel, m.logsStarted = fresh, 0, m.stats.Started
+	case len(fresh) >= logsLimit:
+		m.logs, m.logsSel = fresh, 0
+	default:
+		// The selection stays on its entry: it moves down by the new entries the filter shows.
 		if m.logsSel > 0 {
-			m.logsSel += len(m.visibleLogs()) - before
+			m.logsSel += len(filtered(fresh, m.logsQuery, logHay))
 		}
+		m.logs = append(fresh, m.logs...)[:min(len(fresh)+len(m.logs), logsLimit)]
 	}
 	m.logsSel = clamp(m.logsSel, len(m.visibleLogs()))
 }
@@ -132,40 +168,13 @@ func (m *model) logsKey(k string) tea.Cmd {
 			return nil
 		}
 		m.setNotice("following new log entries", false)
-		return tea.Batch(m.loadLogs(m.newestLog()), m.followLogs())
-	case "/":
-		m.startPrompt(modeFilter, "filter by message or attribute")
-		m.prompt.SetValue(m.logsQuery)
-		m.prompt.CursorEnd()
-	case "esc":
-		m.logsQuery = ""
-		m.logsSel = clamp(m.logsSel, len(m.visibleLogs()))
+		return tea.Batch(m.refreshLogs(), m.followLogs())
 	}
+	m.listFilterKey(k, "filter by message or attribute")
 	return nil
 }
 
-func (m *model) visibleLogs() []bot.LogEntry {
-	q := strings.ToLower(m.logsQuery)
-	if q == "" {
-		return m.logs
-	}
-	var out []bot.LogEntry
-	for _, e := range m.logs {
-		if strings.Contains(strings.ToLower(e.Msg+" "+logAttrs(e)), q) {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
-// logAttrs renders an entry's attributes as k=v pairs in key order.
-func logAttrs(e bot.LogEntry) string {
-	parts := make([]string, 0, len(e.Attrs))
-	for _, k := range slices.Sorted(maps.Keys(e.Attrs)) {
-		parts = append(parts, k+"="+e.Attrs[k])
-	}
-	return strings.Join(parts, " ")
-}
+func (m *model) visibleLogs() []logEntry { return filtered(m.logs, m.logsQuery, logHay) }
 
 func logLevel(level string) string {
 	style, ok := logStyles[level]
@@ -206,7 +215,7 @@ func (m *model) viewLogs() string {
 	start, end := window(m.logsSel, len(entries), m.bodyHeight()-3-lipgloss.Height(detail))
 	for i := start; i < end; i++ {
 		e := entries[i]
-		line := table(cols, styleDim.Render(stamp(e.Time, "15:04:05")), logLevel(e.Level), e.Msg, styleDim.Render(logAttrs(e)))
+		line := table(cols, styleDim.Render(stamp(e.Time, "15:04:05")), logLevel(e.Level), e.Msg, styleDim.Render(e.attrs))
 		lines = append(lines, m.row(line, i == m.logsSel))
 	}
 	return strings.Join(append(lines, indent(detail, " ")), "\n")
@@ -219,14 +228,29 @@ func levelLabel(level string) string {
 	return level + " and above"
 }
 
-func (m *model) logDetail(entries []bot.LogEntry) string {
+// logDetail is the selected entry's card. Values are cut to one line and attributes past half the
+// body are counted instead, so the card always fits.
+func (m *model) logDetail(entries []logEntry) string {
 	if m.logsSel >= len(entries) {
 		return ""
 	}
 	e := entries[m.logsSel]
-	rows := [][2]string{{"When", stamp(e.Time, "2006-01-02 15:04:05") + styleDim.Render(" ("+relTime(e.Time)+")")}}
-	for _, k := range slices.Sorted(maps.Keys(e.Attrs)) {
-		rows = append(rows, [2]string{k, e.Attrs[k]})
+	w := m.cardWidth(cardDetail)
+	keys := slices.Sorted(maps.Keys(e.Attrs))
+	kw := len("When")
+	for _, k := range keys {
+		kw = max(kw, min(ansi.StringWidth(k), 24))
 	}
-	return card(fmt.Sprintf("#%d %s", e.ID, logLevel(e.Level)+" "+styleBold.Render(e.Msg)), m.cardWidth(cardDetail), kv(rows))
+	valW := max(w-4-kw-2, 10)
+	room := max(m.bodyHeight()/2-3, 2)
+	rows := [][2]string{{"When", stamp(e.Time, "2006-01-02 15:04:05") + styleDim.Render(" ("+relTime(e.Time)+")")}}
+	for i, k := range keys {
+		if left := len(keys) - i; len(rows) == room-1 && left > 1 {
+			rows = append(rows, [2]string{"…", styleDim.Render(plural(left, "more attribute"))})
+			break
+		}
+		rows = append(rows, [2]string{fit(k, 24), fit(e.Attrs[k], valW)})
+	}
+	title := fit(fmt.Sprintf("#%d %s", e.ID, logLevel(e.Level)+" "+styleBold.Render(e.Msg)), max(w-4, 10))
+	return card(title, w, kv(rows))
 }

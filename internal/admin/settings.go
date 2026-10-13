@@ -24,16 +24,19 @@ type (
 		res  bot.WebhookResult
 		err  error
 	}
+	alertMsg struct{ err error }
 )
 
 var settingLabels = map[string][2]string{
-	"rate":           {"Send rate", "messages per minute, 0 = unlimited; number lookups get 3×"},
-	"chat_gap":       {"Chat gap", "minimum time between two messages to the same chat, e.g. 1s"},
-	"max_wait":       {"Max wait", "how long a send may queue before the API answers 429, e.g. 30s"},
-	"auto_reply":     {"Auto-replies", "answer !ping, !time and !help"},
-	"webhook_filter": {"Webhook filter", "which messages go to the webhook, e.g. type=text&from_me=false"},
-	"queue_paused":   {"Queue paused", "hold queued messages; sending resumes where it stopped"},
-	"queue_jitter":   {"Queue jitter", "random extra wait, 0 up to this, between queued sends, e.g. 2s"},
+	"rate":              {"Send rate", "messages per minute, 0 = unlimited; number lookups get 3×"},
+	"chat_gap":          {"Chat gap", "minimum time between two messages to the same chat, e.g. 1s"},
+	"max_wait":          {"Max wait", "how long a send may queue before the API answers 429, e.g. 30s"},
+	"auto_reply":        {"Auto-replies", "answer !ping, !time and !help"},
+	"webhook_filter":    {"Webhook filter", "which messages go to the webhook, e.g. type=text&from_me=false"},
+	"queue_paused":      {"Queue paused", "hold queued messages; sending resumes where it stopped"},
+	"queue_jitter":      {"Queue jitter", "random extra wait, 0 up to this, between queued sends, e.g. 2s"},
+	"queue_quiet_hours": {"Quiet hours", "a window when queued messages wait, e.g. 21:00-08:00; empty turns it off"},
+	"queue_timezone":    {"Queue time zone", "the zone quiet hours are in, e.g. America/Sao_Paulo"},
 }
 
 // settingLabel is a setting's name and description; a key added by a newer server shows as itself.
@@ -201,8 +204,26 @@ func (m *model) healthKey(k string) tea.Cmd {
 		return m.testWebhook()
 	case "R":
 		return m.replayWebhook()
+	case "a":
+		m.setNotice("sending a test alert…", false)
+		return m.call(func(ctx context.Context, c *Client) tea.Msg {
+			return alertMsg{c.AlertTest(ctx)}
+		})
 	}
 	return nil
+}
+
+func (m *model) applyAlertMsg(msg alertMsg) tea.Cmd {
+	switch {
+	case isNotFound(msg.err):
+		m.setNotice("this server can't send test alerts yet: update wame on it", true)
+		return nil
+	case msg.err != nil:
+		m.setNotice("test alert failed: "+msg.err.Error(), true)
+	default:
+		m.setNotice("test alert sent", false)
+	}
+	return tea.Batch(m.loadStats(), m.loadAudit(false))
 }
 
 // callerUsage finds a caller's 24-hour usage in the last stats, by token name.

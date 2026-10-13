@@ -178,7 +178,8 @@ type model struct {
 	queueReload  termui.Debounce
 	confirmBatch string
 
-	logs        []bot.LogEntry
+	logs        []logEntry
+	logsStarted time.Time
 	logsErr     error
 	logsSel     int
 	logsLevel   string
@@ -469,6 +470,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case webhookMsg:
 		return m, m.applyWebhookMsg(msg)
 
+	case alertMsg:
+		return m, m.applyAlertMsg(msg)
+
 	case chatsMsg:
 		return m, m.applyChats(msg)
 
@@ -698,7 +702,7 @@ func (m *model) setTab(t tab) tea.Cmd {
 	case tabQueue:
 		return tea.Batch(m.loadQueue(), m.loadStats())
 	case tabLogs:
-		return tea.Batch(m.loadLogs(0), m.followLogs())
+		return tea.Batch(m.refreshLogs(), m.followLogs())
 	}
 	return nil
 }
@@ -777,23 +781,44 @@ func (m *model) auditKey(k string) tea.Cmd {
 		}
 		return nil
 	}
+	m.listFilterKey(k, "filter by actor, action, target, detail or error")
+	return nil
+}
+
+// filterQuery is the open tab's filter: Logs or Audit.
+func (m *model) filterQuery() *string {
+	if m.tab == tabLogs {
+		return &m.logsQuery
+	}
+	return &m.auditQuery
+}
+
+// clampFiltered keeps the open tab's selection inside its filtered list.
+func (m *model) clampFiltered() {
+	if m.tab == tabLogs {
+		m.logsSel = clamp(m.logsSel, len(m.visibleLogs()))
+	} else {
+		m.auditSel = clamp(m.auditSel, len(m.visibleAudit()))
+	}
+}
+
+// listFilterKey handles / (edit the open tab's filter) and esc (clear it) on a filtered list.
+func (m *model) listFilterKey(k, placeholder string) {
+	q := m.filterQuery()
 	switch k {
 	case "/":
-		m.startPrompt(modeFilter, "filter by actor, action, target, detail or error")
-		m.prompt.SetValue(m.auditQuery)
+		m.startPrompt(modeFilter, placeholder)
+		m.prompt.SetValue(*q)
 		m.prompt.CursorEnd()
 	case "esc":
-		m.auditQuery = ""
+		*q = ""
+		m.clampFiltered()
 	}
-	return nil
 }
 
 // filterKey edits the open tab's filter (Audit or Logs) as it's typed; esc clears it, enter keeps it.
 func (m *model) filterKey(k tea.KeyMsg) tea.Cmd {
-	q := &m.auditQuery
-	if m.tab == tabLogs {
-		q = &m.logsQuery
-	}
+	q := m.filterQuery()
 	var cmd tea.Cmd
 	switch k.String() {
 	case "esc":
@@ -805,8 +830,7 @@ func (m *model) filterKey(k tea.KeyMsg) tea.Cmd {
 		m.prompt, cmd = m.prompt.Update(k)
 		*q = m.prompt.Value()
 	}
-	m.auditSel = clamp(m.auditSel, len(m.visibleAudit()))
-	m.logsSel = clamp(m.logsSel, len(m.visibleLogs()))
+	m.clampFiltered()
 	return cmd
 }
 
@@ -873,15 +897,21 @@ func (m *model) promptKey(k tea.KeyMsg, submit func(string) tea.Cmd) (tea.Model,
 }
 
 func (m *model) visibleAudit() []store.AuditEntry {
-	q := strings.ToLower(m.auditQuery)
+	return filtered(m.audit, m.auditQuery, func(e store.AuditEntry) string {
+		return strings.ToLower(strings.Join([]string{e.Actor, e.Action, e.Target, e.Detail, e.Error}, " "))
+	})
+}
+
+// filtered keeps the items whose lowercase haystack contains q, ignoring case; all of them when q is empty.
+func filtered[T any](items []T, q string, hay func(T) string) []T {
+	q = strings.ToLower(q)
 	if q == "" {
-		return m.audit
+		return items
 	}
-	var out []store.AuditEntry
-	for _, e := range m.audit {
-		hay := strings.ToLower(strings.Join([]string{e.Actor, e.Action, e.Target, e.Detail, e.Error}, " "))
-		if strings.Contains(hay, q) {
-			out = append(out, e)
+	var out []T
+	for _, it := range items {
+		if strings.Contains(hay(it), q) {
+			out = append(out, it)
 		}
 	}
 	return out

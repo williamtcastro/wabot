@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/williamtcastro/wame/internal/bot"
 )
@@ -73,6 +74,37 @@ func (m *model) webhookBody() string {
 	})
 }
 
+// alertsBody is the Alerts card in width columns; the title and error are cut to fit.
+func (m *model) alertsBody(width int) string {
+	a := m.stats.Alerts
+	if !a.Configured {
+		return styleDim.Render("No alerts configured (-alert-gotify / WAME_ALERT_GOTIFY).")
+	}
+	room := width - len("Last error") - 2
+	sent := styleBold.Render(fmt.Sprint(a.Sent))
+	if a.Failed > 0 {
+		sent += styleErr.Render(fmt.Sprintf(", %d failed", a.Failed))
+	}
+	last := styleDim.Render("never")
+	if !a.LastSent.IsZero() {
+		last = relTime(a.LastSent)
+		if a.LastTitle != "" {
+			last += styleDim.Render(" · " + fit(safe(a.LastTitle), max(room-ansi.StringWidth(last)-3, 8)))
+		}
+	}
+	rows := [][2]string{
+		{"Backend", cmp.Or(safe(a.Backend), "?")},
+		{"Delay", (time.Duration(a.DelayMS) * time.Millisecond).String() + styleDim.Render(" before a disconnection alert")},
+		{"Sent", sent},
+		{"Last sent", last},
+	}
+	if a.LastError != "" {
+		at := " " + relTime(a.LastErrorAt)
+		rows = append(rows, [2]string{"Last error", styleErr.Render(fit(safe(a.LastError), max(room-len(at), 8))) + styleDim.Render(at)})
+	}
+	return kv(rows)
+}
+
 func (m *model) viewHealth() string {
 	switch {
 	case m.statsErr != nil && (m.statsAt.IsZero() || isNotFound(m.statsErr)):
@@ -97,6 +129,7 @@ func (m *model) viewHealth() string {
 		{"Number lookups", limiterBody(s.Limits.Lookups, "429s")},
 		{"Auto-replies", limiterBody(s.Limits.AutoReply, "Dropped")},
 		{"Webhook", m.webhookBody()},
+		{"Alerts", m.alertsBody(m.gridWidth() - 4)},
 		{"Recent webhook failures", m.webhookFailures(m.gridWidth() - 4)},
 	})
 }

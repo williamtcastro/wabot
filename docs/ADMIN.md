@@ -17,8 +17,8 @@ wame admin -server https://wame.example.com
 | **2 Chats** | the server's chats with unread counts, and the selected chat's latest messages; or results of a search across every chat | `j`/`k`, `g`/`G` pick a chat, `i` send a message, `/` search, `Esc` clear the search |
 | **3 Tokens** | every token with colored scopes (`read`, `send`, `admin`), chats, rate, expiry (amber within 7 days), last use (amber ⚠ when unused for 30+ days), its requests and sends in the last 24 h (failed sends in red), open live connections, and creator; revoked and expired ones struck through. A card below shows the selected token in full, including when and from which IP it was last seen | `j`/`k` move, `n` new, `R` rotate, `x` revoke (both ask first) |
 | **4 Audit** | the audit log, newest first, with ✓ / ✗ and actions colored by kind; a card below shows the selected entry with its full time and error | `j`/`k`, `Ctrl+D`/`Ctrl+U`, `g`/`G` move, `/` filter, `Esc` clear the filter |
-| **5 Health** | the server's version and uptime; for sends, number lookups and auto-replies, a meter of the last minute's use against the limit, the per-chat gap and 429s (or dropped auto-replies) since startup; the webhook's queue, delivered / retried / replayed / given up / dropped counts and its latest failures | `j`/`k` pick a failure, `R` replay it, `t` send a test delivery |
-| **6 Settings** | the settings that change without a restart (send rate, chat gap, max wait, auto-replies, webhook filter, queue paused, queue jitter): the value in effect, the server's flag, and who changed it and when | `j`/`k` move, `Enter` change (toggles on/off ones), `x` back to the flag |
+| **5 Health** | the server's version and uptime; for sends, number lookups and auto-replies, a meter of the last minute's use against the limit, the per-chat gap and 429s (or dropped auto-replies) since startup; the webhook's queue, delivered / retried / replayed / given up / dropped counts and its latest failures; the [alerts](#alerts): backend, delay, sent (failed in red), the last one sent and the last error | `j`/`k` pick a failure, `R` replay it, `t` send a test delivery, `a` send a test alert |
+| **6 Settings** | the settings that change without a restart (send rate, chat gap, max wait, auto-replies, webhook filter, queue paused, queue jitter, queue quiet hours, queue time zone): the value in effect, the server's flag, and who changed it and when | `j`/`k` move, `Enter` change (toggles on/off ones), `x` back to the flag |
 | **7 Queue** | the [send queue](QUEUE.md): whether it's sending, paused, in [quiet hours](QUEUE.md#quiet-hours) (until when, in which zone), backing off or has no worker, what's waiting and what was sent or failed in the last 7 days, how many sent ones were delivered and read, the quiet hours, the jitter and the last error; below, the items (batch, recipient, state, attempts, who queued it, when it's due, error), never their text. A sent item's state shows its receipts like WhatsApp: `✓ sent`, `✓✓ delivered`, and a blue `✓✓ read` | `j`/`k` move, `f` filter by state, `x` cancel the marked item, `X` cancel its whole batch (asks first), `P` pause / resume |
 | **8 Logs** | the server's recent app logs, newest first: time, level (debug faint, info blue, warn amber, error red), message and attributes (dim); a card below shows the selected entry with every attribute. While the tab is open it follows new entries every 3 s ([details](#logs)) | `j`/`k` move, `f` level (all, info, warn, error), `/` filter, `Esc` clear the filter, `F` pause / follow |
 
@@ -27,10 +27,11 @@ In every list, `j`/`k` or the arrows move, `Ctrl+D`/`Ctrl+U` or `PgDn`/`PgUp` pa
 
 Everywhere: `1`–`8` or `Tab` / `Shift+Tab` switch tabs, `S` switches server (see
 [Several servers](#several-servers)), `r` refreshes, `q` or `Ctrl+C` quits. The header shows unread
-chats, active tokens, failed actions in the last 24 h (red), a `!` on Health after a 429 or
-webhook failure in the last hour, a `•` on Settings while any is changed from its flag and the number
+chats, active tokens, failed actions in the last 24 h (red), a `!` on Health after a 429,
+webhook failure or alert error in the last hour, a `•` on Settings while any is changed from its flag and the number
 of messages waiting on Queue (`⏸` while paused), plus the connection state, the server, live or polling, and the
-latency. Confirmations, forms and the new token open as dialogs over the current tab.
+latency. On a narrow terminal the other tabs shrink to their number and badge; the
+connection state always stays. Confirmations, forms and the new token open as dialogs over the current tab.
 
 ## Live updates
 
@@ -83,6 +84,15 @@ marked failed delivery again, once, with the same delivery id; it's marked `repl
 receiver accepts it. Only deliveries in the list can be replayed. See
 [`POST /webhook/test`, `POST /webhook/replay`](API.md#post-webhooktest-post-webhookreplay).
 
+## Alerts
+
+The Health tab's Alerts card shows what the server's [alerts](API.md#alerts) (`-alert-gotify` /
+`WAME_ALERT_GOTIFY`) have done since it started: the backend, how long a disconnection must last
+before it alerts, how many were sent or failed, the last one's title and the last error. `a` sends a
+low-priority test alert ([`POST /alerts/test`](API.md#alerts)) and says whether it went through; it's in the
+audit log as `alert_test`. A server without alerts configured says so; an older one that can't send
+test alerts asks to be updated.
+
 ## Logs
 
 The Logs tab reads [`GET /logs`](API.md#get-logs): the newest 1000 app log records the server keeps
@@ -94,7 +104,9 @@ the first place. whatsmeow's own protocol logs go to the server's stdout and are
 `f` changes the lowest level shown and reloads; `/` filters what's loaded by message or attribute.
 Following polls `GET /logs?since=` every 3 seconds while the tab is open (not over the event stream)
 and adds new entries on top; if you've moved down the list, the selection stays on the same entry.
-`F` pauses that, and `F` again catches up. Leaving the tab stops the polling.
+`F` pauses that, and `F` again catches up. Leaving the tab stops the polling; coming back catches up
+the same way, keeping the selection. When the server restarts (its start time on the Health tab
+changes), the list reloads from the newest entry, since the new server numbers its log from 1 again.
 
 ## Logging in a server remotely
 

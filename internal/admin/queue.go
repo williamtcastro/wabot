@@ -9,7 +9,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/store"
@@ -119,20 +118,20 @@ var queueStyles = map[string]func(...string) string{
 	store.OutboxCanceled: styleFaint.Render,
 }
 
-// styleRead is the blue of WhatsApp's read ticks.
-var styleRead = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-
 // queueState shows a sent item's receipts the way WhatsApp does: ✓ sent, ✓✓ delivered, blue ✓✓ read.
 func queueState(it store.OutboxItem) string {
 	switch it.Progress() {
 	case store.OutboxRead:
-		return styleRead.Render("✓✓ read")
+		return styleInfo.Render("✓✓ read")
 	case store.OutboxDelivered:
 		return "✓✓ delivered"
 	case store.OutboxSent:
 		return styleDim.Render("✓ sent")
 	}
-	return queueStyles[it.Status](it.Status)
+	if style, ok := queueStyles[it.Status]; ok {
+		return style(it.Status)
+	}
+	return styleDim.Render(safe(it.Status))
 }
 
 func queueBody(q bot.QueueStats) string {
@@ -155,10 +154,10 @@ func queueBody(q bot.QueueStats) string {
 	}
 	if q.Sent > 0 {
 		rows = append(rows, [2]string{"Receipts", fmt.Sprintf("%d delivered", q.Delivered) + styleDim.Render(" · ") +
-			styleRead.Render(fmt.Sprintf("%d read", q.Read)) + styleDim.Render(fmt.Sprintf(" of %d sent", q.Sent))})
+			styleInfo.Render(fmt.Sprintf("%d read", q.Read)) + styleDim.Render(fmt.Sprintf(" of %d sent", q.Sent))})
 	}
 	if q.QuietHours != "" {
-		rows = append(rows, [2]string{"Quiet hours", q.QuietHours + styleDim.Render(" "+safe(q.Timezone))})
+		rows = append(rows, [2]string{"Quiet hours", safe(q.QuietHours) + styleDim.Render(" "+safe(q.Timezone))})
 	}
 	if !q.OldestQueued.IsZero() && q.Queued > 0 {
 		rows = append(rows, [2]string{"Oldest", relTime(q.OldestQueued)})

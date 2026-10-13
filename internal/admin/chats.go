@@ -130,7 +130,7 @@ func (m *model) chatName(jid string) string {
 			return safe(c.Name)
 		}
 	}
-	return displayJID(jid)
+	return displayJID(safe(jid))
 }
 
 func (m *model) viewChats() string {
@@ -173,7 +173,7 @@ func (m *model) viewChats() string {
 
 func (m *model) viewMessages(w, h int) string {
 	chat := m.selectedChat()
-	title := fit(styleBold.Render(m.chatName(chat))+"  "+styleDim.Render(chat), w)
+	title := fit(styleBold.Render(m.chatName(chat))+"  "+styleDim.Render(safe(chat)), w)
 	if m.msgsErr != nil {
 		return title + "\n\n" + errText(m.msgsErr)
 	}
@@ -198,7 +198,7 @@ func (m *model) viewMessages(w, h int) string {
 func (m *model) messageLines(msg store.Message, w int) []string {
 	who := styleAccent.Render("me")
 	if !msg.FromMe {
-		who = lipgloss.NewStyle().Foreground(colInfo).Render(fit(safe(cmp.Or(msg.PushName, displayJID(msg.Sender))), 18))
+		who = styleInfo.Render(fit(safe(cmp.Or(msg.PushName, displayJID(msg.Sender))), 18))
 	}
 	prefix := styleDim.Render(stamp(msg.Timestamp, "15:04")) + " " + who + " "
 	body := messageText(msg)
@@ -240,7 +240,7 @@ func (m *model) viewSearch(w, h int) string {
 		if len(lines) >= h {
 			break
 		}
-		head := styleDim.Render(when(msg.Timestamp)) + " " + lipgloss.NewStyle().Foreground(colInfo).Render(fit(m.chatName(msg.Chat), 20)) + " "
+		head := styleDim.Render(when(msg.Timestamp)) + " " + styleInfo.Render(fit(m.chatName(msg.Chat), 20)) + " "
 		lines = append(lines, ansi.Truncate(head+messageText(msg), w, "…"))
 	}
 	return strings.Join(lines, "\n")

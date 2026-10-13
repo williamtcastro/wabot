@@ -31,6 +31,7 @@ var (
 	styleWarn   = lipgloss.NewStyle().Foreground(colWarn)
 	styleBold   = lipgloss.NewStyle().Bold(true).Foreground(colText)
 	styleAccent = lipgloss.NewStyle().Foreground(colAccent)
+	styleInfo   = lipgloss.NewStyle().Foreground(colInfo)
 	styleKey    = lipgloss.NewStyle().Foreground(colText).Background(colSel).Padding(0, 1)
 	styleLogo   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(colAccent).Padding(0, 1)
 	styleTab    = lipgloss.NewStyle().Padding(0, 1).Foreground(colMuted)
@@ -153,51 +154,62 @@ func (m *model) host() string {
 	return m.c.base.Host
 }
 
-func (m *model) viewHeader() string {
-	parts := []string{" " + styleLogo.Render("◆ wame admin")}
-	for i, name := range tabNames {
-		var label strings.Builder
-		label.WriteString(fmt.Sprintf("%d %s", i+1, name))
-		switch tab(i) {
-		case tabChats:
-			if n := m.unreadChats(); n > 0 {
-				label.WriteString(" " + styleAccent.Render(fmt.Sprint(n)))
-			}
-		case tabTokens:
-			if n := m.activeTokens(); n > 0 {
-				label.WriteString(" " + styleDim.Render(fmt.Sprint(n)))
-			}
-		case tabAudit:
-			if n := m.recentFailures(); n > 0 {
-				label.WriteString(" " + styleErr.Render(fmt.Sprintf("✗%d", n)))
-			}
-		case tabHealth:
-			if m.healthWarning() {
-				label.WriteString(" " + styleWarn.Render("!"))
-			}
-		case tabQueue:
-			switch q := m.stats.Queue; {
-			case q.Paused && q.Queued > 0:
-				label.WriteString(" " + styleWarn.Render(fmt.Sprintf("⏸%d", q.Queued)))
-			case q.Queued+q.Sending > 0:
-				label.WriteString(" " + styleAccent.Render(fmt.Sprint(q.Queued+q.Sending)))
-			}
-		case tabSettings:
-			for _, s := range m.settings {
-				if s.Overridden {
-					label.WriteString(" " + styleWarn.Render("•"))
-					break
-				}
-			}
+// tabLabel is a tab's number, name and badge; compact drops the name unless it's the open tab.
+func (m *model) tabLabel(t tab, compact bool) string {
+	label := fmt.Sprint(int(t) + 1)
+	if !compact || t == m.tab {
+		label += " " + tabNames[t]
+	}
+	switch t {
+	case tabChats:
+		if n := m.unreadChats(); n > 0 {
+			label += " " + styleAccent.Render(fmt.Sprint(n))
 		}
-		if tab(i) == m.tab {
-			parts = append(parts, styleTabOn.Render(label.String()))
-		} else {
-			parts = append(parts, styleTab.Render(label.String()))
+	case tabTokens:
+		if n := m.activeTokens(); n > 0 {
+			label += " " + styleDim.Render(fmt.Sprint(n))
+		}
+	case tabAudit:
+		if n := m.recentFailures(); n > 0 {
+			label += " " + styleErr.Render(fmt.Sprintf("✗%d", n))
+		}
+	case tabHealth:
+		if m.healthWarning() {
+			label += " " + styleWarn.Render("!")
+		}
+	case tabQueue:
+		switch q := m.stats.Queue; {
+		case q.Paused && q.Queued > 0:
+			label += " " + styleWarn.Render(fmt.Sprintf("⏸%d", q.Queued))
+		case q.Queued+q.Sending > 0:
+			label += " " + styleAccent.Render(fmt.Sprint(q.Queued+q.Sending))
+		}
+	case tabSettings:
+		for _, s := range m.settings {
+			if s.Overridden {
+				label += " " + styleWarn.Render("•")
+				break
+			}
 		}
 	}
-	// Tabs are padded already; no gap between them leaves room for the state on 120 columns.
-	left := parts[0] + " " + strings.Join(parts[1:], "")
+	if t == m.tab {
+		return styleTabOn.Render(label)
+	}
+	return styleTab.Render(label)
+}
+
+// tabsLine is the logo and the tabs; compact shows only the open tab's name. Tabs are padded
+// already: no gap between them leaves room for the state on 120 columns.
+func (m *model) tabsLine(compact bool) string {
+	var b strings.Builder
+	b.WriteString(" " + styleLogo.Render("◆ wame admin") + " ")
+	for i := range tabNames {
+		b.WriteString(m.tabLabel(tab(i), compact))
+	}
+	return b.String()
+}
+
+func (m *model) viewHeader() string {
 	dot, state := m.connection()
 	live := ""
 	if m.c != nil {
@@ -214,20 +226,25 @@ func (m *model) viewHeader() string {
 	if m.c != nil {
 		host = styleDim.Render(cmp.Or(m.profile, m.c.base.Host))
 	}
-	// Longest first; drop detail until it fits next to the tabs.
-	for _, items := range [][]string{
-		{dot + " " + state, styleDim.Render(m.host()), live, latency},
-		{dot + " " + state, host, live, latency},
-		{dot + " " + state, host, live},
-		{dot + " " + state, live},
-		{dot + " " + state},
-	} {
-		right := strings.Join(nonEmpty(items...), styleFaint.Render("  ·  ")) + " "
-		if gap := m.width - ansi.StringWidth(left) - ansi.StringWidth(right); gap >= 2 {
-			return left + strings.Repeat(" ", gap) + right
+	// Longest first; drop detail, then the inactive tabs' names, until it fits. The state always stays.
+	var right string
+	for _, compact := range []bool{false, true} {
+		left := m.tabsLine(compact)
+		for _, items := range [][]string{
+			{dot + " " + state, styleDim.Render(m.host()), live, latency},
+			{dot + " " + state, host, live, latency},
+			{dot + " " + state, host, live},
+			{dot + " " + state, live},
+			{dot + " " + state},
+		} {
+			right = strings.Join(nonEmpty(items...), styleFaint.Render("  ·  ")) + " "
+			if gap := m.width - ansi.StringWidth(left) - ansi.StringWidth(right); gap >= 2 {
+				return left + strings.Repeat(" ", gap) + right
+			}
 		}
 	}
-	return ansi.Truncate(left, m.width, "…")
+	right = ansi.Truncate(right, m.width, "…")
+	return ansi.Truncate(m.tabsLine(true), max(m.width-ansi.StringWidth(right)-1, 0), "…") + " " + right
 }
 
 func (m *model) viewNotice() string {
@@ -285,7 +302,7 @@ func (m *model) viewKeys() string {
 		case tabAudit:
 			keys = [][2]string{{"j/k", "move"}, {"g/G", "top/bottom"}, {"/", "filter"}}
 		case tabHealth:
-			keys = [][2]string{{"j/k", "failure"}, {"t", "test webhook"}, {"R", "replay"}}
+			keys = [][2]string{{"j/k", "failure"}, {"t", "test webhook"}, {"R", "replay"}, {"a", "test alert"}}
 		case tabSettings:
 			keys = [][2]string{{"j/k", "move"}, {"enter", "change"}, {"x", "reset"}}
 		case tabQueue:
@@ -438,7 +455,8 @@ func (m *model) healthWarning() bool {
 		return false
 	}
 	recent := func(t time.Time) bool { return !t.IsZero() && time.Since(t) < time.Hour }
-	return recent(s.Limits.Send.LastRejected) || (s.Webhook != nil && (recent(s.Webhook.LastFailure) || s.Webhook.Dropped > 0))
+	return recent(s.Limits.Send.LastRejected) || (s.Webhook != nil && (recent(s.Webhook.LastFailure) || s.Webhook.Dropped > 0)) ||
+		(s.Alerts.LastError != "" && recent(s.Alerts.LastErrorAt))
 }
 
 func (m *model) healthSummary() string {
@@ -712,7 +730,7 @@ func actionStyle(action string) lipgloss.Style {
 	case action == "delete":
 		return lipgloss.NewStyle().Foreground(colErr)
 	}
-	return lipgloss.NewStyle().Foreground(colInfo)
+	return styleInfo
 }
 
 func (m *model) viewAudit() string {
