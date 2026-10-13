@@ -81,13 +81,17 @@ func NewHandler(b *bot.Bot, authn *auth.Authenticator, version string) http.Hand
 
 	mux.HandleFunc("GET /audit", need(admin, a.audit))
 	mux.HandleFunc("GET /stats", need(admin, a.stats))
+	mux.HandleFunc("GET /settings", need(admin, a.settings))
+	mux.HandleFunc("PATCH /settings", need(admin, a.updateSettings))
+	mux.HandleFunc("POST /webhook/test", need(admin, a.webhookTest))
+	mux.HandleFunc("POST /webhook/replay", need(admin, a.webhookReplay))
 	mux.HandleFunc("GET /tokens", need(admin, a.listTokens))
 	mux.HandleFunc("POST /tokens", need(admin, a.createToken))
 	mux.HandleFunc("DELETE /tokens/{name}", need(admin, a.revokeToken))
 
 	root := http.NewServeMux()
 	fails := &failureLimiter{}
-	root.Handle("/", withAuth(authn, fails, mux))
+	root.Handle("/", withAuth(authn, fails, b.RecordRequest, mux))
 	root.Handle("/mcp", mcpHandler(b, authn, fails, version, b.Log))
 	root.HandleFunc("GET /docs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -541,6 +545,13 @@ type Stats struct {
 	AutoReply bool              `json:"auto_reply"`
 	Limits    StatsLimits       `json:"limits"`
 	Webhook   *bot.WebhookStats `json:"webhook"`
+	Callers   []CallerStats     `json:"callers"`
+}
+
+// CallerStats is a token's (or the owner's, as "api") activity in the last 24 hours.
+type CallerStats struct {
+	bot.TokenUsage
+	Streams int `json:"open_streams"`
 }
 
 type StatsLimits struct {
@@ -551,12 +562,73 @@ type StatsLimits struct {
 
 func (a *server) stats(w http.ResponseWriter, r *http.Request) {
 	out := Stats{
-		Version: a.version, Started: a.b.Started, AutoReply: a.b.AutoReply,
+		Version: a.version, Started: a.b.Started, AutoReply: a.b.AutoReplyOn(),
 		Limits: StatsLimits{Send: a.b.Limiter.Stats(), Lookups: a.b.Lookups.Stats(), AutoReply: a.b.AutoReplyStats()},
 	}
 	if a.b.Webhook != nil {
 		s := a.b.Webhook.Stats()
 		out.Webhook = &s
 	}
+	out.Callers = []CallerStats{}
+	for _, u := range a.b.Usage() {
+		out.Callers = append(out.Callers, CallerStats{u, a.streams.count(u.Name)})
+	}
 	writeJSON(w, 200, out)
+}
+
+func (a *server) settings(w http.ResponseWriter, r *http.Request) {
+	v, err := a.b.SettingsView()
+	respond(w, v, err)
+}
+
+// updateSettings takes {"key": value} where value is a string, a number or a boolean, or null to go
+// back to the flag's value.
+func (a *server) updateSettings(w http.ResponseWriter, r *http.Request) {
+	var raw map[string]json.RawMessage
+	if !readJSON(w, r, &raw) {
+		return
+	}
+	changes := map[string]*string{}
+	for k, v := range raw {
+		if string(v) == "null" {
+			changes[k] = nil
+			continue
+		}
+		var s string
+		if json.Unmarshal(v, &s) != nil {
+			s = string(v)
+		}
+		changes[k] = &s
+	}
+	if err := a.b.UpdateSettings(principal(r).Name, changes); err != nil {
+		writeError(w, err)
+		return
+	}
+	a.settings(w, r)
+}
+
+func (a *server) webhookTest(w http.ResponseWriter, r *http.Request) {
+	res, err := a.b.TestWebhook(r.Context(), principal(r).Name)
+	webhookResult(w, res, err)
+}
+
+func (a *server) webhookReplay(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Delivery string `json:"delivery"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	res, err := a.b.ReplayWebhook(r.Context(), principal(r).Name, req.Delivery)
+	webhookResult(w, res, err)
+}
+
+// webhookResult answers 200 with the attempt's outcome, even when the receiver failed: the request
+// itself worked. Errors before any attempt (no webhook, unknown delivery) map as usual.
+func webhookResult(w http.ResponseWriter, res bot.WebhookResult, err error) {
+	if res.Delivery == "" && err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 200, res)
 }

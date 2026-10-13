@@ -54,7 +54,7 @@ func (b *Bot) handle(evt any) {
 		if b.Webhook != nil {
 			b.Webhook.Deliver("message", m)
 		}
-		if b.AutoReply && (!m.FromMe || b.isSelfChat(m.Chat)) {
+		if b.replies.Load() && (!m.FromMe || b.isSelfChat(m.Chat)) {
 			go b.autoReply(m)
 		}
 	}

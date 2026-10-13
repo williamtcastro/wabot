@@ -561,6 +561,89 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /settings:
+    get:
+      tags: [Admin]
+      summary: Runtime settings
+      description: The settings an admin can change without a restart, with their effective value, the flag's value and who changed them. Requires admin.
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SettingView" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      tags: [Admin]
+      summary: Change runtime settings
+      description: |
+        Applies at once and is kept in the database, so it also wins over the flags on the next start.
+        Values may be strings, numbers or booleans; null goes back to the flag's value. Every change is
+        validated before any is applied, and the change is audited (action settings). Requires admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rate: { nullable: true, description: "Sends per minute, 0 = unlimited, up to 1000. Number lookups follow at 3x" }
+                chat_gap: { type: string, nullable: true, description: "Duration between two sends to one chat, up to 10m" }
+                max_wait: { type: string, nullable: true, description: "How long a send may queue before a 429, up to 10m" }
+                auto_reply: { nullable: true, description: "true or false" }
+                webhook_filter: { type: string, nullable: true, description: "Same syntax as -webhook-filter; only has an effect with -webhook" }
+            example: { rate: 10, auto_reply: false, chat_gap: null }
+      responses:
+        "200":
+          description: Settings after the change
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SettingView" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /webhook/test:
+    post:
+      tags: [Admin]
+      summary: Send a test delivery
+      description: Posts a signed event of type test (X-Wame-Event test) with a small JSON body and no message, once, and reports how the receiver answered. Audited as webhook_test; not counted in /stats. Requires admin.
+      responses:
+        "200":
+          description: The attempt, whether or not the receiver accepted it
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /webhook/replay:
+    post:
+      tags: [Admin]
+      summary: Send a failed delivery again
+      description: Sends one of the recent failures from /stats again, once, with the same X-Wame-Delivery id, rebuilding the body from the stored message as it is now. Other ids are refused. Audited as webhook_replay. Requires admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [delivery]
+              properties:
+                delivery: { type: string, example: "4711-message-a1b2c3d4" }
+      responses:
+        "200":
+          description: The attempt, whether or not the receiver accepted it
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /tokens:
     get:
       tags: [Tokens]
@@ -878,6 +961,7 @@ components:
         status: { type: integer, description: "HTTP status, absent when the request itself failed" }
         error: { type: string }
         gave_up: { type: boolean, description: "No more retries for this delivery" }
+        replayed: { type: boolean, description: "Sent again successfully with POST /webhook/replay" }
     Stats:
       type: object
       properties:
@@ -901,19 +985,51 @@ components:
             retried: { type: integer, description: "Delivered after more than one attempt" }
             failed: { type: integer, description: "Given up after retries or a non-retryable answer" }
             dropped: { type: integer, description: "Queue was full" }
+            replayed: { type: integer, description: "Failed deliveries sent again with POST /webhook/replay that succeeded" }
             last_success: { type: string, format: date-time }
             last_failure: { type: string, format: date-time }
             recent_failures:
               type: array
               description: Up to 20, newest first
               items: { $ref: "#/components/schemas/WebhookFailure" }
+        callers:
+          type: array
+          description: Everyone who called the API or /mcp since startup, by token name; in memory, last 24 hours
+          items: { $ref: "#/components/schemas/CallerStats" }
+    CallerStats:
+      type: object
+      properties:
+        name: { type: string, description: "Token name, or api for the owner secret" }
+        requests_24h: { type: integer }
+        sends_24h: { type: integer, description: "Texts and files sent successfully" }
+        failed_sends_24h: { type: integer }
+        last_seen: { type: string, format: date-time }
+        last_ip: { type: string }
+        open_streams: { type: integer, description: "Open /events and /messages/wait connections" }
+    SettingView:
+      type: object
+      properties:
+        key: { type: string, enum: [rate, chat_gap, max_wait, auto_reply, webhook_filter] }
+        value: { type: string, description: "Effective value" }
+        default: { type: string, description: "The flag's value, used when not overridden" }
+        overridden: { type: boolean }
+        updated_by: { type: string }
+        updated_at: { type: string, format: date-time }
+    WebhookResult:
+      type: object
+      properties:
+        delivery: { type: string }
+        status: { type: integer, description: "The receiver's HTTP status, absent when the request failed" }
+        duration_ms: { type: integer }
+        ok: { type: boolean }
+        error: { type: string }
     AuditEntry:
       type: object
       properties:
         id: { type: integer, format: int64 }
         at: { type: string, format: date-time }
         actor: { type: string, description: "Token name for API/MCP calls (api = owner secret or token-less, mcp = stdio without a token), or tui, cli, autoreply, whatsapp", example: "support-bot" }
-        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, token_create, token_revoke] }
+        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, token_create, token_revoke, settings, webhook_test, webhook_replay] }
         target: { type: string, description: "Chat JID, when there is one" }
         detail: { type: string, example: "text, 6 chars" }
         ok: { type: boolean }

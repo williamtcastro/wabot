@@ -27,6 +27,7 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `internal/store/filter.go` | `store` | `Filter`, `ParseFilter`, `Match` and its SQL twin `where` (shared by `/messages`, `/messages/wait`, `/events`, webhook), including the `q` text search (`textMatches` in Go mirrors the FTS query) |
 | `internal/store/state.go` | `store` | `migrateState`: `wabot_chat_state` (read positions, `MarkReadUpTo`/`MarkChatRead`/`ReadSeq`), `wabot_groups` (`SaveGroups`/`Groups`), the `wabot_messages_fts` index and its triggers, `ftsQuery`; the `ChatRead` event |
 | `internal/store/audit.go` | `store` | `wabot_audit` table, `AuditEntry`, `Store.Audit`, `Store.AuditLog` |
+| `internal/store/settings.go` | `store` | `wabot_settings` (runtime overrides: key, value, updated_by, updated_at), `Settings`, `SetSettings` (nil deletes) |
 | `internal/store/tokens.go` | `store` | `wabot_tokens` table, `Token`, `InsertToken` (`ErrTokenName` / `ErrTokenID`), `TokenByID`, `Tokens`, `RevokeToken` (cascades to tokens it created), `TouchToken`, `HasTokens` (any row ever) |
 | `internal/auth/auth.go` | `auth` | `Scope` (`read`/`send`/`admin`), `Principal` (`Has`, `Restricted`), `Owner()`, `Issue` (token format, reserved names, `DefaultRate`, child expiry), `Authenticator` (`Required` fails closed, `Authenticate`), `CheckOwnerSecret` (`MinOwnerSecret` = 16) |
 | `internal/bot/bot.go` | `bot` | `Bot` type, `New`, `Start`, `PairPhone`, `Status`, pub/sub (`Subscribe`, `publish`), `InputError`/`BadInput`, `SleepUntil`, DB file permissions |
@@ -39,8 +40,10 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `internal/bot/presence.go` | `bot` | presence (`-online`) and typing indicators |
 | `internal/bot/audit.go` | `bot` | `Bot.Audit`, `Bot.audited` |
 | `internal/bot/allow.go` | `bot` | chat allowlists for restricted tokens: `LocalChat` (no network), `ChatAllowed`, `ExpandAllowlist` (resolves the list's own phone entries, cached 10 min), `CanonicalChat` (unrestricted callers) |
-| `internal/bot/limit.go` | `bot` | `Limiter`: per-minute and per-chat spacing, `RateLimitError` (429). Three instances: `Bot.Limiter` (sends), `Bot.Lookups` (number checks, presence; 3 × rate), `autoLimit` (auto-replies, drop instead of queue) |
-| `internal/bot/webhook.go` | `bot` | webhook queue and workers, retries with backoff, HMAC signing (`Sign`) |
+| `internal/bot/limit.go` | `bot` | `Limiter`: per-minute and per-chat spacing, `RateLimitError` (429), `Set` (limits change at runtime; every read is under the lock), `Stats`, `LookupsPerMinute`. Three instances: `Bot.Limiter` (sends), `Bot.Lookups` (number checks, presence; 3 × rate), `autoLimit` (auto-replies, drop instead of queue) |
+| `internal/bot/webhook.go` | `bot` | webhook queue and workers, retries with backoff, HMAC signing (`Sign`), `WebhookStats` (in memory), `SetFilter`/`SetChatIf`, `TestWebhook`, `ReplayWebhook` (only ids in the recent failures) |
+| `internal/bot/settings.go` | `bot` | runtime settings: `Settings`, `SettingKeys`, `InitSettings` (flags + stored overrides), `UpdateSettings` (validate all, store, apply, audit once), `SettingsView`, `ParseWebhookFilter`, the auto-reply switch (`SetAutoReply`/`AutoReplyOn`, atomic) |
+| `internal/bot/usage.go` | `bot` | per-caller usage in hourly buckets for 24 h (`RecordRequest` from the API/MCP auth, sends from `audited`), `Usage` |
 | `internal/api/api.go` | `api` | `NewHandler` (the route table: every route wrapped in `need(scope, …)`), handlers, long-poll, SSE (with token re-checks), `/media`, `/mcp` mount, the `/docs` page |
 | `internal/api/authz.go` | `api` | `withAuth` (header/`?token=` rules, failed-login throttle), `need`, `unrestricted`, `visibleStatus`, `authorizeChat`, `restrictFilter`, `sendGuard` (allowlist + per-token rate), stream cap and `stillValid`, `/tokens` handlers, `NormalizeChats` |
 | `internal/api/mcp.go` | `api` | `/mcp`: streamable HTTP MCP handler; bearer verification puts the `Principal` in the SDK's `TokenInfo`; token-less mode via `localOnly` |
@@ -124,6 +127,8 @@ numbers and names below.
 - `internal/mcpserver`: read-only and restricted callers, cleaning of untrusted text.
 - `internal/tui`: 110×24 renders exactly 24 lines (with and without the context bar), autocomplete,
   reaction divider, vim-style keys, half-page scroll, `safe()`.
+- `internal/bot` (`settings_test.go`): runtime settings (validation, apply, restart, reset, audit),
+  the webhook filter setting vs a late number resolution, webhook test and replay, usage counting.
 - `internal/admin`: the client against the real `api.NewHandler` (tokens, audit paging, 401/403
   messages), the http guard, env files and profiles, and the panel: create → copy → revoke →
   filter, rotation, the Chats tab (sanitizing), the live stream, the bell, Health, server switching
@@ -158,7 +163,9 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
   `docs/API.md`. A TUI key or command means updating `tuiHelp` in `internal/tui/commands.go`, the
   footer `hints` in `internal/tui/view.go` and `docs/TUI.md` (which quotes `tuiHelp` verbatim). A flag means
   updating `usage` in `main.go`, `docs/CLI.md` and the README table. An admin panel key means
-  updating the footer `keys` in `internal/admin/view.go` and `docs/ADMIN.md`. A new TUI command goes in
+  updating the footer `keys` in `internal/admin/view.go` and `docs/ADMIN.md`. A new runtime setting
+  goes in `SettingKeys`, `Settings.get`/`set` and `applySettings` (`internal/bot/settings.go`), the
+  `SettingView` key enum and PATCH body in `docs/openapi.yaml`, `docs/API.md` and `docs/CLI.md`. A new TUI command goes in
   `tuiCommands` (autocomplete and hint bar), `tuiHelp` and `docs/TUI.md`.
 - Errors from the API are always `{"error": "..."}` via `writeError` (401/403 come from the auth
   middleware), which maps errors to codes:
@@ -177,7 +184,8 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
 - **Wrap every control action in `Bot.audited(actor, action, target, detail, fn)`.** It runs `fn` and calls
   `Bot.Audit` exactly once with the outcome, so input-validation failures (empty text, not your message,
   edit window) are recorded too. Put the validation inside `fn`, not before it. Call `Bot.Audit` directly
-  only for actions that don't return a `Message` (pair, logout, read, token_create, token_revoke). `actor`
+  only for actions that don't return a `Message` (pair, logout, read, token_create, token_revoke,
+  settings, webhook_test, webhook_replay). `actor`
   is the caller's token name for API and MCP calls (`principal(r).Name`; `api` for the owner secret and
   token-less mode, `mcp` for stdio without a token), or `tui`, `cli`, `autoreply`, `whatsapp`. Those
   fixed names (plus `owner`, `local`) are reserved so no token can impersonate them. Pass the actor into
@@ -212,7 +220,7 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
   run automatically on startup; there is no separate migrate command.
 - Tables: `wabot_messages`, `wabot_messages_fts` (FTS5 over `text`, external content, kept in sync by
   the `wabot_messages_fts_insert/_delete/_update` triggers, so write `text` only through normal
-  UPDATE/INSERT), `wabot_chat_state`, `wabot_groups`, `wabot_audit`. Unread counts and search must
+  UPDATE/INSERT), `wabot_chat_state`, `wabot_groups`, `wabot_audit`, `wabot_tokens`, `wabot_settings`. Unread counts and search must
   agree with `Filter.Match` / `textMatches`, which the live paths use.
 - The TUI is designed for desktop terminals (~100+ columns). Don't spend effort on narrow layouts.
 - **Don't block in `Update`.** Network and DB calls go in a `tea.Cmd` that returns a message. Capture the

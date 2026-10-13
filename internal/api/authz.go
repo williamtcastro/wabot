@@ -49,8 +49,9 @@ func presentedToken(r *http.Request) (string, bool) {
 
 // withAuth resolves the caller. Without an owner secret and before any token was ever created, the API
 // runs in token-less, loopback-only mode; after that every request needs a valid token.
-func withAuth(authn *auth.Authenticator, fails *failureLimiter, next http.Handler) http.Handler {
+func withAuth(authn *auth.Authenticator, fails *failureLimiter, seen func(name, ip string), next http.Handler) http.Handler {
 	local := localOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen(auth.Owner().Name, clientIP(r))
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, auth.Owner())))
 	}))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,6 +75,7 @@ func withAuth(authn *auth.Authenticator, fails *failureLimiter, next http.Handle
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 			return
 		}
+		seen(p.Name, ip)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
 	})
 }
@@ -208,30 +210,37 @@ func (a *server) sendGuard(w http.ResponseWriter, r *http.Request, chat string) 
 	return chat, true
 }
 
-// streams caps how many /events and /messages/wait connections one token holds open.
+// streams caps how many /events and /messages/wait connections one token holds open, and counts
+// open ones by caller name (the owner included) for GET /stats.
 type streams struct {
-	mu   sync.Mutex
-	open map[string]int
+	mu     sync.Mutex
+	open   map[string]int
+	byName map[string]int
 }
 
 func (s *streams) acquire(p auth.Principal) (release func(), ok bool) {
-	if p.TokenID == "" {
-		return func() {}, true
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.open == nil {
-		s.open = map[string]int{}
+		s.open, s.byName = map[string]int{}, map[string]int{}
 	}
-	if s.open[p.TokenID] >= maxStreamsPerToken {
+	if p.TokenID != "" && s.open[p.TokenID] >= maxStreamsPerToken {
 		return nil, false
 	}
 	s.open[p.TokenID]++
+	s.byName[p.Name]++
 	return func() {
 		s.mu.Lock()
 		s.open[p.TokenID]--
+		s.byName[p.Name]--
 		s.mu.Unlock()
 	}, true
+}
+
+func (s *streams) count(name string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.byName[name]
 }
 
 // stillValid re-checks a long-lived connection's token, so revoking or expiring it ends open streams.

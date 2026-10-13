@@ -37,30 +37,35 @@ type InputError struct{ error }
 func BadInput(format string, args ...any) error { return InputError{fmt.Errorf(format, args...)} }
 
 type Bot struct {
-	Client    *whatsmeow.Client
-	Store     *store.Store
-	Log       *slog.Logger
-	AutoReply bool
-	Typing    bool
-	Online    bool
-	Limiter   *Limiter
-	Lookups   *Limiter
-	Webhook   *Webhook
-	Started   time.Time
+	Client  *whatsmeow.Client
+	Store   *store.Store
+	Log     *slog.Logger
+	Typing  bool
+	Online  bool
+	Limiter *Limiter
+	Lookups *Limiter
+	Webhook *Webhook
+	Started time.Time
 
-	autoLimit  *Limiter
-	mu         sync.RWMutex
-	qr         string
-	state      string
-	subs       map[chan any]struct{}
-	jids       map[string]types.JID
-	groups     map[string]groupInfo
-	typingIn   map[string]*time.Timer
-	groupsAt   time.Time
-	groupsBusy atomic.Bool
-	allowlists map[string]expandedAllowlist
-	tokenMu    sync.Mutex
-	tokenRate  map[string]*Limiter
+	autoLimit *Limiter
+	replies   atomic.Bool
+	usage     usage
+
+	settingsMu   sync.Mutex
+	settings     Settings
+	baseSettings Settings
+	mu           sync.RWMutex
+	qr           string
+	state        string
+	subs         map[chan any]struct{}
+	jids         map[string]types.JID
+	groups       map[string]groupInfo
+	typingIn     map[string]*time.Timer
+	groupsAt     time.Time
+	groupsBusy   atomic.Bool
+	allowlists   map[string]expandedAllowlist
+	tokenMu      sync.Mutex
+	tokenRate    map[string]*Limiter
 }
 
 func New(ctx context.Context, dbPath string, waLogger waLog.Logger, log *slog.Logger) (*Bot, error) {

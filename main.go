@@ -31,7 +31,6 @@ import (
 	"github.com/williamtcastro/wame/internal/auth"
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/mcpserver"
-	"github.com/williamtcastro/wame/internal/store"
 	"github.com/williamtcastro/wame/internal/tui"
 )
 
@@ -171,27 +170,30 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 	if err != nil {
 		return err
 	}
-	b.AutoReply = c.autoreply && cmd != "send"
 	b.Typing = c.typing
 	b.Online = c.online
 	b.Limiter = bot.NewLimiter(c.rate, c.chatGap, c.maxWait)
-	b.Lookups = bot.NewLimiter(lookupsPerMinute(c.rate), 0, c.maxWait)
+	b.Lookups = bot.NewLimiter(bot.LookupsPerMinute(c.rate), 0, c.maxWait)
 	if c.webhook != "" {
 		if u, err := url.Parse(c.webhook); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 			return fmt.Errorf("-webhook must be an http(s) URL")
 		}
-		q, err := url.ParseQuery(c.webhookFilter)
-		if err != nil {
-			return fmt.Errorf("-webhook-filter: %w", err)
-		}
-		f, err := store.ParseFilter(q, func(s string) (string, error) {
-			jid, err := bot.ParseRecipient(s)
-			return jid.String(), err
-		})
+		f, err := bot.ParseWebhookFilter(c.webhookFilter)
 		if err != nil {
 			return fmt.Errorf("-webhook-filter: %w", err)
 		}
 		b.Webhook = bot.NewWebhook(ctx, c.webhook, c.webhookSecret, f, log)
+	}
+	// Settings changed at runtime (GET/PATCH /settings) override these flags.
+	eff, err := b.InitSettings(bot.Settings{Rate: c.rate, ChatGap: c.chatGap, MaxWait: c.maxWait, AutoReply: c.autoreply, WebhookFilter: c.webhookFilter})
+	if err != nil {
+		return err
+	}
+	if cmd == "send" {
+		b.SetAutoReply(false)
+	}
+	if b.Webhook != nil && eff.WebhookFilter == c.webhookFilter {
+		q, _ := url.ParseQuery(c.webhookFilter)
 		if chat := q.Get("chat"); chat != "" && !strings.Contains(chat, "@") {
 			go resolveWebhookChat(ctx, b, chat)
 		}
@@ -381,9 +383,6 @@ func serve(ctx context.Context, b *bot.Bot, c config) error {
 	return nil
 }
 
-// lookupsPerMinute caps number checks and presence updates at 3× the send rate.
-func lookupsPerMinute(rate int) int { return rate * 3 }
-
 // resolveWebhookChat swaps a phone number in -webhook-filter for the JID WhatsApp uses
 // (e.g. with or without Brazil's 9th digit) once the bot is connected.
 func resolveWebhookChat(ctx context.Context, b *bot.Bot, number string) {
@@ -406,7 +405,8 @@ func resolveWebhookChat(ctx context.Context, b *bot.Bot, number string) {
 			return
 		}
 	}
-	b.Webhook.SetChat(b.PhoneJID(jid).String())
+	typed, _ := bot.ParseRecipient(number)
+	b.Webhook.SetChatIf(typed.String(), b.PhoneJID(jid).String())
 	b.Log.Info("webhook filter chat resolved", "chat", number, "jid", b.PhoneJID(jid).String())
 }
 

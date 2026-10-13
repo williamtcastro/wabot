@@ -29,5 +29,8 @@ func (b *Bot) Audit(actor, action, target, detail string, err error) {
 func (b *Bot) audited(actor, action, target, detail string, fn func() (store.Message, error)) (store.Message, error) {
 	m, err := fn()
 	b.Audit(actor, action, cmp.Or(m.Chat, target), detail, err)
+	if action == "send" || action == "send_file" {
+		b.recordSend(actor, err == nil)
+	}
 	return m, err
 }

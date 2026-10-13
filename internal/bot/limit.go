@@ -29,6 +29,16 @@ type Limiter struct {
 	lastRejected time.Time
 }
 
+// Set changes the limits while the limiter is in use; slots already reserved keep their time.
+func (l *Limiter) Set(perMinute int, chatGap, maxWait time.Duration) {
+	l.mu.Lock()
+	l.PerMinute, l.ChatGap, l.MaxWait = perMinute, chatGap, maxWait
+	l.mu.Unlock()
+}
+
+// LookupsPerMinute is the number-lookup budget that goes with a send rate: three lookups per send.
+func LookupsPerMinute(rate int) int { return rate * 3 }
+
 // LimiterStats is a snapshot of a Limiter for the admin panel.
 type LimiterStats struct {
 	PerMinute    int       `json:"per_minute"`
@@ -74,12 +84,12 @@ func (l *Limiter) Reserve(chat string) (time.Time, error) { return l.ReserveN(ch
 
 // ReserveN reserves n consecutive slots, all or none, and returns when the last one is due.
 func (l *Limiter) ReserveN(chat string, n int) (time.Time, error) {
-	if l.PerMinute > 0 && n > l.PerMinute {
-		return time.Time{}, BadInput("at most %d per minute", l.PerMinute)
-	}
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.PerMinute > 0 && n > l.PerMinute {
+		return time.Time{}, BadInput("at most %d per minute", l.PerMinute)
+	}
 
 	cutoff := now.Add(-time.Minute)
 	i := 0

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,6 +58,7 @@ type WebhookStats struct {
 	Retried     int64            `json:"retried"`
 	Failed      int64            `json:"failed"`
 	Dropped     int64            `json:"dropped"`
+	Replayed    int64            `json:"replayed"`
 	LastSuccess time.Time        `json:"last_success,omitzero"`
 	LastFailure time.Time        `json:"last_failure,omitzero"`
 	Recent      []WebhookFailure `json:"recent_failures"`
@@ -71,6 +73,7 @@ type WebhookFailure struct {
 	Status   int       `json:"status,omitempty"`
 	Error    string    `json:"error,omitempty"`
 	GaveUp   bool      `json:"gave_up"`
+	Replayed bool      `json:"replayed,omitempty"`
 }
 
 const webhookRecentFailures = 20
@@ -104,10 +107,20 @@ func (w *Webhook) recordFailure(f WebhookFailure) {
 	})
 }
 
-// SetChat replaces the filter's chat, e.g. once a phone number has been resolved to WhatsApp's JID.
-func (w *Webhook) SetChat(chat string) {
+// SetChatIf replaces the filter's chat once a phone number has been resolved to WhatsApp's JID,
+// unless the filter was changed in the meantime.
+func (w *Webhook) SetChatIf(old, chat string) {
 	w.mu.Lock()
-	w.Filter.Chat = chat
+	if w.Filter.Chat == old {
+		w.Filter.Chat = chat
+	}
+	w.mu.Unlock()
+}
+
+// SetFilter replaces the whole filter (a runtime settings change).
+func (w *Webhook) SetFilter(f store.Filter) {
+	w.mu.Lock()
+	w.Filter = f
 	w.mu.Unlock()
 }
 
@@ -235,4 +248,92 @@ func randomHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// WebhookResult is the outcome of a single delivery attempt made on request (test or replay).
+type WebhookResult struct {
+	Delivery   string `json:"delivery"`
+	Status     int    `json:"status,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+	OK         bool   `json:"ok"`
+	Error      string `json:"error,omitempty"`
+}
+
+func (w *Webhook) once(ctx context.Context, job webhookJob) (WebhookResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	start := time.Now()
+	status, err := w.post(ctx, job)
+	if err == nil && status >= 300 {
+		err = fmt.Errorf("the webhook answered HTTP %d", status)
+	}
+	r := WebhookResult{Delivery: job.id, Status: status, DurationMS: time.Since(start).Milliseconds(), OK: err == nil}
+	if err != nil {
+		r.Error = err.Error()
+	}
+	return r, err
+}
+
+var errNoWebhook = BadInput("no webhook is configured (-webhook / WAME_WEBHOOK)")
+
+// TestWebhook posts a signed "test" event, so an admin can check the receiver and its signature
+// check. It's audited but not counted in the delivery stats.
+func (b *Bot) TestWebhook(ctx context.Context, actor string) (WebhookResult, error) {
+	if b.Webhook == nil {
+		b.Audit(actor, "webhook_test", "", "", errNoWebhook)
+		return WebhookResult{}, errNoWebhook
+	}
+	body, _ := json.Marshal(map[string]any{"event": "test", "at": time.Now(), "note": "a test delivery from wame; there is no message"})
+	r, err := b.Webhook.once(ctx, webhookJob{event: "test", body: body, id: "test-" + randomHex(4)})
+	b.Audit(actor, "webhook_test", "", fmt.Sprintf("HTTP %d in %d ms", r.Status, r.DurationMS), err)
+	return r, err
+}
+
+// ReplayWebhook sends a recently failed delivery again, once, with the same delivery id. The body
+// is rebuilt from the stored message as it is now; only deliveries in the recent failures list can
+// be replayed, so this can't push messages the filter left out.
+func (b *Bot) ReplayWebhook(ctx context.Context, actor, delivery string) (WebhookResult, error) {
+	if b.Webhook == nil {
+		b.Audit(actor, "webhook_replay", "", delivery, errNoWebhook)
+		return WebhookResult{}, errNoWebhook
+	}
+	w := b.Webhook
+	var event string
+	w.statsMu.Lock()
+	for _, f := range w.stats.Recent {
+		if f.Delivery == delivery {
+			event = f.Event
+		}
+	}
+	w.statsMu.Unlock()
+	seqText, _, _ := strings.Cut(delivery, "-")
+	seq, perr := strconv.ParseInt(seqText, 10, 64)
+	if event == "" || perr != nil {
+		err := fmt.Errorf("%w: delivery %q isn't among the recent failures", store.ErrNotFound, delivery)
+		b.Audit(actor, "webhook_replay", "", delivery, err)
+		return WebhookResult{}, err
+	}
+	m, err := b.Store.GetBySeq(seq)
+	if err != nil {
+		b.Audit(actor, "webhook_replay", "", delivery, err)
+		return WebhookResult{}, err
+	}
+	body, err := json.Marshal(m)
+	if err != nil {
+		return WebhookResult{}, err
+	}
+	r, err := w.once(ctx, webhookJob{event: event, body: body, id: delivery})
+	if err == nil {
+		w.record(func(s *WebhookStats) {
+			s.Replayed++
+			s.LastSuccess = time.Now()
+			for i := range s.Recent {
+				if s.Recent[i].Delivery == delivery {
+					s.Recent[i].Replayed = true
+				}
+			}
+		})
+	}
+	b.Audit(actor, "webhook_replay", m.Chat, delivery, err)
+	return r, err
 }

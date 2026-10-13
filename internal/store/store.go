@@ -31,6 +31,9 @@ func Open(ctx context.Context, db *sql.DB) (*Store, error) {
 	if err := migrateState(ctx, db); err != nil {
 		return nil, fmt.Errorf("create state and search tables: %w", err)
 	}
+	if err := migrateSettings(ctx, db); err != nil {
+		return nil, fmt.Errorf("create settings table: %w", err)
+	}
 	return &Store{db: db}, nil
 }
 

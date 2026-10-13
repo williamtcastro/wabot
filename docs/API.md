@@ -117,7 +117,7 @@ the token name is what the [audit log](#get-audit) records as the actor.
 | `GET /chats` | read | only allowed chats are listed |
 | `GET /contacts`, `GET /groups` | read | 403 |
 | `POST /check` | send | 403 |
-| `GET /audit`, `GET /stats` | admin | n/a |
+| `GET /audit`, `GET /stats`, `GET /settings`, `PATCH /settings`, `POST /webhook/test`, `POST /webhook/replay` | admin | n/a |
 | `GET /tokens`, `POST /tokens`, `DELETE /tokens/{name}` | admin | n/a |
 | `GET /docs`, `GET /openapi.yaml` | none | public |
 | `/mcp` | per tool (see [MCP.md](MCP.md)) | same rules per tool call |
@@ -696,8 +696,9 @@ input (`ok: false` with the error). Message text is never stored here.
 `actor` is the token's name for API and MCP calls (`api` for the owner secret and token-less
 mode, `mcp` for `wame mcp` without a token), or `tui`, `cli`, `autoreply` or `whatsapp`.
 `action` is `send`, `send_file`, `react`, `edit`, `delete`, `read`, `pair`, `logout`,
-`logged_out`, `token_create` or `token_revoke` (for the token ones, `target` is the token name and
-`detail` the requested scopes). See
+`logged_out`, `token_create`, `token_revoke` (for the token ones, `target` is the token name and
+`detail` the requested scopes), `settings` (`detail` lists the changes, e.g. `rate=10, chat_gap
+reset`), `webhook_test` or `webhook_replay` (`detail` is the delivery id). See
 [proposed-features/ADMIN-PANEL.md](proposed-features/ADMIN-PANEL.md#logging-today) for what each one records.
 
 ## `GET /stats`
@@ -731,9 +732,66 @@ when wame restarts. The webhook URL, its secret and message content are never in
 - `limits.*.last_minute` counts slots reserved in the last minute, including sends still waiting
   their turn; `next_free` appears when the per-minute budget is used up.
 - `rejected` counts 429s for `send` and `lookups`, and dropped replies for `auto_reply`.
+- `callers` lists everyone who called the API or `/mcp` since startup, by token name (`api` for the
+  owner secret): requests, successful and failed sends in the last 24 hours, when and from which
+  IP they were last seen, and how many `/events` / `/messages/wait` connections they hold open.
 - `webhook` is `null` without `-webhook`. `failed` counts deliveries given up on (after 6 attempts,
   or at once on a 4xx other than 429); `recent_failures` keeps the last 20 failed attempts, newest
   first, including ones that were retried later.
+
+## `GET /settings`, `PATCH /settings`
+
+Some flags can be changed while wame runs, without a restart: `rate`, `chat_gap`, `max_wait`,
+`auto_reply` and `webhook_filter`. Requires `admin`.
+
+```sh
+curl -H "$H" localhost:8080/settings
+curl -H "$H" -X PATCH localhost:8080/settings -d '{"rate": 10, "auto_reply": false}'
+curl -H "$H" -X PATCH localhost:8080/settings -d '{"rate": null}'     # back to the -rate flag
+```
+
+```json
+[
+  { "key": "rate", "value": "10", "default": "20", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" },
+  { "key": "chat_gap", "value": "1s", "default": "1s", "overridden": false },
+  { "key": "max_wait", "value": "30s", "default": "30s", "overridden": false },
+  { "key": "auto_reply", "value": "false", "default": "true", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" },
+  { "key": "webhook_filter", "value": "", "default": "", "overridden": false }
+]
+```
+
+- Values may be strings, numbers or booleans; `null` removes the override. `rate` is 0 (unlimited) to
+  1000, and number lookups follow at 3×; `chat_gap` and `max_wait` are durations up to `10m`;
+  `webhook_filter` uses the [filter syntax](#filters) and only matters with `-webhook` (a `chat=`
+  number is taken as typed; use the JID if WhatsApp knows it differently).
+- Every value is checked before any is applied, so a bad one changes nothing (400).
+- Changes apply at once and are stored in the `wabot_settings` table, so they **win over the flags
+  on the next start too**, until reset with `null`. `default` shows the flag's value.
+- Each change is audited as `settings`, with the changes in `detail`.
+
+## `POST /webhook/test`, `POST /webhook/replay`
+
+`/webhook/test` posts a signed delivery with `X-Wame-Event: test` and the body
+`{"event":"test","at":"…","note":"a test delivery from wame; there is no message"}` once, to check
+the receiver and its signature check. It isn't counted in `/stats`.
+
+`/webhook/replay` sends one of the `recent_failures` from [`/stats`](#get-stats) again, once, with
+the same `X-Wame-Delivery` id (so a receiver that de-duplicates by it stays correct). The body is
+rebuilt from the stored message as it is now (an edit since then shows). Ids that aren't among the
+recent failures are refused, so this can't send messages the webhook filter left out.
+
+```sh
+curl -H "$H" -X POST localhost:8080/webhook/test
+curl -H "$H" -X POST localhost:8080/webhook/replay -d '{"delivery": "4711-message-a1b2c3d4"}'
+```
+
+```json
+{ "delivery": "4711-message-a1b2c3d4", "status": 200, "duration_ms": 84, "ok": true }
+```
+
+Both answer 200 with the attempt's outcome even when the receiver failed (`ok: false`, `status`,
+`error`); 400 without a webhook, 404 for an unknown delivery. Both require `admin` and are audited
+as `webhook_test` / `webhook_replay`.
 
 ## `GET /tokens`
 

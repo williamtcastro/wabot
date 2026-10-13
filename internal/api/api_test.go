@@ -496,3 +496,71 @@ func TestStatsNeedsAdmin(t *testing.T) {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 }
+
+func doBody(h http.Handler, method, target, body string, hdr map[string]string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, target, strings.NewReader(body))
+	r.Host = "127.0.0.1:8080"
+	r.RemoteAddr = "127.0.0.1:50000"
+	r.Header.Set("Content-Type", "application/json")
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func TestSettingsEndpoints(t *testing.T) {
+	b := newTestBot(t)
+	if _, err := b.InitSettings(bot.Settings{Rate: 20, ChatGap: time.Second, MaxWait: 30 * time.Second, AutoReply: true}); err != nil {
+		t.Fatal(err)
+	}
+	h := newHandler(b, "s3cret-owner-secret")
+	owner := map[string]string{"Authorization": "Bearer s3cret-owner-secret"}
+	reader := issue(t, b, "reader", []auth.Scope{auth.Read}, nil, 0)
+	if w := doBody(h, "PATCH", "/settings", `{"rate":5}`, map[string]string{"Authorization": "Bearer " + reader}); w.Code != 403 {
+		t.Fatalf("read token: %d", w.Code)
+	}
+
+	w := doBody(h, "PATCH", "/settings", `{"rate":5,"auto_reply":false,"chat_gap":"2s"}`, owner)
+	var view []bot.SettingView
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &view) != nil || view[0].Value != "5" || view[3].Value != "false" || view[1].Value != "2s" {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if b.AutoReplyOn() || b.Limiter.Stats().PerMinute != 5 {
+		t.Fatal("not applied")
+	}
+	if w := doBody(h, "PATCH", "/settings", `{"rate":"lots"}`, owner); w.Code != 400 {
+		t.Fatalf("bad value: %d %s", w.Code, w.Body)
+	}
+	if w := doBody(h, "PATCH", "/settings", `{"rate":null}`, owner); w.Code != 200 || b.Limiter.Stats().PerMinute != 20 {
+		t.Fatalf("reset: %d %s", w.Code, w.Body)
+	}
+	if w := doBody(h, "POST", "/webhook/test", `{}`, owner); w.Code != 400 {
+		t.Fatalf("webhook test without a webhook: %d %s", w.Code, w.Body)
+	}
+	if w := doBody(h, "POST", "/webhook/replay", `{"delivery":"1-message-abcd"}`, owner); w.Code != 400 {
+		t.Fatalf("replay without a webhook: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestStatsCountsCallers(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "s3cret-owner-secret")
+	claude := issue(t, b, "claude", []auth.Scope{auth.Read}, nil, 0)
+	for range 3 {
+		do(h, "GET", "/status", map[string]string{"Authorization": "Bearer " + claude})
+	}
+	w := do(h, "GET", "/stats", map[string]string{"Authorization": "Bearer s3cret-owner-secret"})
+	var s Stats
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &s) != nil {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	got := map[string]int64{}
+	for _, c := range s.Callers {
+		got[c.Name] = c.Requests
+	}
+	if got["claude"] != 3 || got["api"] != 1 || s.Callers[0].LastIP != "127.0.0.1" {
+		t.Fatalf("callers = %+v", s.Callers)
+	}
+}

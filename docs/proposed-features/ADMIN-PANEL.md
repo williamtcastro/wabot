@@ -149,6 +149,9 @@ whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 | `logged_out` | WhatsApp event (actor `whatsapp`) | reason code |
 | `token_create` | `POST /tokens`, `wame token create` | requested scopes (target = token name) |
 | `token_revoke` | `DELETE /tokens/{name}`, `wame token revoke` | (target = token name) |
+| `settings` | `PATCH /settings` | the changes: `rate=10, chat_gap reset` (also for rejected ones: the keys) |
+| `webhook_test` | `POST /webhook/test` | `HTTP <status> in N ms` |
+| `webhook_replay` | `POST /webhook/replay` | delivery id (target = the message's chat) |
 
 `send`, `send_file`, `react`, `edit` and `delete` run through `Bot.audited`, which records every
 attempt exactly once, whatever the outcome. Failures (`ok` = 0) include input errors such as empty

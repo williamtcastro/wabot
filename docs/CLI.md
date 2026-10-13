@@ -167,7 +167,12 @@ wame was called `wabot`. After switching binaries nothing has to change:
 | `-phone NUMBER` | | | `login` only: use a pairing code instead of a QR |
 
 All flags are accepted by every command, so `-rate`, `-chat-gap` and `-typing` also apply to
-`wame send`. See [API.md → Rate limiting](API.md#rate-limiting) for how the limiter behaves
+`wame send`.
+
+`-rate`, `-chat-gap`, `-max-wait`, `-autoreply` and `-webhook-filter` can also be changed while
+wame runs, with [`PATCH /settings`](API.md#get-settings-patch-settings) or the admin panel's
+Settings tab. Those changes are stored in the database and **win over the flags**, on later starts
+too, until they're reset there. See [API.md → Rate limiting](API.md#rate-limiting) for how the limiter behaves
 and why it's on by default.
 
 ## Logs

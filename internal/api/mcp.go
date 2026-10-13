@@ -31,6 +31,7 @@ func mcpHandler(b *bot.Bot, authn *auth.Authenticator, fails *failureLimiter, ve
 			fails.record(clientIP(r))
 			return nil, fmt.Errorf("%w: %v", sdkauth.ErrInvalidToken, err)
 		}
+		b.RecordRequest(p.Name, clientIP(r))
 		info := &sdkauth.TokenInfo{UserID: "owner", Expiration: time.Now().Add(time.Hour), Extra: map[string]any{mcpserver.PrincipalKey: p}}
 		if p.TokenID != "" {
 			info.UserID = p.TokenID
