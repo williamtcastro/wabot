@@ -49,6 +49,8 @@ const (
 	modeServers
 	modeSetting
 	modeConfirmCancelBatch
+	modeAddOptOut
+	modeConfirmRemoveOptOut
 )
 
 const (
@@ -178,6 +180,15 @@ type model struct {
 	queueReload  termui.Debounce
 	confirmBatch string
 
+	queueOptOuts  bool
+	optOuts       []store.OptOut
+	optOutsReq    inflight
+	optOutsLoaded bool
+	optOutsErr    error
+	optOutSel     int
+	optOutQuery   string
+	confirmOptOut string
+
 	logs        []logEntry
 	logsStarted time.Time
 	logsErr     error
@@ -247,7 +258,7 @@ func (m *model) loadAll() tea.Cmd {
 	if m.c == nil {
 		return nil
 	}
-	cmds := []tea.Cmd{m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadStats(), m.loadChats(), m.loadSettings(), m.loadQueue()}
+	cmds := []tea.Cmd{m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadStats(), m.loadChats(), m.loadSettings(), m.loadQueue(), m.loadOptOuts()}
 	if m.tab == tabLogs {
 		cmds = append(cmds, m.loadLogs(0), m.followLogs())
 	}
@@ -406,6 +417,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.tab == tabQueue {
 			cmds = append(cmds, m.loadQueue())
+			if !m.optOutsReq.busy() {
+				cmds = append(cmds, m.loadOptOuts())
+			}
 		}
 		return m, tea.Batch(cmds...)
 
@@ -445,6 +459,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case queueMsg:
 		m.applyQueue(msg)
+		return m, nil
+
+	case optOutsMsg:
+		m.applyOptOuts(msg)
 		return m, nil
 
 	case queueReloadMsg:
@@ -514,7 +532,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setNotice(msg.notice, false)
 		}
-		return m, tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadQueue(), m.loadStats())
+		return m, tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadQueue(), m.loadStats(), m.loadOptOuts())
 
 	case noticeMsg:
 		m.setNotice(msg.text, msg.err)
@@ -562,9 +580,11 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return messagesMsg{query: v, msgs: msgs, err: err}
 			})
 		})
+	case modeAddOptOut:
+		return m.promptKey(k, m.addOptOut)
 	case modeFilter:
 		return m, m.filterKey(k)
-	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch:
+	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch, modeConfirmRemoveOptOut:
 		return m, m.confirmKey(k.String() == "y")
 	case modeCreate:
 		return m.formKey(k)
@@ -652,6 +672,12 @@ func (m *model) confirmKey(yes bool) tea.Cmd {
 			return nil
 		}
 		return m.cancelQueued(0, m.confirmBatch, "batch "+m.confirmBatch)
+	case modeConfirmRemoveOptOut:
+		if !yes {
+			m.setNotice("kept on the opt-outs", false)
+			return nil
+		}
+		return m.removeOptOut(m.confirmOptOut)
 	}
 	return nil
 }
@@ -700,7 +726,7 @@ func (m *model) setTab(t tab) tea.Cmd {
 	case tabSettings:
 		return m.loadSettings()
 	case tabQueue:
-		return tea.Batch(m.loadQueue(), m.loadStats())
+		return tea.Batch(m.loadQueue(), m.loadStats(), m.loadOptOuts())
 	case tabLogs:
 		return tea.Batch(m.refreshLogs(), m.followLogs())
 	}
@@ -785,19 +811,25 @@ func (m *model) auditKey(k string) tea.Cmd {
 	return nil
 }
 
-// filterQuery is the open tab's filter: Logs or Audit.
+// filterQuery is the open tab's filter: Logs, Audit or the Queue tab's opt-outs.
 func (m *model) filterQuery() *string {
-	if m.tab == tabLogs {
+	switch m.tab {
+	case tabLogs:
 		return &m.logsQuery
+	case tabQueue:
+		return &m.optOutQuery
 	}
 	return &m.auditQuery
 }
 
 // clampFiltered keeps the open tab's selection inside its filtered list.
 func (m *model) clampFiltered() {
-	if m.tab == tabLogs {
+	switch m.tab {
+	case tabLogs:
 		m.logsSel = clamp(m.logsSel, len(m.visibleLogs()))
-	} else {
+	case tabQueue:
+		m.optOutSel = clamp(m.optOutSel, len(m.visibleOptOuts()))
+	default:
 		m.auditSel = clamp(m.auditSel, len(m.visibleAudit()))
 	}
 }
@@ -816,7 +848,7 @@ func (m *model) listFilterKey(k, placeholder string) {
 	}
 }
 
-// filterKey edits the open tab's filter (Audit or Logs) as it's typed; esc clears it, enter keeps it.
+// filterKey edits the open tab's filter (Audit, Logs or opt-outs) as it's typed; esc clears it, enter keeps it.
 func (m *model) filterKey(k tea.KeyMsg) tea.Cmd {
 	q := m.filterQuery()
 	var cmd tea.Cmd

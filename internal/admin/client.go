@@ -412,3 +412,25 @@ func (c *Client) CancelQueued(ctx context.Context, id int64, batch string) (int,
 	err := c.do(ctx, "DELETE", path, q, nil, &out)
 	return out.Canceled, err
 }
+
+// OptOuts lists the chats that get no queued messages, newest first.
+func (c *Client) OptOuts(ctx context.Context) ([]store.OptOut, error) {
+	var out []store.OptOut
+	err := c.do(ctx, "GET", "optouts", nil, nil, &out)
+	return out, err
+}
+
+// AddOptOut lists a number or JID. The answer's Chat is the key the server stored it under; added
+// is false when it was already listed.
+func (c *Client) AddOptOut(ctx context.Context, chat string) (o store.OptOut, added bool, err error) {
+	var out struct {
+		Chat  string `json:"chat"`
+		Added bool   `json:"added"`
+	}
+	err = c.do(ctx, "POST", "optouts", nil, map[string]string{"chat": chat}, &out)
+	return store.OptOut{Chat: out.Chat}, out.Added, err
+}
+
+func (c *Client) RemoveOptOut(ctx context.Context, chat string) error {
+	return c.do(ctx, "DELETE", "optouts/"+url.PathEscape(chat), nil, nil, nil)
+}

@@ -76,6 +76,9 @@ func (m *model) cancelQueued(id int64, batch, what string) tea.Cmd {
 }
 
 func (m *model) queueKey(k string) tea.Cmd {
+	if m.queueOptOuts {
+		return m.optOutsKey(k)
+	}
 	if sel, ok := termui.ListMove(k, m.queueSel, len(m.queue.Items), m.bodyHeight()/2); ok {
 		m.queueSel = sel
 		return nil
@@ -107,6 +110,9 @@ func (m *model) queueKey(k string) tea.Cmd {
 			return nil
 		}
 		return m.cancelQueued(it.ID, "", fmt.Sprintf("#%d", it.ID))
+	case "o":
+		m.queueOptOuts = true
+		return m.loadOptOuts()
 	case "X":
 		if !ok {
 			return nil
@@ -141,7 +147,8 @@ func queueState(it store.OutboxItem) string {
 	return styleDim.Render(safe(it.Status))
 }
 
-func queueBody(q bot.QueueStats) string {
+// queueBody renders the Send queue card; optOuts < 0 leaves out the opt-out count.
+func queueBody(q bot.QueueStats, optOuts int) string {
 	state := styleAccent.Render("sending")
 	switch {
 	case !q.Running:
@@ -177,6 +184,9 @@ func queueBody(q bot.QueueStats) string {
 		rows = append(rows, [2]string{"Next due", relTime(q.NextDue)})
 	}
 	rows = append(rows, [2]string{"Jitter", "0–" + (time.Duration(q.JitterMS) * time.Millisecond).String()})
+	if optOuts >= 0 {
+		rows = append(rows, [2]string{"Opt-outs", fmt.Sprint(optOuts) + styleDim.Render(" · o lists them")})
+	}
 	if q.LastError != "" {
 		rows = append(rows, [2]string{"Last error", styleErr.Render(fit(safe(q.LastError), 50)) + styleDim.Render(" "+relTime(q.LastErrorAt))})
 	}
@@ -187,7 +197,10 @@ func (m *model) viewQueue() string {
 	if m.queueErr != nil {
 		return m.errCard("Queue", m.queueErr, "the send queue (GET /queue)")
 	}
-	lines := []string{indent(card("Send queue", m.cardWidth(cardWide), queueBody(m.stats.Queue)), " "), ""}
+	lines := []string{indent(card("Send queue", m.cardWidth(cardWide), queueBody(m.stats.Queue, m.optOutCount())), " "), ""}
+	if m.queueOptOuts {
+		return m.viewOptOuts(lines)
+	}
 	filter := "all"
 	if m.queueStatus != "" {
 		filter = m.queueStatus

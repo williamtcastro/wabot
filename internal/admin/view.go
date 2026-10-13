@@ -92,6 +92,10 @@ func (m *model) View() string {
 		body = m.modal(styleModal, m.viewConfirmRotate())
 	case m.mode == modeConfirmCancelBatch:
 		body = m.modal(styleDanger, m.viewConfirmCancelBatch())
+	case m.mode == modeAddOptOut:
+		body = m.modal(styleModal, m.viewAddOptOut())
+	case m.mode == modeConfirmRemoveOptOut:
+		body = m.modal(styleDanger, m.viewConfirmRemoveOptOut())
 	case m.tab == tabStatus:
 		body = m.viewStatus()
 	case m.tab == tabChats:
@@ -281,13 +285,13 @@ func (m *model) viewKeys() string {
 		keys = [][2]string{{"tab", "next field"}, {"enter", "next / create"}, {"esc", "cancel"}}
 	case modeShowToken:
 		keys = [][2]string{{"c", "copy"}, {"any key", "close"}}
-	case modePair, modeFilter, modeSearch:
+	case modePair, modeFilter, modeSearch, modeAddOptOut:
 		keys = [][2]string{{"enter", "ok"}, {"esc", "cancel"}}
 	case modeCompose:
 		keys = [][2]string{{"enter", "send"}, {"esc", "cancel"}}
 	case modeSetting:
 		keys = [][2]string{{"enter", "save"}, {"esc", "cancel"}}
-	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch:
+	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch, modeConfirmRemoveOptOut:
 		keys = [][2]string{{"y", "confirm"}, {"any key", "cancel"}}
 	default:
 		switch m.tab {
@@ -308,11 +312,15 @@ func (m *model) viewKeys() string {
 		case tabSettings:
 			keys = [][2]string{{"j/k", "move"}, {"enter", "change"}, {"x", "reset"}}
 		case tabQueue:
+			if m.queueOptOuts {
+				keys = [][2]string{{"j/k", "move"}, {"/", "filter"}, {"a", "add"}, {"x", "remove"}, {"o/esc", "queue"}}
+				break
+			}
 			pause := "pause"
 			if m.stats.Queue.Paused {
 				pause = "resume"
 			}
-			keys = [][2]string{{"j/k", "move"}, {"f", "filter"}, {"x", "cancel"}, {"X", "cancel batch"}, {"P", pause}, {"Q", "quiet on/off"}}
+			keys = [][2]string{{"j/k", "move"}, {"f", "filter"}, {"x", "cancel"}, {"X", "cancel batch"}, {"o", "opt-outs"}, {"P", pause}, {"Q", "quiet on/off"}}
 		case tabLogs:
 			follow := "pause"
 			if !m.logsFollow {
