@@ -15,14 +15,15 @@ wame admin -server https://wame.example.com
 |---|---|---|
 | **1 Status** | cards for the WhatsApp session, the server (URL, version and uptime, latency, live or polling), tokens (active, expiring within 7 days, unused for 30+ days, revoked), the last 24 h of activity, messages in the last hour (received, sent, busiest chats) and health (send rate, 429s, webhook). While the server isn't linked, the QR to scan instead, or the pairing code after `p` | `p` pair with a phone number, `L` log out (asks first) |
 | **2 Chats** | the server's chats with unread counts, and the selected chat's latest messages; or results of a search across every chat | `j`/`k`, `g`/`G` pick a chat, `i` send a message, `/` search, `Esc` clear the search |
-| **3 Tokens** | every token with colored scopes (`read`, `send`, `admin`), chats, rate, expiry (amber within 7 days), last use (amber ⚠ when unused for 30+ days) and creator; revoked and expired ones struck through. A card below shows the selected token in full | `j`/`k` move, `n` new, `R` rotate, `x` revoke (both ask first) |
+| **3 Tokens** | every token with colored scopes (`read`, `send`, `admin`), chats, rate, expiry (amber within 7 days), last use (amber ⚠ when unused for 30+ days), its requests and sends in the last 24 h (failed sends in red), open live connections, and creator; revoked and expired ones struck through. A card below shows the selected token in full, including when and from which IP it was last seen | `j`/`k` move, `n` new, `R` rotate, `x` revoke (both ask first) |
 | **4 Audit** | the audit log, newest first, with ✓ / ✗ and actions colored by kind; a card below shows the selected entry with its full time and error | `j`/`k`, `Ctrl+D`/`Ctrl+U`, `g`/`G` move, `/` filter, `Esc` clear the filter |
-| **5 Health** | the server's version and uptime; for sends, number lookups and auto-replies, a meter of the last minute's use against the limit, the per-chat gap and 429s (or dropped auto-replies) since startup; the webhook's queue, delivered / retried / given up / dropped counts and its latest failures | |
+| **5 Health** | the server's version and uptime; for sends, number lookups and auto-replies, a meter of the last minute's use against the limit, the per-chat gap and 429s (or dropped auto-replies) since startup; the webhook's queue, delivered / retried / replayed / given up / dropped counts and its latest failures | `j`/`k` pick a failure, `R` replay it, `t` send a test delivery |
+| **6 Settings** | the settings that change without a restart (send rate, chat gap, max wait, auto-replies, webhook filter): the value in effect, the server's flag, and who changed it and when | `j`/`k` move, `Enter` change (toggles auto-replies), `x` back to the flag |
 
-Everywhere: `1`–`5` or `Tab` / `Shift+Tab` switch tabs, `S` switches server (see
+Everywhere: `1`–`6` or `Tab` / `Shift+Tab` switch tabs, `S` switches server (see
 [Several servers](#several-servers)), `r` refreshes, `q` or `Ctrl+C` quits. The header shows unread
-chats, active tokens, failed actions in the last 24 h (red) and a `!` on Health after a 429 or
-webhook failure in the last hour, plus the connection state, the server, live or polling, and the
+chats, active tokens, failed actions in the last 24 h (red), a `!` on Health after a 429 or
+webhook failure in the last hour and a `•` on Settings while any is changed from its flag, plus the connection state, the server, live or polling, and the
 latency. Confirmations, forms and the new token open as dialogs over the current tab.
 
 ## Live updates
@@ -59,6 +60,22 @@ nothing is revoked; if revoking fails, the new token still works and the panel s
 
 Tokens nobody has used for 30 days (counting from creation if never used) are flagged in amber:
 candidates to revoke.
+
+## Changing settings
+
+The Settings tab uses [`PATCH /settings`](API.md#get-settings-patch-settings): a change applies on
+the server at once (the next send already uses the new rate), and is saved there, so it **also wins
+over the server's flags after a restart** until you reset it with `x`. The FLAG column shows what
+the server was started with. Bad values are refused with the reason and change nothing. Every
+change is in the audit log as `settings`.
+
+## Webhook test and replay
+
+On the Health tab, `t` sends a signed test delivery (`X-Wame-Event: test`, no message) and shows
+how the receiver answered, which is handy after changing its code or the secret. `R` sends the
+marked failed delivery again, once, with the same delivery id; it's marked `replayed` when the
+receiver accepts it. Only deliveries in the list can be replayed. See
+[`POST /webhook/test`, `POST /webhook/replay`](API.md#post-webhooktest-post-webhookreplay).
 
 ## Logging in a server remotely
 
@@ -153,12 +170,12 @@ admin token with an expiry over the owner secret, so it can be revoked (or rotat
 wame token create ops-laptop -scopes admin -expires 720h   # on the server
 ```
 
-The Health tab needs a server with `GET /stats` (added alongside this panel); an older server says
-so instead.
+The Health tab, the usage columns, webhook test and replay, and the Settings tab need a recent
+server (`GET /stats`, `/settings`, `/webhook/*`); an older one says so instead of failing.
 
 ## What it doesn't do (yet)
 
-No sending files, reactions or replies (use `wame tui` on the server, or the API), no editing server
-settings at runtime, and no history of webhook deliveries beyond the last 20 failures since the
-server started. See the [web admin panel proposal](proposed-features/ADMIN-PANEL.md) for the
+No sending files, reactions or replies (use `wame tui` on the server, or the API), no changing the
+webhook URL or secret, and no history of webhook deliveries or usage beyond what the server keeps
+in memory since it started (the last 20 failures, 24 hours of usage). See the [web admin panel proposal](proposed-features/ADMIN-PANEL.md) for the
 server-side pieces those need.

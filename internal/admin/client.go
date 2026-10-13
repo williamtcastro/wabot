@@ -292,3 +292,28 @@ func (c *Client) Events(ctx context.Context, events string, connected func(), ou
 	}
 	return errors.New("stream closed")
 }
+
+func (c *Client) Settings(ctx context.Context) ([]bot.SettingView, error) {
+	var out []bot.SettingView
+	err := c.do(ctx, "GET", "settings", nil, nil, &out)
+	return out, err
+}
+
+// UpdateSettings changes settings; a nil value resets one to the server's flag.
+func (c *Client) UpdateSettings(ctx context.Context, changes map[string]*string) ([]bot.SettingView, error) {
+	var out []bot.SettingView
+	err := c.do(ctx, "PATCH", "settings", nil, changes, &out)
+	return out, err
+}
+
+func (c *Client) WebhookTest(ctx context.Context) (bot.WebhookResult, error) {
+	var out bot.WebhookResult
+	err := c.do(ctx, "POST", "webhook/test", nil, struct{}{}, &out)
+	return out, err
+}
+
+func (c *Client) WebhookReplay(ctx context.Context, delivery string) (bot.WebhookResult, error) {
+	var out bot.WebhookResult
+	err := c.do(ctx, "POST", "webhook/replay", nil, map[string]string{"delivery": delivery}, &out)
+	return out, err
+}

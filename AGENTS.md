@@ -63,6 +63,7 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `internal/admin/live.go` | `admin` | the `/events` follower: reconnects with backoff, feeds `liveMsg`/`eventMsg` through a channel closed on stop; keeps time/chat/sender (never text) of the last hour's messages for the counts |
 | `internal/admin/chats.go` | `admin` | Chats tab: list, messages, search, sending, and `safe()` for text other people wrote |
 | `internal/admin/tokens.go` | `admin` | Tokens tab keys, the create form, rotation (`nextName`, `rotationRequest`, create-then-revoke) and `unused` |
+| `internal/admin/settings.go` | `admin` | Settings tab (`GET`/`PATCH /settings`), the Health tab's webhook keys (test, replay), and per-token usage from `/stats` callers |
 | `internal/admin/health.go` | `admin` | Health tab (`GET /stats`), meters, and `grid`: panels laid out in equal-height rows |
 | `internal/admin/view.go` | `admin` | rendering: header (degrades by width), dialogs, the Status grid, tokens and audit tables |
 | `Dockerfile`, `compose.yaml` | | static build into distroless `nonroot`; `/data` volume with `WAME_DB=/data/wame.db`, `WAME_ADDR=0.0.0.0:8080` (so a token is required). CI builds it and smoke-tests `version` and the no-token refusal. Docs: `docs/DOCKER.md` |
@@ -131,7 +132,7 @@ numbers and names below.
   the webhook filter setting vs a late number resolution, webhook test and replay, usage counting.
 - `internal/admin`: the client against the real `api.NewHandler` (tokens, audit paging, 401/403
   messages), the http guard, env files and profiles, and the panel: create → copy → revoke →
-  filter, rotation, the Chats tab (sanitizing), the live stream, the bell, Health, server switching
+  filter, rotation, the Chats tab (sanitizing), the Settings tab, webhook test and replay, usage columns, the live stream, the bell, Health, server switching
   (stale answers dropped) and that Status cards line up at 120 and 180 columns. Tests that build a
   model use `newTestModel`, which stops the live stream on cleanup (otherwise the test server
   can't close).

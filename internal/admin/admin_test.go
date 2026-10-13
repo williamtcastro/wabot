@@ -28,6 +28,9 @@ func newServer(t *testing.T) (*bot.Bot, *Client) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := b.InitSettings(bot.Settings{Rate: 20, ChatGap: time.Second, MaxWait: 30 * time.Second, AutoReply: true}); err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(api.NewHandler(b, &auth.Authenticator{Store: b.Store, Owner: owner}, "test"))
 	t.Cleanup(srv.Close)
 	c, err := NewClient(srv.URL, owner, false)

@@ -23,9 +23,10 @@ const (
 	tabTokens
 	tabAudit
 	tabHealth
+	tabSettings
 )
 
-var tabNames = []string{"Status", "Chats", "Tokens", "Audit", "Health"}
+var tabNames = []string{"Status", "Chats", "Tokens", "Audit", "Health", "Settings"}
 
 type mode int
 
@@ -41,6 +42,7 @@ const (
 	modeSearch
 	modeCompose
 	modeServers
+	modeSetting
 )
 
 const (
@@ -146,9 +148,15 @@ type model struct {
 	auditBusy  bool
 	auditQuery string
 
-	stats    api.Stats
-	statsErr error
-	statsAt  time.Time
+	stats     api.Stats
+	statsErr  error
+	statsAt   time.Time
+	healthSel int
+
+	settings    []bot.SettingView
+	settingsErr error
+	setSel      int
+	editKey     string
 
 	chats      []store.Chat
 	chatsErr   error
@@ -208,7 +216,7 @@ func (m *model) loadAll() tea.Cmd {
 	if m.c == nil {
 		return nil
 	}
-	return tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadStats(), m.loadChats())
+	return tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadStats(), m.loadChats(), m.loadSettings())
 }
 
 func (m *model) pollEvery() time.Duration {
@@ -359,8 +367,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statsErr = msg.err
 		if msg.err == nil {
 			m.stats, m.statsAt = msg.s, time.Now()
+			if w := m.stats.Webhook; w != nil {
+				m.healthSel = clamp(m.healthSel, len(w.Recent))
+			}
 		}
 		return m, nil
+
+	case settingsMsg:
+		return m, m.applySettingsMsg(msg)
+
+	case webhookMsg:
+		return m, m.applyWebhookMsg(msg)
 
 	case chatsMsg:
 		return m, m.applyChats(msg)
@@ -422,6 +439,19 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modeServers:
 		return m.serversKey(k)
+	case modeSetting:
+		switch k.String() {
+		case "esc":
+			m.mode = modeNormal
+			return m, nil
+		case "enter":
+			m.mode = modeNormal
+			v := strings.TrimSpace(m.prompt.Value())
+			return m, m.changeSetting(m.editKey, &v, settingLabels[m.editKey][0]+" set to "+cmpOr(v, "(none)"))
+		}
+		var cmd tea.Cmd
+		m.prompt, cmd = m.prompt.Update(k)
+		return m, cmd
 	case modePair:
 		return m.promptKey(k, func(v string) tea.Cmd {
 			m.setNotice("asking the server for a pairing code…", false)
@@ -511,7 +541,7 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.setTab((m.tab + 1) % tab(len(tabNames)))
 	case "shift+tab", "left":
 		return m, m.setTab((m.tab + tab(len(tabNames)) - 1) % tab(len(tabNames)))
-	case "1", "2", "3", "4", "5":
+	case "1", "2", "3", "4", "5", "6":
 		return m, m.setTab(tab(k.String()[0] - '1'))
 	case "r":
 		m.setNotice("refreshing…", false)
@@ -541,7 +571,9 @@ func (m *model) setTab(t tab) tea.Cmd {
 	case tabHealth:
 		return m.loadStats()
 	case tabTokens:
-		return m.loadTokens()
+		return tea.Batch(m.loadTokens(), m.loadStats())
+	case tabSettings:
+		return m.loadSettings()
 	}
 	return nil
 }
@@ -567,6 +599,10 @@ func (m *model) tabKey(k string) tea.Cmd {
 		return m.chatsKey(k)
 	case tabTokens:
 		return m.tokensKey(k)
+	case tabHealth:
+		return m.healthKey(k)
+	case tabSettings:
+		return m.settingsKey(k)
 	case tabAudit:
 		n := len(m.visibleAudit())
 		switch k {

@@ -71,7 +71,7 @@ func (m *model) webhookBody() string {
 	}
 	return kv([][2]string{
 		{"Queue", bar(w.Queued, w.Capacity, 20)},
-		{"Delivered", styleBold.Render(fmt.Sprint(w.Delivered)) + styleDim.Render(fmt.Sprintf(" (%d after a retry)", w.Retried))},
+		{"Delivered", styleBold.Render(fmt.Sprint(w.Delivered)) + styleDim.Render(fmt.Sprintf(" (%d after a retry, %d replayed)", w.Retried, w.Replayed))},
 		{"Given up", failed},
 		{"Dropped", dropped},
 		{"Last success", last(w.LastSuccess)},
@@ -112,21 +112,34 @@ func (m *model) viewHealth() string {
 
 func (m *model) webhookFailures() string {
 	w := m.stats.Webhook
-	if w == nil || len(w.Recent) == 0 {
-		return styleDim.Render("None since the server started.")
+	switch {
+	case w == nil:
+		return styleDim.Render("No webhook configured.")
+	case len(w.Recent) == 0:
+		return styleDim.Render("None since the server started.") + "\n" + styleDim.Render("t sends a test delivery")
 	}
 	var lines []string
-	for i, f := range w.Recent {
-		if i == 6 {
-			lines = append(lines, styleDim.Render(fmt.Sprintf("… %d more", len(w.Recent)-i)))
-			break
-		}
+	start, end := window(m.healthSel, len(w.Recent), 6)
+	for i := start; i < end; i++ {
+		f := w.Recent[i]
 		what := cmpOr(f.Error, fmt.Sprintf("HTTP %d", f.Status))
 		state := styleWarn.Render("retrying")
-		if f.GaveUp {
-			state = styleErr.Render("gave up")
+		switch {
+		case f.Replayed:
+			state = styleAccent.Render("replayed")
+		case f.GaveUp:
+			state = styleErr.Render("gave up ")
 		}
-		lines = append(lines, styleDim.Render(when(f.At))+"  "+state+"  "+styleDim.Render(fmt.Sprintf("try %d", f.Attempt))+"  "+fit(what, 40))
+		mark := "  "
+		if i == m.healthSel {
+			mark = styleAccent.Render("▌ ")
+		}
+		lines = append(lines, mark+styleDim.Render(when(f.At))+"  "+state+"  "+styleDim.Render(fmt.Sprintf("try %d", f.Attempt))+"  "+fit(what, 34))
+	}
+	if len(w.Recent) > end-start {
+		lines = append(lines, styleDim.Render(fmt.Sprintf("  %d of %d · j/k to move · R replays the marked one", m.healthSel+1, len(w.Recent))))
+	} else {
+		lines = append(lines, styleDim.Render("  R replays the marked one · t sends a test"))
 	}
 	return strings.Join(lines, "\n")
 }

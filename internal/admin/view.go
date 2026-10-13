@@ -71,8 +71,10 @@ func (m *model) View() string {
 		body = m.viewTokens()
 	case m.tab == tabAudit:
 		body = m.viewAudit()
-	default:
+	case m.tab == tabHealth:
 		body = m.viewHealth()
+	default:
+		body = m.viewSettings()
 	}
 	lines := strings.Split(body, "\n")
 	if h := m.bodyHeight(); len(lines) > h {
@@ -140,6 +142,13 @@ func (m *model) viewHeader() string {
 			if m.healthWarning() {
 				label += " " + styleWarn.Render("!")
 			}
+		case tabSettings:
+			for _, s := range m.settings {
+				if s.Overridden {
+					label += " " + styleWarn.Render("•")
+					break
+				}
+			}
 		}
 		if tab(i) == m.tab {
 			parts = append(parts, styleTabOn.Render(label))
@@ -186,6 +195,8 @@ func (m *model) viewNotice() string {
 		return " " + styleAccent.Render("/") + " " + m.prompt.View()
 	case modeCompose:
 		return " " + styleAccent.Render("✎ "+m.chatName(m.msgsChat)) + " " + m.prompt.View()
+	case modeSetting:
+		return " " + styleAccent.Render("✎ "+settingLabels[m.editKey][0]) + " " + m.prompt.View()
 	}
 	if m.notice == "" {
 		return ""
@@ -213,6 +224,8 @@ func (m *model) viewKeys() string {
 		keys = [][2]string{{"enter", "ok"}, {"esc", "cancel"}}
 	case modeCompose:
 		keys = [][2]string{{"enter", "send"}, {"esc", "cancel"}}
+	case modeSetting:
+		keys = [][2]string{{"enter", "save"}, {"esc", "cancel"}}
 	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate:
 		keys = [][2]string{{"y", "confirm"}, {"any key", "cancel"}}
 	default:
@@ -229,8 +242,12 @@ func (m *model) viewKeys() string {
 			keys = [][2]string{{"j/k", "move"}, {"n", "new"}, {"R", "rotate"}, {"x", "revoke"}}
 		case tabAudit:
 			keys = [][2]string{{"j/k", "move"}, {"g/G", "top/bottom"}, {"/", "filter"}}
+		case tabHealth:
+			keys = [][2]string{{"j/k", "failure"}, {"t", "test webhook"}, {"R", "replay"}}
+		case tabSettings:
+			keys = [][2]string{{"j/k", "move"}, {"enter", "change"}, {"x", "reset"}}
 		}
-		keys = append(keys, [2]string{"1-5", "tabs"})
+		keys = append(keys, [2]string{"1-6", "tabs"})
 		if len(m.opts.Profiles) > 0 {
 			keys = append(keys, [2]string{"S", "servers"})
 		}
@@ -521,9 +538,9 @@ func (m *model) viewTokens() string {
 		return indent(card("No tokens yet", min(m.width-2, 70),
 			styleDim.Render("Press n to create one for an agent, bot or script.\nEach gets its own scopes, chats, rate and expiry.")), " ")
 	}
-	cols := []int{20, 18, 10, 8, 12, 14}
+	cols := []int{18, 15, 8, 8, 10, 12, 7, 7, 4}
 	detail := m.tokenDetail()
-	lines := []string{"   " + styleHead.Render(table(cols, "NAME", "SCOPES", "CHATS", "RATE", "EXPIRES", "LAST USED", "CREATED BY"))}
+	lines := []string{"   " + styleHead.Render(table(cols, "NAME", "SCOPES", "CHATS", "RATE", "EXPIRES", "LAST USED", "REQ/24H", "SENT", "LIVE", "CREATED BY"))}
 	start, end := window(m.tokSel, len(m.tokens), m.bodyHeight()-2-lipgloss.Height(detail))
 	for i := start; i < end; i++ {
 		t := m.tokens[i]
@@ -557,7 +574,15 @@ func (m *model) viewTokens() string {
 		if !tokenLive(t) {
 			name, scopes = styleDim.Strikethrough(true).Render(name), styleDim.Render(strings.Join(t.Scopes, " "))
 		}
-		line := table(cols, name, scopes, chats, rate, expires, lastUsed, styleDim.Render(cmpOr(t.CreatedBy, "owner")))
+		reqs, sent, live := styleFaint.Render("–"), styleFaint.Render("–"), styleFaint.Render("–")
+		if calls, sends, failed, streams, ok := m.callerUsage(t.Name); ok {
+			reqs, sent = usageCell(calls, 1000), usageCell(sends, 0)
+			if failed > 0 {
+				sent += styleErr.Render(fmt.Sprintf("/%d✗", failed))
+			}
+			live = usageCell(int64(streams), 0)
+		}
+		line := table(cols, name, scopes, chats, rate, expires, lastUsed, reqs, sent, live, styleDim.Render(cmpOr(t.CreatedBy, "owner")))
 		if i == m.tokSel {
 			lines = append(lines, m.selectedRow(line))
 		} else {
@@ -595,8 +620,25 @@ func (m *model) tokenDetail() string {
 	case unused(t):
 		state = styleWarn.Render("● unused for 30+ days") + styleDim.Render(": consider revoking it")
 	}
-	left := kv([][2]string{{"ID", styleDim.Render(t.ID)}, {"State", state}, {"Scopes", scopeBadges(t.Scopes)}, {"Chats", chats}})
-	right := kv([][2]string{{"Created", created}, {"Expires", expires}, {"Rate", cmpOr(rateText(t.Rate), "global limit only")}})
+	activity := styleDim.Render("nothing since the server started")
+	if calls, sends, failed, streams, ok := m.callerUsage(t.Name); ok {
+		activity = fmt.Sprintf("%s, %s", plural(int(calls), "request"), plural(int(sends), "send"))
+		if failed > 0 {
+			activity += styleErr.Render(fmt.Sprintf(", %d failed", failed))
+		}
+		if streams > 0 {
+			activity += styleAccent.Render(fmt.Sprintf(", %d open stream", streams))
+		}
+		activity += styleDim.Render(" (24 h)")
+	}
+	seen := styleDim.Render("not since the server started")
+	for _, c := range m.stats.Callers {
+		if c.Name == t.Name && !c.LastSeen.IsZero() {
+			seen = relTime(c.LastSeen) + styleDim.Render(" from "+cmpOr(c.LastIP, "?"))
+		}
+	}
+	left := kv([][2]string{{"ID", styleDim.Render(t.ID)}, {"State", state}, {"Scopes", scopeBadges(t.Scopes)}, {"Chats", chats}, {"Activity", activity}})
+	right := kv([][2]string{{"Created", created}, {"Expires", expires}, {"Rate", cmpOr(rateText(t.Rate), "global limit only")}, {"Last seen", seen}})
 	w := min(m.width-2, 130)
 	return card(t.Name, w, lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width((w-4)/2).Render(left), right))
 }
