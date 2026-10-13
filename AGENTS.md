@@ -55,6 +55,7 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `internal/tui/view.go` | `tui` | rendering: panes, sidebar, context bar, footer, styles |
 | `internal/tui/format.go` | `tui` | text helpers and `safe()` sanitizing of untrusted text |
 | `internal/admin/client.go` | `admin` | `wame admin`: HTTP client for a remote server (`NewClient` refuses plain http beyond loopback), typed on `bot.Status`, `store.Token`, `store.AuditEntry` |
+| `internal/admin/config.go` | `admin` | `ReadEnvFile` (`WAME_SERVER`/`WAME_TOKEN` from `./.env`, `~/.config/wame/admin.env`) and `Resolve` (precedence; a file's server needs that file's token) |
 | `internal/admin/model.go` | `admin` | the panel's Bubble Tea model: tabs, modes (pair, confirm, token form, one-time token view, filter), polling |
 | `internal/admin/view.go` | `admin` | rendering: header, tabs, status with QR, tokens and audit tables |
 | `Dockerfile`, `compose.yaml` | | static build into distroless `nonroot`; `/data` volume with `WAME_DB=/data/wame.db`, `WAME_ADDR=0.0.0.0:8080` (so a token is required). CI builds it and smoke-tests `version` and the no-token refusal. Docs: `docs/DOCKER.md` |

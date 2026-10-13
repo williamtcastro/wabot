@@ -48,6 +48,29 @@ revoked along with it.
 | `-token TOKEN` | `WAME_TOKEN` | | the owner secret or an admin token. Prefer the env variable: flags show up in `ps` |
 | `-insecure` | | `false` | allow plain `http://` to a non-loopback address |
 
+### Saving the server and token
+
+So you don't have to export them each time, `wame admin` also reads `WAME_SERVER` and `WAME_TOKEN`
+from env files (`KEY=value` lines; other keys are ignored). It takes each value from the first
+place that has it:
+
+1. the `-server` / `-token` flags;
+2. the environment;
+3. `.env` in the current directory (the same file Docker Compose uses);
+4. `~/.config/wame/admin.env` (or `$XDG_CONFIG_HOME/wame/admin.env`), for use from any folder.
+
+```sh
+mkdir -p ~/.config/wame
+printf 'WAME_SERVER=https://wame.example.com\nWAME_TOKEN=wame_…\n' > ~/.config/wame/admin.env
+chmod 600 ~/.config/wame/admin.env
+wame admin
+```
+
+A `WAME_SERVER` from a file is only used with a `WAME_TOKEN` from **that same file**. If the token
+comes from somewhere else (say, `WAME_TOKEN` exported in your shell) and a `.env` in the folder
+you're in names a server, wame refuses rather than send your token to it. Fix it by putting both
+in one file, or by passing `-server`. Keep these files private (`chmod 600`): they hold the token.
+
 The token goes in every request, so the panel refuses plain `http://` to anything but
 `localhost`/`127.0.0.1`/`::1`. Two good setups:
 

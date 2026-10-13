@@ -117,13 +117,9 @@ docker compose up -d
 
 [`.env.example`](../.env.example) lists the keys: `WAME_TOKEN` (required), and the optional
 webhook, rate and log settings, which Compose passes to the container. `WAME_SERVER` is the URL
-`wame admin` connects to; the server ignores it. To reuse the same file for `wame admin` on your
-machine, load it into the shell:
-
-```sh
-set -a; . ./.env; set +a
-wame admin            # uses WAME_SERVER and WAME_TOKEN
-```
+`wame admin` connects to; the server ignores it. Run `wame admin` from the folder with the `.env`
+and it reads `WAME_SERVER` and `WAME_TOKEN` from it; or save them in `~/.config/wame/admin.env` to
+use from anywhere ([details](ADMIN.md#saving-the-server-and-token)).
 
 ## Logging in without a terminal on the server
 

@@ -113,7 +113,8 @@ Opens a terminal [admin panel](ADMIN.md) for a server running elsewhere: status 
 (QR or pairing code), tokens (create, revoke) and the audit log. It only talks to the HTTP API, so
 it needs no database and can run next to `serve`. `-server` (or `WAME_SERVER`, default
 `http://127.0.0.1:8080`) is the server's URL; the token comes from `WAME_TOKEN` (or `-token`) and
-must be the owner secret or have the admin scope. Plain `http://` is refused for non-loopback
+must be the owner secret or have the admin scope. Both can also be saved in `./.env` or
+`~/.config/wame/admin.env` ([details](ADMIN.md#saving-the-server-and-token)). Plain `http://` is refused for non-loopback
 addresses unless you pass `-insecure`.
 
 ### `wame logout`

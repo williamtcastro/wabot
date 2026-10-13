@@ -50,7 +50,7 @@ Usage:
                                        MCP server over stdio for AI agents (see docs/MCP.md)
   wame admin [-server URL] [-insecure]
                                        admin panel for a running server: status, login, tokens, audit
-                                       (env WAME_SERVER, token in WAME_TOKEN; see docs/ADMIN.md)
+                                       (WAME_SERVER, WAME_TOKEN: env, ./.env or ~/.config/wame/admin.env)
   wame version                        print the version
   wame logout                         unlink the device and delete the session
 
@@ -660,17 +660,37 @@ func mcpCommand(ctx context.Context, b *bot.Bot, args []string) error {
 }
 
 // adminCommand opens the admin panel for a server over its HTTP API; it never touches the local database.
+// The server and token come from flags, the environment, ./.env or ~/.config/wame/admin.env, in that order.
 func adminCommand(args []string) error {
 	fs := flag.NewFlagSet("admin", flag.ExitOnError)
 	fs.Usage = func() { fmt.Println(usage) }
-	server := fs.String("server", envOr("WAME_SERVER", "http://127.0.0.1:8080"), "")
-	token := fs.String("token", envOr("WAME_TOKEN", ""), "")
+	server := fs.String("server", "", "")
+	token := fs.String("token", "", "")
 	insecure := fs.Bool("insecure", false, "")
 	_ = fs.Parse(args)
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q (flags go right after 'admin')", fs.Arg(0))
 	}
-	c, err := admin.NewClient(*server, *token, *insecure)
+	sources := []admin.Source{
+		{Name: "flags", Server: *server, Token: *token},
+		{Name: "environment", Server: envOr("WAME_SERVER", ""), Token: envOr("WAME_TOKEN", "")},
+	}
+	files := []string{".env"}
+	if dir := configDir(); dir != "" {
+		files = append(files, filepath.Join(dir, "wame", "admin.env"))
+	}
+	for _, f := range files {
+		src, err := admin.ReadEnvFile(f)
+		if err != nil {
+			return err
+		}
+		sources = append(sources, src)
+	}
+	srv, tok, err := admin.Resolve(sources)
+	if err != nil {
+		return err
+	}
+	c, err := admin.NewClient(srv, tok, *insecure)
 	if err != nil {
 		return err
 	}

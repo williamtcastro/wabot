@@ -39,7 +39,7 @@ func NewClient(server, token string, insecure bool) (*Client, error) {
 		return nil, fmt.Errorf("refusing to send the token over plain http to %s: use https, an SSH tunnel to 127.0.0.1, or -insecure", u.Host)
 	}
 	if token == "" {
-		return nil, errors.New("a token is required: set WAME_TOKEN to the owner secret or an admin token")
+		return nil, errors.New("a token is required: set WAME_TOKEN (in the environment, ./.env or ~/.config/wame/admin.env) to the owner secret or an admin token")
 	}
 	u.RawQuery, u.Fragment = "", ""
 	return &Client{base: u, token: token, http: &http.Client{Timeout: 30 * time.Second}}, nil
