@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -70,7 +71,8 @@ func Backup(ctx context.Context, dbPath, dest string) (_ int64, err error) {
 }
 
 func openReadOnly(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
+	dsn := url.URL{Scheme: "file", Path: filepath.ToSlash(path), OmitHost: true, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
+	db, err := sql.Open("sqlite", dsn.String())
 	if err != nil {
 		return nil, err
 	}

@@ -38,6 +38,41 @@ func TestOptOuts(t *testing.T) {
 	}
 }
 
+func TestOptOutUnderLIDIsRelinked(t *testing.T) {
+	s := openStore(t)
+	if _, err := s.db.Exec(`CREATE TABLE whatsmeow_lid_map (lid TEXT PRIMARY KEY, pn TEXT UNIQUE NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	const mariaLID, johnLID = "100000000000001@lid", "100000000000002@lid"
+	for _, chat := range []string{mariaLID, johnLID, john} {
+		if _, err := s.AddOptOut(OptOut{Chat: chat, Reason: "STOP", At: time.Now(), By: "whatsapp"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ok, _ := s.OptedOut(maria, mariaLID); !ok {
+		t.Fatal("either key must match")
+	}
+	if _, err := s.db.Exec(`INSERT INTO whatsmeow_lid_map VALUES ('100000000000001', '5511999999999'), ('100000000000002', '5511988887777')`); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.OptOuts()
+	if err != nil || len(list) != 2 {
+		t.Fatalf("one entry per person once the numbers are known: %v %+v", err, list)
+	}
+	if ok, _ := s.OptedOut(maria); !ok {
+		t.Fatal("the @lid entry must move to the phone JID")
+	}
+	if err := s.RemoveOptOut(maria, mariaLID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveOptOut(maria, mariaLID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second remove = %v", err)
+	}
+	if err := s.RemoveOptOut(); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("no keys = %v", err)
+	}
+}
+
 func TestFold(t *testing.T) {
 	for in, want := range map[string]string{"STOP": "stop", "Não": "nao", "DESCADASTRAR": "descadastrar", "Pará": "para"} {
 		if got := Fold(in); got != want {

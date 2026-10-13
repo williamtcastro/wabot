@@ -13,8 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/williamtcastro/wame/internal/store"
 )
 
 const (
@@ -22,6 +20,8 @@ const (
 	alertEvery   = 15 * time.Minute
 	alertBackoff = time.Minute
 	alertTimeout = 10 * time.Second
+	// minAlertDelay keeps a delay of 0 from alerting on every start (state: connecting) and on brief blips.
+	minAlertDelay = 30 * time.Second
 
 	priorityLow    = 2
 	priorityNormal = 5
@@ -46,6 +46,7 @@ type Notifier interface {
 type Gotify struct {
 	endpoint string
 	host     string
+	hostname string
 	token    string
 	client   *http.Client
 }
@@ -64,6 +65,7 @@ func NewGotify(base, token string) (*Gotify, error) {
 	return &Gotify{
 		endpoint: strings.TrimRight(u.String(), "/") + "/message",
 		host:     u.Host,
+		hostname: u.Hostname(),
 		token:    token,
 		client: &http.Client{
 			Timeout:       alertTimeout,
@@ -98,7 +100,8 @@ func (g *Gotify) Notify(ctx context.Context, a Alert) error {
 	return nil
 }
 
-// clean drops the URL from transport errors, so the address never reaches /stats or the log.
+// clean drops the URL from transport errors, so the address never reaches /stats or the log. The
+// bare host name goes too: TLS certificate errors print it without the port.
 func (g *Gotify) clean(err error) error {
 	if dns, ok := errors.AsType[*net.DNSError](err); ok {
 		return fmt.Errorf("gotify: lookup failed: %s", dns.Err)
@@ -110,6 +113,9 @@ func (g *Gotify) clean(err error) error {
 		err = uerr.Err
 	}
 	msg := strings.ReplaceAll(err.Error(), g.host, "gotify")
+	if g.hostname != "" {
+		msg = strings.ReplaceAll(msg, g.hostname, "gotify")
+	}
 	return errors.New(strings.ReplaceAll(msg, g.token, "***"))
 }
 
@@ -152,21 +158,23 @@ type alerter struct {
 	retryAt     time.Time
 	lastEvent   map[string]time.Time
 	cooldown    time.Time
-	queueFailed int
+	queueFailed int64
 	hookNoted   int64
 }
 
-// alertSnapshot is what one check looks at. queueFailed counts the items that failed since the
-// previous check, taken from QueueEvents.
+// alertSnapshot is what one check looks at. queueFailed counts the items that failed for good since
+// the previous check.
 type alertSnapshot struct {
 	status      Status
-	queue       QueueStats
-	queueFailed int
+	cooldown    time.Time
+	queueFailed int64
 	webhook     *WebhookStats
 }
 
-// SetAlerts makes RunAlerts send alerts through n; a disconnection must last delay first.
+// SetAlerts makes RunAlerts send alerts through n; a disconnection must last delay first (at least
+// minAlertDelay).
 func (b *Bot) SetAlerts(n Notifier, delay time.Duration) {
+	delay = max(delay, minAlertDelay)
 	b.alerts = &alerter{n: n, delay: delay, lastEvent: map[string]time.Time{},
 		stats: AlertStats{Configured: true, Backend: n.Name(), DelayMS: delay.Milliseconds()}}
 }
@@ -200,30 +208,25 @@ func (b *Bot) RunAlerts(ctx context.Context) {
 	if a == nil {
 		return
 	}
+	// Status events only make a logout alert prompt; the tick catches anything a full buffer drops.
 	ch, unsub := b.Subscribe()
 	defer unsub()
 	tick := time.NewTicker(alertTick)
 	defer tick.Stop()
-	failed := 0
+	failedSeen := b.outbox.failed.Load()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case v := <-ch:
-			switch v := v.(type) {
-			case QueueEvent:
-				if v.Item.Status == store.OutboxFailed {
-					failed++
-				}
-				continue
-			case Status:
-			default:
+			if _, ok := v.(Status); !ok {
 				continue
 			}
 		case <-tick.C:
 		}
-		snap := alertSnapshot{status: b.Status(), queue: b.QueueStats(), queueFailed: failed}
-		failed = 0
+		failed := b.outbox.failed.Load()
+		snap := alertSnapshot{status: b.Status(), cooldown: b.queueCooldown(), queueFailed: failed - failedSeen}
+		failedSeen = failed
 		if b.Webhook != nil {
 			s := b.Webhook.Stats()
 			snap.webhook = &s
@@ -254,7 +257,7 @@ func (a *alerter) notify(ctx context.Context, now time.Time, al Alert) bool {
 		return false
 	}
 	if a.account != "" {
-		al.Message += "\nAccount: " + a.account
+		al.Message += "\nAccount: …" + a.account[max(len(a.account)-4, 0):]
 	}
 	if a.send(ctx, al) != nil {
 		a.retryAt = now.Add(alertBackoff)
@@ -276,11 +279,14 @@ func connectionLevel(s Status) connLevel {
 }
 
 func (a *alerter) observe(ctx context.Context, now time.Time, s alertSnapshot) {
+	if ctx.Err() != nil {
+		return // shutting down: the state is about to look disconnected
+	}
 	if user, _, _ := strings.Cut(s.status.JID, "@"); user != "" {
 		a.account = user
 	}
 	a.observeConnection(ctx, now, s.status)
-	a.observeQueue(ctx, now, s.queue, s.queueFailed)
+	a.observeQueue(ctx, now, s.cooldown, s.queueFailed)
 	if s.webhook != nil {
 		a.observeWebhook(ctx, now, *s.webhook)
 	}
@@ -331,10 +337,10 @@ func (a *alerter) event(ctx context.Context, now time.Time, kind string, al Aler
 	return true
 }
 
-func (a *alerter) observeQueue(ctx context.Context, now time.Time, q QueueStats, failed int) {
-	if !q.CooldownUntil.IsZero() && !q.CooldownUntil.Equal(a.cooldown) && a.event(ctx, now, "queue_cooldown", Alert{Title: "wame: send queue backing off",
-		Message: fmt.Sprintf("The send queue paused until %s after repeated WhatsApp errors.", q.CooldownUntil.Format("15:04:05")), Priority: priorityNormal}) {
-		a.cooldown = q.CooldownUntil
+func (a *alerter) observeQueue(ctx context.Context, now time.Time, cooldown time.Time, failed int64) {
+	if !cooldown.IsZero() && !cooldown.Equal(a.cooldown) && a.event(ctx, now, "queue_cooldown", Alert{Title: "wame: send queue backing off",
+		Message: fmt.Sprintf("The send queue paused until %s after repeated WhatsApp errors.", cooldown.Format("15:04:05 MST")), Priority: priorityNormal}) {
+		a.cooldown = cooldown
 	}
 	a.queueFailed += failed
 	if a.queueFailed > 0 && a.event(ctx, now, "queue_failed", Alert{Title: "wame: queued messages failed",

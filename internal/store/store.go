@@ -352,6 +352,8 @@ func (s *Store) relinkLIDs() {
 		`INSERT INTO wame_chat_state (chat, read_seq) SELECT ` + pn + `, read_seq FROM wame_chat_state WHERE chat` + mapped + `
 			ON CONFLICT (chat) DO UPDATE SET read_seq = MAX(read_seq, excluded.read_seq)`,
 		`DELETE FROM wame_chat_state WHERE chat` + mapped,
+		`UPDATE OR IGNORE wame_optouts SET chat = ` + pn + ` WHERE chat` + mapped,
+		`DELETE FROM wame_optouts WHERE chat` + mapped,
 	} {
 		if _, err := tx.Exec(stmt); err != nil {
 			return

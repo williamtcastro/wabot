@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -114,6 +115,28 @@ func TestBackupRefusesToOverwrite(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "missing.db")); err == nil {
 		t.Fatal("backing up a missing database created it")
+	}
+}
+
+func TestBackupPathNeedsEscaping(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "odd #1 ?x=%41")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "wame.db")
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path, OmitHost: true}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if _, err := Backup(context.Background(), path, filepath.Join(dir, "copy.db")); err != nil {
+		t.Fatalf("backup from a path with '#', '?' and '%%': %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "odd ")); err == nil {
+		t.Fatal("the path was cut at '#'")
 	}
 }
 

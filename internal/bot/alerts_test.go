@@ -143,7 +143,7 @@ func TestAlertConnection(t *testing.T) {
 	if got := n.titles(); len(got) != 1 || got[0] != "wame: WhatsApp disconnected" {
 		t.Fatalf("after the delay: %v", got)
 	}
-	if l := n.last(); l.Priority != priorityWarn || !strings.Contains(l.Message, "Account: 5511999999999") {
+	if l := n.last(); l.Priority != priorityWarn || !strings.HasSuffix(l.Message, "Account: …9999") {
 		t.Fatalf("disconnect alert = %+v", l)
 	}
 	at(5*time.Minute, disconnected)
@@ -154,7 +154,7 @@ func TestAlertConnection(t *testing.T) {
 	}
 
 	at(8*time.Minute, loggedOut)
-	if l := n.last(); l.Title != "wame: WhatsApp logged out" || l.Priority != priorityHigh || !strings.Contains(l.Message, "5511999999999") {
+	if l := n.last(); l.Title != "wame: WhatsApp logged out" || l.Priority != priorityHigh || !strings.Contains(l.Message, "…9999") || strings.Contains(l.Message, "551199999") {
 		t.Fatalf("a logout must alert at once: %+v", l)
 	}
 	at(9*time.Minute, loggedOut)
@@ -173,6 +173,45 @@ func TestAlertConnection(t *testing.T) {
 	b.observe(ctx, t0.Add(time.Hour), alertSnapshot{status: Status{State: "waiting_for_qr_scan"}})
 	if len(fresh.titles()) != 0 {
 		t.Fatalf("an unpaired server alerted: %v", fresh.titles())
+	}
+}
+
+func TestAlertZeroDelayAndShutdown(t *testing.T) {
+	n := &fakeNotifier{}
+	a := newAlerter(n, 0)
+	ctx := t.Context()
+	t0 := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+	connecting := Status{JID: maria, State: "connecting"}
+	a.observe(ctx, t0, alertSnapshot{status: connecting})
+	a.observe(ctx, t0.Add(alertTick), alertSnapshot{status: connecting})
+	a.observe(ctx, t0.Add(2*alertTick), alertSnapshot{status: online})
+	if len(n.titles()) != 0 {
+		t.Fatalf("a delay of 0 must not alert while starting: %v", n.titles())
+	}
+	a.observe(ctx, t0.Add(time.Minute), alertSnapshot{status: disconnected})
+	a.observe(ctx, t0.Add(time.Minute+minAlertDelay), alertSnapshot{status: disconnected})
+	if got := n.titles(); len(got) != 1 || got[0] != "wame: WhatsApp disconnected" {
+		t.Fatalf("after the minimum delay: %v", got)
+	}
+
+	done, cancel := context.WithCancel(ctx)
+	cancel()
+	b := newAlerter(n, 0)
+	b.observe(ctx, t0, alertSnapshot{status: online})
+	b.observe(done, t0.Add(time.Minute), alertSnapshot{status: loggedOut})
+	if len(n.titles()) != 1 {
+		t.Fatalf("no alerts once shutting down: %v", n.titles())
+	}
+}
+
+func TestGotifyCleanDropsBareHost(t *testing.T) {
+	g, err := NewGotify("https://gotify.home.example:8443", "A1b2C3d4e5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = g.clean(errors.New(`tls: failed to verify certificate: x509: certificate is valid for other.example, not gotify.home.example`))
+	if strings.Contains(err.Error(), "home.example") {
+		t.Fatalf("the bare host name leaked: %v", err)
 	}
 }
 
@@ -226,13 +265,13 @@ func TestAlertEvents(t *testing.T) {
 	}
 
 	cool := t0.Add(20 * time.Minute)
-	at(19*time.Minute, alertSnapshot{queue: QueueStats{CooldownUntil: cool}, queueFailed: 2})
+	at(19*time.Minute, alertSnapshot{cooldown: cool, queueFailed: 2})
 	got := n.titles()
 	if len(got) != 4 || got[2] != "wame: send queue backing off" || got[3] != "wame: queued messages failed" || !strings.HasPrefix(n.last().Message, "2 queued") {
 		t.Fatalf("queue: %v", got)
 	}
-	at(19*time.Minute+5*time.Second, alertSnapshot{queue: QueueStats{CooldownUntil: cool}, queueFailed: 1})
-	at(20*time.Minute, alertSnapshot{queue: QueueStats{CooldownUntil: cool.Add(time.Minute)}, queueFailed: 1})
+	at(19*time.Minute+5*time.Second, alertSnapshot{cooldown: cool, queueFailed: 1})
+	at(20*time.Minute, alertSnapshot{cooldown: cool.Add(time.Minute), queueFailed: 1})
 	if len(n.titles()) != 4 {
 		t.Fatalf("queue alerts must be rate-limited: %v", n.titles())
 	}
@@ -268,12 +307,17 @@ func TestRunAlertsAndTestAlert(t *testing.T) {
 		subscribed = len(b.subs) > 0
 		b.mu.RUnlock()
 	}
-	b.publish(QueueEvent{Item: store.OutboxItem{ID: 1, Status: store.OutboxFailed}})
+	items, _ := b.Enqueue("ops", "", "", "", []QueueRequest{{To: "5511999999999", Text: "a"}, {To: "5511988887777", Text: "b"}})
+	b.finishQueued(items[0], store.OutboxResult{Status: store.OutboxFailed, Error: errOptedOut})
+	b.finishQueued(items[1], store.OutboxResult{Status: store.OutboxFailed, Error: "gave up"})
 	b.setState("logged_out", "")
 	for deadline := time.Now().Add(5 * time.Second); len(n.titles()) < 3 && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
 	}
 	got := n.titles()
 	if len(got) != 3 || got[1] != "wame: WhatsApp logged out" || got[2] != "wame: queued messages failed" {
 		t.Fatalf("alerts = %v", got)
+	}
+	if !strings.HasPrefix(n.last().Message, "1 queued") {
+		t.Fatalf("an opted-out recipient isn't a failure to alert on: %q", n.last().Message)
 	}
 }

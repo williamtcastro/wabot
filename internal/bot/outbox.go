@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -119,10 +120,10 @@ func (q QuietHours) Until(now time.Time, loc *time.Location) time.Time {
 	return time.Time{}
 }
 
-// ParseTimezone loads an IANA zone name; "" or "Local" is the server's own zone.
+// ParseTimezone loads an IANA zone name; "", "Local" or zoneName's "Local (…)" is the server's own zone.
 func ParseTimezone(name string) (*time.Location, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || name == "Local" {
+	if name == "" || name == "Local" || strings.HasPrefix(name, "Local (") {
 		return time.Local, nil
 	}
 	loc, err := time.LoadLocation(name)
@@ -132,8 +133,19 @@ func ParseTimezone(name string) (*time.Location, error) {
 	return loc, nil
 }
 
+// zoneName shows which zone "Local" really is (in a container without TZ that's UTC), so it's
+// clear what quiet hours are measured in.
+func zoneName(loc *time.Location) string {
+	if loc != time.Local {
+		return loc.String()
+	}
+	abbr, _ := time.Now().In(loc).Zone()
+	return "Local (" + abbr + ")"
+}
+
 type outbox struct {
 	wake      chan struct{}
+	failed    atomic.Int64 // items that failed for good, for the alerter
 	mu        sync.Mutex
 	running   bool
 	fails     int
@@ -210,6 +222,19 @@ func validQueueRequest(r QueueRequest) error {
 	return err
 }
 
+// NotQueuedError is CancelQueued's answer for an item (within its filter) that is no longer queued.
+// It unwraps to store.ErrNotFound for callers that only check that.
+type NotQueuedError struct {
+	ID     int64
+	Status string
+}
+
+func (e NotQueuedError) Error() string {
+	return fmt.Sprintf("only queued messages can be canceled; #%d is %s", e.ID, e.Status)
+}
+
+func (e NotQueuedError) Unwrap() error { return store.ErrNotFound }
+
 // CancelQueued cancels queued items: one by id (within f), or every queued one matching f.
 func (b *Bot) CancelQueued(actor string, id int64, f store.OutboxFilter) (items []store.OutboxItem, err error) {
 	target := f.Batch
@@ -219,6 +244,9 @@ func (b *Bot) CancelQueued(actor string, id int64, f store.OutboxFilter) (items 
 	items, err = b.Store.CancelOutbox(id, f)
 	if err == nil && len(items) == 0 && id > 0 {
 		err = store.ErrNotFound
+		if it, gerr := b.Store.OutboxItem(id); gerr == nil && (f.Actor == "" || it.Actor == f.Actor) && (f.Batch == "" || it.Batch == f.Batch) {
+			err = NotQueuedError{ID: id, Status: it.Status}
+		}
 	}
 	b.Audit(actor, "queue_cancel", target, fmt.Sprintf("%d canceled", len(items)), err)
 	for _, it := range items {
@@ -233,15 +261,22 @@ func (b *Bot) QueueStats() QueueStats {
 		b.Log.Error("outbox: count", "err", err)
 	}
 	s := b.currentSettings()
+	cooldown := b.queueCooldown()
 	b.outbox.mu.Lock()
 	defer b.outbox.mu.Unlock()
-	st := QueueStats{OutboxCounts: c, Paused: s.QueuePaused, Running: b.outbox.running, JitterMS: s.QueueJitter.Milliseconds(),
-		QuietHours: s.QuietHours.String(), Timezone: s.location().String(), QuietUntil: s.QuietHours.Until(time.Now(), s.location()),
-		LastError: b.outbox.lastErr, LastErrorAt: b.outbox.lastErrAt}
+	return QueueStats{OutboxCounts: c, Paused: s.QueuePaused, Running: b.outbox.running, JitterMS: s.QueueJitter.Milliseconds(),
+		QuietHours: s.QuietHours.String(), Timezone: zoneName(s.location()), QuietUntil: s.QuietHours.Until(time.Now(), s.location()),
+		CooldownUntil: cooldown, LastError: b.outbox.lastErr, LastErrorAt: b.outbox.lastErrAt}
+}
+
+// queueCooldown is when the queue's back-off after repeated errors ends, or zero.
+func (b *Bot) queueCooldown() time.Time {
+	b.outbox.mu.Lock()
+	defer b.outbox.mu.Unlock()
 	if time.Now().Before(b.outbox.cooldown) {
-		st.CooldownUntil = b.outbox.cooldown
+		return b.outbox.cooldown
 	}
-	return st
+	return time.Time{}
 }
 
 func (b *Bot) currentSettings() Settings {
@@ -277,7 +312,10 @@ func (b *Bot) outboxReceipt(ids []types.MessageID, read bool, at time.Time) {
 		return
 	}
 	for _, it := range items {
-		b.queueEvent(it)
+		// Only sent items report receipts: a failed or retried one already had its final event.
+		if it.Status == store.OutboxSent {
+			b.queueEvent(it)
+		}
 	}
 }
 
@@ -331,7 +369,7 @@ func (b *Bot) outboxStep(ctx context.Context) time.Duration {
 	case s.QueuePaused:
 		return outboxIdle
 	case !quietUntil.IsZero():
-		return max(time.Until(quietUntil), outboxMinStep)
+		return min(max(time.Until(quietUntil), outboxMinStep), outboxIdle)
 	case !b.Client.IsConnected() || !b.Client.IsLoggedIn():
 		return outboxOffline
 	}
@@ -375,7 +413,7 @@ func (b *Bot) outboxStep(ctx context.Context) time.Duration {
 			return jitter(s.QueueJitter)
 		}
 		chat := b.PhoneJID(jid).String()
-		if err := b.checkOptOut(chat); err != nil {
+		if err := b.optedOut(jid, it.To); err != nil {
 			if _, isInput := errors.AsType[InputError](err); !isInput {
 				b.Log.Error("outbox: opt-out check", "err", err)
 				return outboxOffline
@@ -454,6 +492,11 @@ func (b *Bot) sendQueued(ctx context.Context, it store.OutboxItem) {
 	if ctx.Err() != nil {
 		return // shutting down: it stays in sending and is requeued on the next start
 	}
+	b.finishQueued(it, b.attemptResult(it, err))
+}
+
+// attemptResult turns a failed attempt's error into what happens to the item next.
+func (b *Bot) attemptResult(it store.OutboxItem, err error) store.OutboxResult {
 	r := store.OutboxResult{Status: store.OutboxQueued, Error: err.Error()}
 	_, isInput := errors.AsType[InputError](err)
 	limited, isLimited := errors.AsType[RateLimitError](err)
@@ -462,6 +505,9 @@ func (b *Bot) sendQueued(ctx context.Context, it store.OutboxItem) {
 		r.Status = store.OutboxFailed
 	case isLimited:
 		r.Due, r.Refund = time.Now().Add(limited.RetryAfter), true
+	case errors.Is(err, errOptOutCheck):
+		b.Log.Error("outbox: opt-out check", "id", it.ID, "err", err)
+		r.Due, r.Refund = time.Now().Add(outboxOffline), true
 	case !b.Client.IsLoggedIn() || !b.Client.IsConnected():
 		r.Refund = true
 	default:
@@ -472,7 +518,7 @@ func (b *Bot) sendQueued(ctx context.Context, it store.OutboxItem) {
 			r.Due = time.Now().Add(outboxBackoff(it.Attempts))
 		}
 	}
-	b.finishQueued(it, r)
+	return r
 }
 
 func (b *Bot) finishQueued(it store.OutboxItem, r store.OutboxResult) {
@@ -485,6 +531,9 @@ func (b *Bot) finishQueued(it store.OutboxItem, r store.OutboxResult) {
 		return
 	case r.Status == store.OutboxFailed:
 		b.Log.Warn("outbox: gave up", "id", it.ID, "batch", it.Batch, "err", r.Error)
+		if r.Error != errOptedOut {
+			b.outbox.failed.Add(1)
+		}
 	}
 	b.queueEvent(done)
 }

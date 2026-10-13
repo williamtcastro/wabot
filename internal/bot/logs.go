@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -30,10 +31,14 @@ type LogQuery struct {
 const (
 	redacted    = "[redacted]"
 	maxLogValue = 1024
+	// minScrubLen skips short secrets: replacing every short substring would mangle the logs and,
+	// by where the marks land, give the secret away.
+	minScrubLen = 8
 )
 
-// secretKeys are substrings of attribute keys whose values never reach the buffer.
-var secretKeys = []string{"token", "secret", "password", "passwd", "authorization", "cookie", "key", "url", "webhook"}
+// secretKeys are substrings of attribute keys whose values never reach the buffer. A bare "key"
+// (a setting's name) isn't one; names ending in _key or -key are (api_key, X-Gotify-Key).
+var secretKeys = []string{"token", "secret", "password", "passwd", "authorization", "cookie", "apikey", "url", "webhook"}
 
 // LogBuffer keeps the newest records an slog.Handler sees (see Wrap), with secrets taken out, so
 // admins can read them over the API. Only app logs pass through it; whatsmeow logs separately.
@@ -48,12 +53,12 @@ type LogBuffer struct {
 func NewLogBuffer(size int) *LogBuffer { return &LogBuffer{ring: make([]LogEntry, 0, max(size, 1))} }
 
 // Scrub replaces each of these strings (the webhook URL, its secret, the owner secret) wherever it
-// appears in later records. Empty strings are ignored.
+// appears in later records. Strings shorter than minScrubLen are ignored.
 func (l *LogBuffer) Scrub(secrets ...string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, s := range secrets {
-		if s != "" && !slices.Contains(l.secrets, s) {
+		if len(s) >= minScrubLen && !slices.Contains(l.secrets, s) {
 			l.secrets = append(l.secrets, s)
 		}
 	}
@@ -119,9 +124,7 @@ func (h *logHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 func (h *logHandler) Handle(ctx context.Context, r slog.Record) error {
 	attrs := make(map[string]string, len(h.attrs)+r.NumAttrs())
-	for k, v := range h.attrs {
-		attrs[k] = v
-	}
+	maps.Copy(attrs, h.attrs)
 	r.Attrs(func(a slog.Attr) bool {
 		flatten(attrs, h.group, a)
 		return true
@@ -131,9 +134,9 @@ func (h *logHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 func (h *logHandler) WithAttrs(as []slog.Attr) slog.Handler {
-	attrs := make(map[string]string, len(h.attrs)+len(as))
-	for k, v := range h.attrs {
-		attrs[k] = v
+	attrs := maps.Clone(h.attrs)
+	if attrs == nil {
+		attrs = make(map[string]string, len(as))
 	}
 	for _, a := range as {
 		flatten(attrs, h.group, a)
@@ -173,6 +176,9 @@ func flatten(dst map[string]string, prefix string, a slog.Attr) {
 
 func secretKey(key string) bool {
 	key = strings.ToLower(key)
+	if strings.HasSuffix(key, "_key") || strings.HasSuffix(key, "-key") {
+		return true
+	}
 	return slices.ContainsFunc(secretKeys, func(s string) bool { return strings.Contains(key, s) })
 }
 

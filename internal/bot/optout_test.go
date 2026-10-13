@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/williamtcastro/wame/internal/store"
 )
@@ -64,11 +66,13 @@ func TestIncomingOptOut(t *testing.T) {
 		t.Fatalf("the message itself is stored as usual: %v %+v", err, m)
 	}
 
-	err = b.checkOptOut(maria)
+	mariaJID, _ := types.ParseJID(maria)
+	johnJID, _ := types.ParseJID(john)
+	err = b.optedOut(mariaJID, maria)
 	if !isInputError(err) || err.Error() != errOptedOut {
-		t.Fatalf("checkOptOut = %v", err)
+		t.Fatalf("optedOut = %v", err)
 	}
-	if err := b.checkOptOut(john); err != nil {
+	if err := b.optedOut(johnJID, john); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -102,5 +106,51 @@ func TestManualOptOut(t *testing.T) {
 	}
 	if len(log) != 6 || log[0].Action != "optout_remove" || log[0].OK || log[1].Action != "optout_remove" || !log[1].OK || log[5].Detail != "added" {
 		t.Fatalf("audit %v", actions)
+	}
+}
+
+func TestOptOutUnderLIDStillBlocks(t *testing.T) {
+	b := newTestBot(t)
+	b.Client.Store.LIDs = sqlstore.NewWithDB(b.db, "sqlite3", waLog.Noop).LIDMap
+	ctx := context.Background()
+	const mariaLID = "100000000000001@lid"
+	b.handle(incomingText(mariaLID, mariaLID, "L1", "STOP", false))
+	if list, _ := b.OptOuts(); len(list) != 1 || list[0].Chat != mariaLID {
+		t.Fatalf("stored under the @lid while its number is unknown: %+v", list)
+	}
+	lid, _ := types.ParseJID(mariaLID)
+	pn, _ := types.ParseJID(maria)
+	if err := b.Client.Store.LIDs.PutLIDMapping(ctx, lid, pn); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.optedOut(pn, "5511999999999"); !isInputError(err) {
+		t.Fatalf("a queued send to the number must be blocked once the link is known: %v", err)
+	}
+	b.handle(incomingText(maria, maria, "M1", "STOP", false))
+	if log, _ := b.Store.AuditLog(10, 0); len(log) != 1 {
+		t.Fatalf("a second keyword under the other ID must not add a duplicate: %+v", log)
+	}
+	if list, _ := b.OptOuts(); len(list) != 1 || list[0].Chat != maria {
+		t.Fatalf("listing moves it onto the number: %+v", list)
+	}
+	if err := b.RemoveOptOut(ctx, "ops", "5511999999999"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.optedOut(pn, maria); err != nil {
+		t.Fatalf("removed: %v", err)
+	}
+}
+
+func TestOptOutAddedOfflineMatchesTheResolvedJID(t *testing.T) {
+	b := newTestBot(t)
+	if _, _, err := b.AddOptOut(context.Background(), "ops", "5511988887777"); err != nil {
+		t.Fatal(err)
+	}
+	resolved := types.NewJID("551188887777", types.DefaultUserServer)
+	if err := b.optedOut(resolved, "5511988887777"); !isInputError(err) {
+		t.Fatalf("WhatsApp may resolve a number to another JID; the number as typed must still match: %v", err)
+	}
+	if err := b.optedOut(resolved, "+55 11 8888-7777"); err != nil {
+		t.Fatalf("another person: %v", err)
 	}
 }

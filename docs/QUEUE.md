@@ -65,7 +65,9 @@ phone, and `read_at` when the person opened it (only if they share read receipts
 fills `delivered_at` when that receipt never came). They aren't states: the item stays `sent`.
 `counts.delivered` and `counts.read` count them among the sent ones, the admin panel shows
 ✓ sent, ✓✓ delivered and a blue ✓✓ read, and each receipt sends one `queue` event (repeats don't).
-Receipts are matched by the item's message id, so they work after a restart too.
+Receipts are matched by the item's message id, so they work after a restart too. A receipt on an
+item that isn't `sent` (one that failed although an attempt did reach the phone) is recorded but
+sends no event, so a failure is reported once.
 
 ```json
 { "id": 41, "status": "sent", "message_id": "3EB0C4…", "delivered_at": "2026-10-12T21:41:05-03:00", "read_at": "2026-10-12T21:52:40-03:00", … }
@@ -77,8 +79,10 @@ Receipts are matched by the item's message id, so they work after a restart too.
 [setting](API.md#get-settings-patch-settings)) is a daily window like `21:00-08:00`, read on the
 clock of `queue_timezone` (`-queue-timezone`, `WAME_QUEUE_TIMEZONE`; an IANA name like
 `America/Sao_Paulo`, default `Local`: the server's zone, which in Docker is UTC unless `TZ` is
-set). The window may cross midnight; empty turns it off. Inside it the worker sends nothing and
-sleeps until the window ends, then works through what's due, at the usual pace. Changing the
+set; settings and `GET /stats` show which one it is, like `Local (UTC)`). The window may cross
+midnight; empty turns it off. Inside it the worker sends nothing and checks again every minute
+(so a clock change or a suspended host can't oversleep it) until the window ends, then works
+through what's due, at the usual pace. Changing the
 setting wakes it at once. Items whose `send_at` falls inside the window go out when it ends.
 `GET /stats` shows `quiet_until` while it holds, and the admin panel's Queue tab says "quiet hours
 until 08:00". Only the queue keeps quiet: `/send`, the TUI, the CLI and auto-replies don't.
@@ -91,7 +95,15 @@ When someone answers a 1:1 chat with nothing but `STOP`, `SAIR`, `PARAR`, `CANCE
 checked when an item's turn comes, after its number is resolved to the chat WhatsApp uses: items
 to a listed chat fail with `recipient opted out` and don't take a send slot. Queuing to them is
 still accepted (the list can change before the item's turn, and one check at send time keeps
-every path consistent), so watch for that error. Direct sends aren't affected. Admins manage the
+every path consistent), so watch for that error. Such items don't count toward the "queued messages
+failed" alert. Direct sends aren't affected.
+
+WhatsApp may show a person under a hidden ID (`…@lid`) before it says which number that is; an
+opt-out received that way is stored under that ID, matched against both the number and its ID, and
+moved onto the number once WhatsApp links them. A number added to the list by hand while logged out
+is stored as typed and also matched as typed, in case WhatsApp resolves it to a different JID (a
+Brazilian mobile with or without the extra 9). Removing a number removes every form it is stored
+under. If the list can't be read, the item waits and is retried without using an attempt. Admins manage the
 list with [`/optouts`](API.md#get-optouts-post-optouts-delete-optoutschat).
 
 ## API

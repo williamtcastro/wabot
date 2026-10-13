@@ -73,6 +73,9 @@ func TestOutboxReceipts(t *testing.T) {
 	if err != nil || len(changed) != 2 || changed[0].Progress() != OutboxDelivered || !changed[0].Read.IsZero() {
 		t.Fatalf("delivered: %v %+v", err, changed)
 	}
+	if changed[0].Text != "" || changed[0].To != "5511999999999" {
+		t.Fatalf("receipts must not read the text back: %+v", changed[0])
+	}
 	if again, _ := s.MarkOutboxReceipt([]string{"MSG0"}, false, at); len(again) != 0 {
 		t.Fatal("a repeated receipt must not report a change")
 	}
@@ -130,6 +133,31 @@ func TestOutboxReceiptColumnsAddedToOldTables(t *testing.T) {
 	}
 	if got, _ := s.MarkOutboxReceipt([]string{"OLD1"}, true, time.Now()); len(got) != 1 {
 		t.Fatal("receipts must work on an upgraded table")
+	}
+}
+
+func TestAddColumnAlreadyAddedByAnotherProcess(t *testing.T) {
+	db := openDB(t)
+	if _, err := db.Exec(`CREATE TABLE t (a TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := addColumn(context.Background(), db, "t", "b INTEGER NOT NULL DEFAULT 0"); err != nil {
+			t.Fatalf("a column added meanwhile must count as added: %v", err)
+		}
+	}
+	if err := addColumn(context.Background(), db, "missing", "b INTEGER"); err == nil {
+		t.Fatal("other errors must still fail")
+	}
+}
+
+func TestOutboxFilterFor(t *testing.T) {
+	f := OutboxFilter{Actor: "someone", Batch: "promo"}
+	if got := f.For("support-bot", false); got.Actor != "support-bot" || got.Batch != "promo" {
+		t.Fatalf("non-admin: %+v", got)
+	}
+	if got := f.For("ops", true); got.Actor != "someone" {
+		t.Fatalf("admin keeps the asked actor: %+v", got)
 	}
 }
 

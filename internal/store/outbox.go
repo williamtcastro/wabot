@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -19,6 +21,14 @@ const (
 
 // OutboxStates lists every state, in display order.
 var OutboxStates = []string{OutboxQueued, OutboxSending, OutboxSent, OutboxFailed, OutboxCanceled}
+
+// ValidOutboxStatus accepts "" (any) or one of OutboxStates.
+func ValidOutboxStatus(s string) error {
+	if s == "" || slices.Contains(OutboxStates, s) {
+		return nil
+	}
+	return fmt.Errorf("status must be one of %s", strings.Join(OutboxStates, ", "))
+}
 
 // OutboxItem is one queued text message. MessageID is chosen before the first attempt and reused on
 // retries, so a message that did reach WhatsApp before a crash isn't shown twice.
@@ -68,6 +78,14 @@ type OutboxFilter struct {
 	Batch  string
 	Status string
 	Before int64
+}
+
+// For limits f to actor's own items unless the caller is an admin.
+func (f OutboxFilter) For(actor string, admin bool) OutboxFilter {
+	if !admin {
+		f.Actor = actor
+	}
+	return f
 }
 
 // OutboxCounts is how many items are in each state, plus the oldest still waiting.
@@ -158,26 +176,28 @@ var outboxReceiptColumns = []string{"delivered_at INTEGER NOT NULL DEFAULT 0", "
 
 // addColumns adds each "name type…" definition that table doesn't have yet.
 func addColumns(ctx context.Context, db *sql.DB, table string, defs []string) error {
-	have := map[string]bool{}
-	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			rows.Close()
-			return err
+	have, err := func() (map[string]bool, error) {
+		rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+		if err != nil {
+			return nil, err
 		}
-		have[name] = true
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+		defer rows.Close()
+		have := map[string]bool{}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return nil, err
+			}
+			have[name] = true
+		}
+		return have, rows.Err()
+	}()
+	if err != nil {
 		return err
 	}
 	for _, def := range defs {
 		if name, _, _ := strings.Cut(def, " "); !have[name] {
-			if _, err := db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+def); err != nil {
+			if err := addColumn(ctx, db, table, def); err != nil {
 				return err
 			}
 		}
@@ -185,7 +205,20 @@ func addColumns(ctx context.Context, db *sql.DB, table string, defs []string) er
 	return nil
 }
 
+// addColumn treats a column that is already there as added: another process opening the same old
+// database may have added it since the table was read.
+func addColumn(ctx context.Context, db *sql.DB, table, def string) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+def)
+	if err != nil && strings.Contains(err.Error(), "duplicate column name") {
+		return nil
+	}
+	return err
+}
+
 const outboxColumns = `id, batch, actor, token_id, key, recipient, text, reply_to, status, attempts, due, created_at, updated_at, chat, message_id, error, delivered_at, read_at`
+
+// outboxColumnsNoText reads an item without its text, where it isn't needed.
+var outboxColumnsNoText = strings.Replace(outboxColumns, " text,", " '',", 1)
 
 func unixMilliOrZero(ms int64) time.Time {
 	if ms == 0 {
@@ -364,8 +397,10 @@ func (s *Store) CancelOutbox(id int64, f OutboxFilter) ([]OutboxItem, error) {
 }
 
 // MarkOutboxReceipt records a delivery receipt (or, with read, a read receipt) on the items sent
-// with these message ids and returns only the items it changed, so each change is reported once.
-// A read also sets delivered_at when it's missing: WhatsApp doesn't always send both.
+// with these message ids and returns only the items it changed (without their text), so each change
+// is reported once. A read also sets delivered_at when it's missing: WhatsApp doesn't always send
+// both. Any status is recorded: a receipt can beat the sent result, or show that an attempt counted
+// as failed did reach the phone; callers decide what to report.
 func (s *Store) MarkOutboxReceipt(messageIDs []string, read bool, at time.Time) ([]OutboxItem, error) {
 	if len(messageIDs) == 0 {
 		return nil, nil
@@ -381,7 +416,7 @@ func (s *Store) MarkOutboxReceipt(messageIDs []string, read bool, at time.Time) 
 	}
 	// message_id != '' lets SQLite use the partial index, and keeps unsent items out.
 	return s.queryOutbox(`UPDATE wame_outbox SET `+set+` WHERE message_id != '' AND message_id IN (`+placeholders(len(messageIDs))+`) AND `+
-		unchanged+` RETURNING `+outboxColumns, args...)
+		unchanged+` RETURNING `+outboxColumnsNoText, args...)
 }
 
 // RequeueSending puts items left in sending by a crash or shutdown back in the queue. They keep their

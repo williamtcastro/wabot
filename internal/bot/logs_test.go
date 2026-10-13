@@ -81,6 +81,26 @@ func TestLogBufferDropsSecrets(t *testing.T) {
 	}
 }
 
+func TestLogBufferShortSecretsAndPlainKeys(t *testing.T) {
+	buf := NewLogBuffer(10)
+	buf.Scrub("abc", "1234567", "s3cr3t-long")
+	log := slog.New(buf.Wrap(slog.NewTextHandler(io.Discard, nil)))
+	log.Warn("ignoring stored setting abc", "key", "queue_timezone", "detail", "1234567 s3cr3t-long",
+		"api_key", "k1", "X-Gotify-Key", "k2", "private_key", "k3", "monkey", "fine")
+	e := buf.Entries(LogQuery{})[0]
+	if e.Msg != "ignoring stored setting abc" || e.Attrs["detail"] != "1234567 "+redacted {
+		t.Fatalf("secrets under %d characters must be left alone: %+v", minScrubLen, e)
+	}
+	if e.Attrs["key"] != "queue_timezone" || e.Attrs["monkey"] != "fine" {
+		t.Fatalf("a bare key attribute isn't a secret: %v", e.Attrs)
+	}
+	for _, k := range []string{"api_key", "X-Gotify-Key", "private_key"} {
+		if e.Attrs[k] != redacted {
+			t.Errorf("%s = %q", k, e.Attrs[k])
+		}
+	}
+}
+
 func TestLogBufferConcurrent(t *testing.T) {
 	buf := NewLogBuffer(50)
 	log := slog.New(buf.Wrap(slog.NewTextHandler(io.Discard, nil))).With("component", "test")

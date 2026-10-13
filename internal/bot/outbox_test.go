@@ -210,8 +210,10 @@ func TestQuietHoursWindow(t *testing.T) {
 			t.Errorf("ParseQuietHours(%q) accepted", bad)
 		}
 	}
-	if loc, err := ParseTimezone(""); err != nil || loc != time.Local {
-		t.Fatal("empty is the server's zone")
+	for _, local := range []string{"", "Local", "Local (UTC)"} {
+		if loc, err := ParseTimezone(local); err != nil || loc != time.Local {
+			t.Fatalf("%q is the server's zone", local)
+		}
 	}
 	if _, err := ParseTimezone("Mars/Olympus"); err == nil {
 		t.Fatal("unknown zone accepted")
@@ -238,14 +240,24 @@ func TestQuietHoursHoldTheQueue(t *testing.T) {
 	if s.QuietHours != window || s.Timezone != "America/Sao_Paulo" || time.Until(s.QuietUntil) < 50*time.Minute {
 		t.Fatalf("%+v", s)
 	}
-	if d := b.outboxStep(context.Background()); d < 50*time.Minute || d > 61*time.Minute {
-		t.Fatalf("a quiet step must sleep until the window ends, waited %v", d)
+	if d := b.outboxStep(context.Background()); d != outboxIdle {
+		t.Fatalf("a quiet step must check again within %v (clock changes, suspend), waited %v", outboxIdle, d)
 	}
+	abbr, _ := time.Now().Zone()
 	view, _ := b.SettingsView()
 	for _, v := range view {
-		if v.Key == "queue_timezone" && (v.Value != "America/Sao_Paulo" || v.Default != "Local") {
+		if v.Key == "queue_timezone" && (v.Value != "America/Sao_Paulo" || v.Default != "Local ("+abbr+")") {
 			t.Fatalf("%+v", v)
 		}
+	}
+	if err := b.UpdateSettings("ops", map[string]*string{"queue_timezone": nil}); err != nil {
+		t.Fatalf("resetting to the shown default must parse: %v", err)
+	}
+	if s := b.QueueStats(); s.Timezone != "Local ("+abbr+")" {
+		t.Fatalf("the effective zone must show: %q", s.Timezone)
+	}
+	if err := b.UpdateSettings("ops", map[string]*string{"queue_timezone": new("America/Sao_Paulo")}); err != nil {
+		t.Fatal(err)
 	}
 	if err := b.UpdateSettings("ops", map[string]*string{"queue_quiet_hours": new("")}); err != nil {
 		t.Fatal(err)
@@ -300,5 +312,66 @@ func TestOutboxReceiptEvents(t *testing.T) {
 	}
 	if s := b.QueueStats(); s.Sent != 1 || s.Delivered != 1 || s.Read != 1 {
 		t.Fatalf("%+v", s.OutboxCounts)
+	}
+}
+
+func TestReceiptsOnlyReportSentItems(t *testing.T) {
+	b := newTestBot(t)
+	items, _ := b.Enqueue("ops", "", "promo", "", []QueueRequest{{To: "5511999999999", Text: "Hi Maria"}})
+	if _, err := b.Store.ClaimOutbox(items[0].ID, "MSG1"); err != nil {
+		t.Fatal(err)
+	}
+	b.finishQueued(items[0], store.OutboxResult{Status: store.OutboxFailed, Error: "gave up"})
+	ch, unsub := b.Subscribe()
+	defer unsub()
+	b.outboxReceipt([]types.MessageID{"MSG1"}, false, time.Now())
+	select {
+	case v := <-ch:
+		t.Fatalf("a receipt on a failed item must not fire another failed event: %#v", v)
+	default:
+	}
+	if it, _ := b.Store.OutboxItem(items[0].ID); it.Delivered.IsZero() {
+		t.Fatal("the delivery time is still recorded")
+	}
+}
+
+func TestOptOutCheckErrorIsRetried(t *testing.T) {
+	b := newTestBot(t)
+	items, _ := b.Enqueue("ops", "", "", "", []QueueRequest{{To: "5511999999999", Text: "hi"}})
+	if _, err := b.db.Exec(`DROP TABLE wame_optouts`); err != nil {
+		t.Fatal(err)
+	}
+	jid, _ := ParseRecipient(items[0].To)
+	err := b.optedOut(jid, items[0].To)
+	if !errors.Is(err, errOptOutCheck) || isInputError(err) {
+		t.Fatalf("a failed lookup must be told apart from an opt-out: %v", err)
+	}
+	it, _ := b.Store.ClaimOutbox(items[0].ID, "MSG1")
+	r := b.attemptResult(it, err)
+	if r.Status != store.OutboxQueued || !r.Refund || time.Until(r.Due) < outboxOffline/2 {
+		t.Fatalf("a database error is retried without using an attempt: %+v", r)
+	}
+	if b.outbox.fails != 0 || b.outbox.lastErr != "" {
+		t.Fatal("a database error isn't a WhatsApp error")
+	}
+}
+
+func TestCancelNotQueued(t *testing.T) {
+	b := newTestBot(t)
+	items, _ := b.Enqueue("ops", "", "promo", "", []QueueRequest{{To: "5511999999999", Text: "Hi Maria"}})
+	if _, err := b.Store.ClaimOutbox(items[0].ID, "MSG1"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.CancelQueued("ops", items[0].ID, store.OutboxFilter{}.For("ops", false))
+	nq, ok := errors.AsType[NotQueuedError](err)
+	if !ok || nq.Status != store.OutboxSending || nq.ID != items[0].ID || !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("cancel while sending = %v", err)
+	}
+	_, err = b.CancelQueued("john-bot", items[0].ID, store.OutboxFilter{}.For("john-bot", false))
+	if _, ok := errors.AsType[NotQueuedError](err); ok || !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("someone else's item must look missing: %v", err)
+	}
+	if _, err := b.CancelQueued("ops", 999, store.OutboxFilter{}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing = %v", err)
 	}
 }

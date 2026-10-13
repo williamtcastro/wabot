@@ -37,6 +37,12 @@ func (b *Bot) SendText(ctx context.Context, actor, to, text string, opt SendOpti
 		if err != nil {
 			return store.Message{}, err
 		}
+		// The outbox checked before taking a slot; this covers an opt-out that arrived since.
+		if opt.queued > 0 {
+			if err := b.optedOut(jid, to); err != nil {
+				return store.Message{}, err
+			}
+		}
 		msg := &waE2E.Message{Conversation: new(text)}
 		if quote != nil {
 			msg = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: new(text), ContextInfo: quote}}
@@ -135,8 +141,6 @@ func (b *Bot) deliver(ctx context.Context, jid types.JID, msg *waE2E.Message, re
 		if err := b.throttle(ctx, jid); err != nil {
 			return store.Message{}, err
 		}
-	} else if err := b.checkOptOut(b.PhoneJID(jid).String()); err != nil {
-		return store.Message{}, err
 	}
 	if b.Typing && rec.Type == "text" {
 		b.simulateTyping(ctx, jid, rec.Text)

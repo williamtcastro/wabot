@@ -62,7 +62,7 @@ func (s Settings) get(key string) string {
 	case "queue_quiet_hours":
 		return s.QuietHours.String()
 	case "queue_timezone":
-		return s.location().String()
+		return zoneName(s.location())
 	}
 	return ""
 }

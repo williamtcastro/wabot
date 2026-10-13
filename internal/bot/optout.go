@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -36,7 +37,14 @@ func (b *Bot) noteOptOut(m store.Message) {
 		return
 	}
 	kw := optOutKeyword(m.Text)
-	if jid, err := types.ParseJID(m.Chat); kw == "" || err != nil || !isPersonChat(jid) {
+	jid, err := types.ParseJID(m.Chat)
+	if kw == "" || err != nil || !isPersonChat(jid) {
+		return
+	}
+	if out, err := b.Store.OptedOut(b.optOutKeys(jid)...); err != nil || out {
+		if err != nil {
+			b.Log.Error("opt-out: store", "err", err)
+		}
 		return
 	}
 	added, err := b.Store.AddOptOut(store.OptOut{Chat: m.Chat, Reason: kw, At: time.Now(), By: "whatsapp"})
@@ -49,19 +57,46 @@ func (b *Bot) noteOptOut(m store.Message) {
 	}
 }
 
-// checkOptOut returns an InputError when chat (a canonical chat key) opted out of queued messages.
-func (b *Bot) checkOptOut(chat string) error {
-	out, err := b.Store.OptedOut(chat)
-	if err == nil && out {
-		err = BadInput(errOptedOut)
+// errOptOutCheck marks a failed opt-out lookup: the send is retried, not counted as a WhatsApp error.
+var errOptOutCheck = errors.New("opt-out check")
+
+// optOutKeys lists every key a person's opt-out may be stored under: the phone JID and, when
+// WhatsApp told us, its hidden @lid (an opt-out arriving before the link is known stays under it).
+func (b *Bot) optOutKeys(jid types.JID) []string {
+	pn := b.PhoneJID(jid)
+	keys := []string{pn.String()}
+	if pn.Server == types.DefaultUserServer && b.Client.Store.LIDs != nil {
+		if lid, err := b.Client.Store.LIDs.GetLIDForPN(context.Background(), pn); err == nil && !lid.IsEmpty() {
+			keys = append(keys, lid.String())
+		}
 	}
-	return err
+	return keys
+}
+
+// optedOut returns an InputError when the recipient jid, resolved from to, opted out of queued
+// messages. to's own form counts too: an opt-out added by number while logged out was stored as
+// typed, which may differ from the JID WhatsApp resolves it to.
+func (b *Bot) optedOut(jid types.JID, to string) error {
+	keys := b.optOutKeys(jid)
+	if !strings.Contains(to, "@") {
+		if local, err := ParseRecipient(to); err == nil && local != jid {
+			keys = append(keys, b.optOutKeys(local)...)
+		}
+	}
+	out, err := b.Store.OptedOut(keys...)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: %w", errOptOutCheck, err)
+	case out:
+		return BadInput(errOptedOut)
+	}
+	return nil
 }
 
 func (b *Bot) OptOuts() ([]store.OptOut, error) { return b.Store.OptOuts() }
 
 // optOutChat turns a number or JID into the chat key the outbox compares against, asking WhatsApp
-// for a number's real JID when logged in (as a send would).
+// for a number's real JID when logged in (as a send would) and falling back to the number as typed.
 func (b *Bot) optOutChat(ctx context.Context, to string) (string, error) {
 	jid, err := ParseRecipient(to)
 	if err != nil {
@@ -71,9 +106,12 @@ func (b *Bot) optOutChat(ctx context.Context, to string) (string, error) {
 		return "", BadInput("only a person's chat can opt out, not %s", jid.Server)
 	}
 	if b.Client.IsLoggedIn() && !strings.Contains(to, "@") {
-		return b.CanonicalChat(ctx, to)
+		chat, err := b.CanonicalChat(ctx, to)
+		if _, isInput := errors.AsType[InputError](err); err == nil || isInput {
+			return chat, err
+		}
 	}
-	return b.PhoneJID(jid).String(), nil
+	return b.LocalChat(to)
 }
 
 // AddOptOut lists a chat by hand. added is false when it was already listed.
@@ -93,19 +131,20 @@ func (b *Bot) AddOptOut(ctx context.Context, actor, to string) (o store.OptOut, 
 	return o, added, err
 }
 
-// RemoveOptOut takes a chat off the list, by the key it was stored under or, for a number, the JID
-// WhatsApp resolves it to.
+// RemoveOptOut takes a chat off the list under every key it may be stored under: as typed, its
+// @lid, and for a number the JID WhatsApp resolves it to.
 func (b *Bot) RemoveOptOut(ctx context.Context, actor, to string) (err error) {
 	chat, err := b.LocalChat(to)
 	defer func() { b.Audit(actor, "optout_remove", cmp.Or(chat, to), "", err) }()
 	if err != nil {
 		return err
 	}
-	err = b.Store.RemoveOptOut(chat)
-	if errors.Is(err, store.ErrNotFound) && b.Client.IsLoggedIn() && !strings.Contains(to, "@") {
-		if canon, cerr := b.CanonicalChat(ctx, to); cerr == nil && canon != chat {
-			chat, err = canon, b.Store.RemoveOptOut(canon)
+	jid, _ := types.ParseJID(chat)
+	keys := b.optOutKeys(jid)
+	if b.Client.IsLoggedIn() && !strings.Contains(to, "@") {
+		if canon, cerr := b.Resolve(ctx, to); cerr == nil && canon != jid {
+			keys = append(keys, b.optOutKeys(canon)...)
 		}
 	}
-	return err
+	return b.Store.RemoveOptOut(keys...)
 }
