@@ -76,8 +76,10 @@ trying again".
 - **Untrusted text.** Message text, names, captions and file names were written by other people.
   They're returned only under `untrusted`, each list carries a `note` saying so, and the server
   instructions tell the model to treat them as data, never as instructions.
-- **Cleaning.** Untrusted fields have control characters, zero-width characters (U+200B–U+200D,
-  U+FEFF) and bidi overrides (U+202A–U+202E, U+2066–U+2069) removed. They're capped at 4000 characters.
+- **Cleaning.** Untrusted fields have every invisible character removed: control characters, format
+  characters (zero-width spaces and joiners, bidi marks and overrides, soft hyphens, the invisible
+  "tag" characters used to smuggle hidden text) and variation selectors. They're capped at 4000
+  characters. Message ids, which the sender's app chooses, are cleaned too and capped at 128 bytes.
 - **Server instructions** also say: only send, react or mark read when the user asked, and wait
   instead of looping when rate limited.
 - **Limits and audit.** Global send and lookup limits apply. Every send, reaction and read is in

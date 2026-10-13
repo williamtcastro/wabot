@@ -116,7 +116,7 @@ docker compose up -d
 ```
 
 [`.env.example`](../.env.example) lists the keys: `WAME_TOKEN` (required), and the optional
-webhook, rate and log settings, which Compose passes to the container. `WAME_SERVER` is the URL
+webhook, rate, queue jitter and log settings, which Compose passes to the container. `WAME_SERVER` is the URL
 `wame admin` connects to; the server ignores it. Run `wame admin` from the folder with the `.env`
 and it reads `WAME_SERVER` and `WAME_TOKEN` from it; or save them in `~/.config/wame/admin.env` to
 use from anywhere ([details](ADMIN.md#saving-the-server-and-token)).
@@ -150,6 +150,11 @@ container, from the [admin panel](ADMIN.md#changing-settings)'s Settings tab or
 `PATCH /settings`. Those changes are stored in `/data` and **win over the container's environment
 variables** on every restart until they're reset there, so check the Settings tab if a changed
 `WAME_RATE` seems to be ignored.
+
+`docker stop` shuts wame down cleanly: it stops taking requests, ends open event streams, gives
+in-flight requests up to 5 seconds and queued webhook deliveries one last attempt, then closes the
+database. Messages in the [send queue](QUEUE.md) stay in `/data` and continue after the restart.
+Docker's default 10-second stop timeout is enough.
 
 ## Moving an existing database in
 

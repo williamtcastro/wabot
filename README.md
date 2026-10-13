@@ -25,7 +25,7 @@ It's one Go binary and one SQLite file, with no cgo and no external services. Bu
 | 🔌 **Script it over HTTP** | Send texts and files, reply, react, edit, delete and mark as read. Query history with filters and full-text search, long-poll or stream new messages, receive signed webhooks. Interactive docs at `/docs` |
 | 🤖 **Hand it to an AI agent** | A built-in MCP server (HTTP at `/mcp` or `wame mcp` on stdio) for Claude Code, Claude Desktop and other MCP clients. Message text comes back marked as untrusted |
 | 🔐 **Stay in control** | One token per agent or bot, with `read` / `send` / `admin` scopes, a chat allowlist, its own send rate, expiry and instant revocation. Every action is audited |
-| 🛰️ **Run it on a server** | A Docker image, and `wame admin`: a live terminal panel for a remote server with QR login, chats, token rotation and usage, the audit log, limiter and webhook health, and settings you can change without a restart |
+| 🛰️ **Run it on a server** | A Docker image, and `wame admin`: a live terminal panel for a remote server with QR login, chats, token rotation and usage, the audit log, limiter and webhook health, the send queue, and settings you can change without a restart |
 | 📬 **Queue bulk sends** | `POST /queue` takes up to 1000 messages at once and a worker sends them at a safe pace, with random gaps, scheduled times, retries and back-off. The queue survives restarts and can be paused or canceled by batch |
 | 🐢 **Avoid bans** | Sends are spaced out by default: 20 per minute and 1 s between messages to the same chat. Number lookups and auto-replies have their own caps |
 
@@ -158,7 +158,7 @@ wame admin -server https://wame.example.com
 
 A terminal panel, updated live: connection status, a QR to link the server's WhatsApp from afar
 (or a pairing code), chats with search and sending, tokens (create, rotate, revoke), the audit log,
-and limiter and webhook health, across several saved servers. It uses only the HTTP API and
+limiter and webhook health, runtime settings and the send queue, across several saved servers. It uses only the HTTP API and
 refuses plain `http://` beyond localhost, so use HTTPS or an SSH tunnel. See [docs/ADMIN.md](docs/ADMIN.md).
 
 ## Bots and webhooks

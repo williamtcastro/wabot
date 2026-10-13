@@ -144,6 +144,12 @@ endpoint answered. Ignore event types you don't handle, as the examples above do
 failed while your bot was down, `GET /stats` lists the last 20 failures and `POST /webhook/replay`
 sends one again with the same `X-Wame-Delivery`, so de-duplicating by that header stays correct.
 
+**Sending many messages.** If your bot answers one message at a time, `POST /send` is fine. For a
+broadcast or anything in bulk, use the [send queue](QUEUE.md) instead of a loop over `/send`: it
+returns at once, paces the sends, retries and backs off on its own, and keeps going after a
+restart. With `-webhook`, each queued message that goes out or fails arrives as
+`X-Wame-Event: queue` (the item without its text), which your receiver can use to track progress.
+
 ## Option 2: polling (no open port)
 
 If you can't expose a port, pull messages instead. `GET /messages/wait` is a long-poll with a
