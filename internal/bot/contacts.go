@@ -1,11 +1,9 @@
 package bot
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -13,49 +11,6 @@ import (
 
 	"github.com/williamtcastro/wame/internal/store"
 )
-
-type Contact struct {
-	JID      string `json:"jid"`
-	Phone    string `json:"phone"`
-	Name     string `json:"name"`
-	PushName string `json:"push_name,omitempty"`
-}
-
-// Contacts lists address-book contacts synced from the phone, filtered by name or number.
-func (b *Bot) Contacts(ctx context.Context, query string) ([]Contact, error) {
-	if b.Client.Store.Contacts == nil {
-		return []Contact{}, nil
-	}
-	all, err := b.Client.Store.Contacts.GetAllContacts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	q := strings.ToLower(strings.TrimSpace(query))
-	out := []Contact{}
-	for jid, c := range all {
-		if jid.Server != types.DefaultUserServer {
-			continue
-		}
-		name := contactName(c)
-		if name == "" {
-			continue
-		}
-		if q != "" {
-			byName := strings.Contains(strings.ToLower(name+" "+c.PushName), q)
-			byPhone := digits(q) != "" && strings.Contains(jid.User, digits(q))
-			if !byName && !byPhone {
-				continue
-			}
-		}
-		out = append(out, Contact{JID: jid.String(), Phone: "+" + jid.User, Name: name, PushName: c.PushName})
-	}
-	slices.SortFunc(out, func(x, y Contact) int { return cmp.Compare(strings.ToLower(x.Name), strings.ToLower(y.Name)) })
-	return out, nil
-}
-
-func contactName(c types.ContactInfo) string {
-	return cmp.Or(c.FullName, c.FirstName, c.BusinessName, c.PushName)
-}
 
 // CheckResult is one number from Check.
 type CheckResult struct {
@@ -165,37 +120,6 @@ func (b *Bot) Chats(ctx context.Context, limit int) ([]store.Chat, error) {
 	return b.Store.Chats(ctx, limit, func(chat, pushName string) string { return b.ChatName(ctx, chat, pushName) })
 }
 
-// ChatName is the best display name for a chat: group subject, "Me", address-book name, ~push name, +number.
-func (b *Bot) ChatName(ctx context.Context, chat, pushName string) string {
-	jid, err := types.ParseJID(chat)
-	if err != nil {
-		return chat
-	}
-	if jid.Server == types.GroupServer {
-		if name := b.group(ctx, chat).name; name != "" {
-			return name
-		}
-		return "group " + jid.User
-	}
-	if own := b.Client.Store.ID; own != nil && own.User == jid.User {
-		return "Me"
-	}
-	if b.Client.Store.Contacts != nil {
-		if c, err := b.Client.Store.Contacts.GetContact(ctx, jid); err == nil {
-			if name := contactName(c); name != "" {
-				return name
-			}
-		}
-	}
-	if pushName != "" {
-		return "~" + pushName
-	}
-	if jid.Server == types.DefaultUserServer {
-		return "+" + jid.User
-	}
-	return chat
-}
-
 type groupInfo struct {
 	name   string
 	admins map[string]bool
@@ -281,7 +205,9 @@ func (b *Bot) refreshGroups(ctx context.Context) {
 	b.publish(NamesChanged{})
 }
 
-// NamesChanged is published when group names were refreshed, so views can re-read chat names.
+// NamesChanged is published when names may have changed (group names refreshed, your own contacts
+// edited, the phone's address book or a push or business name changed), so views can re-read chat
+// names. It carries nothing.
 type NamesChanged struct{}
 
 func (b *Bot) loadCachedGroups() {

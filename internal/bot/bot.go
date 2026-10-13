@@ -67,6 +67,11 @@ type Bot struct {
 	typingIn     map[string]*time.Timer
 	groupsAt     time.Time
 	allowlists   map[string]expandedAllowlist
+	own          map[string]ownContact
+	ownLIDs      int
+	namesAt      time.Time
+	namesPending bool
+	contactsMu   sync.Mutex
 	tokenMu      sync.Mutex
 	tokenRate    map[string]*Limiter
 

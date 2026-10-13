@@ -552,6 +552,26 @@ values; admin tab sanitizes a name with ANSI and bidi characters; 404 probe mess
 Risks: the `~push` display change surprises users; `Bot.own` drifting from the table (only `Bot`
 writes, tests cover each path); the restricted `/contacts` change (security review).
 
+**As built (store + bot core), where it differs from the above:**
+
+- Only `wame_contacts` exists; `wame_contact_cache`, its relink statements and the cached
+  `verified_name` step of `NamesOf` come with Phase 2 (the business step is `BusinessName` for now).
+- Store: `OwnContact` is the row type. Writes take a `ContactEdit` (keys, values, named fields,
+  `AddTags`/`RemoveTags`, actor) in one transaction that takes the write lock before reading, so tag
+  edits can't overwrite each other: `SetContact(e) (ContactChange, error)` and
+  `ImportContacts(edits, dryRun) (ImportResult, []ContactChange, error)`. Also `Contact(keys...)`,
+  `DeleteAllContacts()`, `NormalizeTags`, and `EditError` (which edit of an import broke a limit:
+  `ErrTooManyTags`, `ErrContactLimit`).
+- Bot: one body type `ContactInput` for `PUT` and `PATCH` (its `UnmarshalJSON` tells null from
+  absent and refuses unknown fields), `ContactView` (list entry + own fields) from `ContactOf` and
+  the writes, `DeleteAllContacts` audited as `contact_delete_all` (`N contacts`). `contact_set`
+  says `no change` when nothing changed; `contact_import` adds ` (dry run)`.
+- The own-name map keeps only name and time zone (never notes). After a write while some row is
+  under an `@lid`, it's dropped and loaded again, since the store may have relinked that row.
+- `known=1` keeps anyone with an own row, even without a name.
+- `readCSVTable(r, csvTable{columns, aliases, required, limit, noun})`; a contacts CSV also splits
+  tags on commas. The 4 MB cap is the caller's (`bot.MaxContactImportBytes`), like the queue.
+
 ### Phase 2: WhatsApp profile cache and the profile card (≈ 1,100 lines)
 
 | Agent | Files | Work |

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,9 @@ func TestOldTablesAreRenamed(t *testing.T) {
 	if err := s.SaveGroups([]Group{{JID: group, Name: "Release crew"}}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.SetContact(ContactEdit{Keys: []string{maria}, Set: OwnContact{Name: "Maria", Tags: []string{"clients"}}, Fields: []string{FieldName, FieldTags}, Actor: "ops"}); err != nil {
+		t.Fatal(err)
+	}
 	legacify(t, db)
 	if countPrefix(t, db, "wame_") != 0 || countPrefix(t, db, "wabot_") == 0 {
 		t.Fatal("legacify didn't produce an old layout")
@@ -137,6 +141,9 @@ func TestOldTablesAreRenamed(t *testing.T) {
 	}
 	if g := must[[]Group](t)(s.Groups()); len(g) != 1 {
 		t.Fatalf("groups = %+v", g)
+	}
+	if c, err := s.Contact(maria); err != nil || c.Name != "Maria" || !slices.Equal(c.Tags, []string{"clients"}) {
+		t.Fatalf("contact = %+v, %v", c, err)
 	}
 	if _, _, err := s.Save(Message{ID: "M4", Chat: john, Sender: john, Type: "text", Text: "fatura nova", Timestamp: base.Add(time.Hour)}); err != nil {
 		t.Fatal(err)

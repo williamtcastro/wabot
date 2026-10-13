@@ -22,9 +22,9 @@ func formatContacts(cs []bot.Contact, limit int) string {
 			fmt.Fprintf(&sb, "… and %d more\n", len(cs)-limit)
 			break
 		}
-		name := safeLine(c.Name)
-		if c.PushName != "" && c.PushName != c.Name {
-			name += styleDim.Render("  ~" + safeLine(c.PushName))
+		name := safeLine(c.Display)
+		if c.Push != "" && c.Source != bot.SourcePush && c.Push != c.Display {
+			name += styleDim.Render("  ~" + safeLine(c.Push))
 		}
 		fmt.Fprintf(&sb, "%s  %s\n", styleDim.Render(fmt.Sprintf("%-16s", c.Phone)), name)
 	}

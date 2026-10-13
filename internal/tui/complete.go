@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/store"
 )
 
@@ -45,10 +46,10 @@ func (m *model) suggest() tea.Cmd {
 		if m.contactNames == nil && !m.loadingNames {
 			m.loadingNames = true
 			load = func() tea.Msg {
-				contacts, _ := m.bot.Contacts(context.Background(), "")
+				contacts, _ := m.bot.Contacts(context.Background(), bot.ContactQuery{})
 				names := make([]string, 0, len(contacts))
 				for _, c := range contacts {
-					names = append(names, safeLine(c.Name))
+					names = append(names, safeLine(c.Display))
 				}
 				return contactNamesMsg(names)
 			}

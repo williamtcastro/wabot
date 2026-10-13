@@ -313,7 +313,7 @@ func (s *server) findContact(ctx context.Context, req *mcp.CallToolRequest, in f
 	if strings.TrimSpace(in.Query) == "" {
 		return nil, contactsOut{}, errors.New("query is required")
 	}
-	contacts, err := s.b.Contacts(ctx, in.Query)
+	contacts, err := s.b.Contacts(ctx, bot.ContactQuery{Q: in.Query})
 	if err != nil {
 		return nil, contactsOut{}, err
 	}
@@ -323,7 +323,7 @@ func (s *server) findContact(ctx context.Context, req *mcp.CallToolRequest, in f
 			break
 		}
 		o := contactOut{Chat: c.JID, Phone: c.Phone}
-		o.Untrusted.Name, o.Untrusted.PushName = clean(c.Name), clean(c.PushName)
+		o.Untrusted.Name, o.Untrusted.PushName = clean(c.Display), clean(c.Push)
 		out.Contacts = append(out.Contacts, o)
 	}
 	return nil, out, nil

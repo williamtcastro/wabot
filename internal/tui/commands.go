@@ -108,7 +108,7 @@ func (m *model) command(line string) tea.Cmd {
 		return m.openByName(rest)
 	case "/contacts":
 		return func() tea.Msg {
-			contacts, err := m.bot.Contacts(context.Background(), rest)
+			contacts, err := m.bot.Contacts(context.Background(), bot.ContactQuery{Q: rest})
 			if err != nil {
 				return noticeMsg{err.Error(), true}
 			}
@@ -192,7 +192,7 @@ func (m *model) openByName(q string) tea.Cmd {
 			}
 			return m.load(seq, m.bot.PhoneJID(jid).String(), 0)()
 		}
-		contacts, err := m.bot.Contacts(ctx, q)
+		contacts, err := m.bot.Contacts(ctx, bot.ContactQuery{Q: q})
 		switch {
 		case err != nil:
 			return noticeMsg{err.Error(), true}

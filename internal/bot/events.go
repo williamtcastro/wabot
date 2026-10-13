@@ -31,6 +31,8 @@ func (b *Bot) handle(evt any) {
 		}
 	case *events.PushNameSetting, *events.AppStateSyncComplete:
 		b.announcePresence()
+	case *events.Contact, *events.PushName, *events.BusinessName:
+		b.namesChanged()
 	case *events.Disconnected:
 		b.setState("disconnected", "")
 	case *events.LoggedOut:

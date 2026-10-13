@@ -590,7 +590,7 @@ func (a *server) chats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *server) contacts(w http.ResponseWriter, r *http.Request) {
-	contacts, err := a.b.Contacts(r.Context(), r.URL.Query().Get("q"))
+	contacts, err := a.b.Contacts(r.Context(), bot.ContactQuery{Q: r.URL.Query().Get("q")})
 	respond(w, contacts, err)
 }
 
