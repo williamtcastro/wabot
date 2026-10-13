@@ -57,7 +57,7 @@ func withRequestLog(log *slog.Logger, next http.Handler) http.Handler {
 			level = slog.LevelError
 		case rec.status >= 400:
 			level = slog.LevelWarn
-		case r.URL.Path == "/status" || r.URL.Path == "/messages/wait" || r.URL.Path == "/events":
+		case r.URL.Path == "/status" || r.URL.Path == "/messages/wait" || r.URL.Path == "/events" || r.URL.Path == "/logs":
 			level = slog.LevelDebug
 		}
 		log.Log(r.Context(), level, "http", "method", r.Method, "path", r.URL.Path, "status", rec.status,

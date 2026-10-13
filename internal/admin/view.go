@@ -103,6 +103,8 @@ func (m *model) View() string {
 		body = m.viewHealth()
 	case m.tab == tabQueue:
 		body = m.viewQueue()
+	case m.tab == tabLogs:
+		body = m.viewLogs()
 	default:
 		body = m.viewSettings()
 	}
@@ -194,7 +196,8 @@ func (m *model) viewHeader() string {
 			parts = append(parts, styleTab.Render(label.String()))
 		}
 	}
-	left := strings.Join(parts, " ")
+	// Tabs are padded already; no gap between them leaves room for the state on 120 columns.
+	left := parts[0] + " " + strings.Join(parts[1:], "")
 	dot, state := m.connection()
 	live := ""
 	if m.c != nil {
@@ -291,6 +294,12 @@ func (m *model) viewKeys() string {
 				pause = "resume"
 			}
 			keys = [][2]string{{"j/k", "move"}, {"f", "filter"}, {"x", "cancel"}, {"X", "cancel batch"}, {"P", pause}}
+		case tabLogs:
+			follow := "pause"
+			if !m.logsFollow {
+				follow = "follow"
+			}
+			keys = [][2]string{{"j/k", "move"}, {"f", "level"}, {"/", "filter"}, {"F", follow}}
 		}
 		keys = append(keys, [2]string{fmt.Sprintf("1-%d", len(tabNames)), "tabs"})
 		if len(m.opts.Profiles) > 0 {

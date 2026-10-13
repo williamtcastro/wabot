@@ -46,6 +46,8 @@ type Bot struct {
 	Lookups *Limiter
 	Webhook *Webhook
 	Started time.Time
+	// Logs keeps recent app logs for GET /logs; nil when nothing set one up.
+	Logs *LogBuffer
 
 	autoLimit *Limiter
 	replies   atomic.Bool

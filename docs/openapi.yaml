@@ -723,6 +723,35 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /logs:
+    get:
+      tags: [Admin]
+      summary: Recent app logs
+      description: |
+        The newest app (slog) log records, newest first, kept in memory (the last 1000, at the server's
+        log level) until restart. whatsmeow's own logs aren't included. Message text is never logged;
+        attributes whose key looks secret (token, secret, password, authorization, cookie, key, url,
+        webhook) are "[redacted]", and the owner secret, webhook URL and webhook secret are replaced
+        wherever they appear. Requires admin.
+      parameters:
+        - { name: level, in: query, description: "Lowest level returned.", schema: { type: string, enum: [debug, info, warn, error], default: debug } }
+        - { name: since, in: query, description: "Only entries with a higher id (tailing).", schema: { type: integer, format: int64 } }
+        - { name: before, in: query, description: "Only entries with a lower id (paging back).", schema: { type: integer, format: int64 } }
+        - { name: limit, in: query, schema: { type: integer, default: 200, maximum: 1000 } }
+      responses:
+        "200":
+          description: Log entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries]
+                properties:
+                  entries: { type: array, items: { $ref: "#/components/schemas/LogEntry" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   /settings:
     get:
       tags: [Admin]
@@ -1170,6 +1199,18 @@ components:
         error: { type: string }
         gave_up: { type: boolean, description: "No more retries for this delivery" }
         replayed: { type: boolean, description: "Sent again successfully with POST /webhook/replay" }
+    LogEntry:
+      type: object
+      required: [id, time, level, msg]
+      properties:
+        id: { type: integer, format: int64, description: "Grows by one per record, across levels" }
+        time: { type: string, format: date-time }
+        level: { type: string, description: "debug, info, warn or error" }
+        msg: { type: string }
+        attrs:
+          type: object
+          additionalProperties: { type: string }
+          description: Attributes as strings; groups become dotted keys. Secret-looking ones are "[redacted]".
     Stats:
       type: object
       properties:

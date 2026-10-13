@@ -118,6 +118,37 @@ must be the owner secret or have the admin scope. Both can also be saved in `./.
 `~/.config/wame/admin.env` ([details](ADMIN.md#saving-the-server-and-token)). Plain `http://` is refused for non-loopback
 addresses unless you pass `-insecure`.
 
+### `wame backup [-keep N] [PATH]`
+
+Copies the database into a new file, safely, even while `serve` or `tui` has it open: it opens the
+database read-only (by the same absolute path the server uses) and runs SQLite's `VACUUM INTO`, which
+writes a consistent snapshot of everything committed so far. It never upgrades the database or
+connects to WhatsApp, so it's fine to run next to a running server, including with
+`docker exec` ([Docker backups](DOCKER.md#backups)).
+
+```sh
+wame backup                       # ~/.config/wame/wame-20261013-093005.db, next to the database
+wame backup ~/backups/            # a new wame-YYYYMMDD-HHMMSS.db in that folder (created 0700 if missing)
+wame backup ~/backups/before-upgrade.db
+wame backup -keep 7 ~/backups/    # then delete all but the 7 newest wame-*.db backups there
+```
+
+`-db` (or `WAME_DB`) picks the database, as for the other commands. PATH ends in `/` or is an
+existing folder: the copy goes inside it with the timestamped name. The copy is created with mode
+`0600`, and an existing file is never overwritten. Afterwards wame checks it (`PRAGMA quick_check`
+and that `wame_messages` is there), deletes it if the check fails, and prints its path and size:
+
+```
+backed up /home/you/.config/wame/wame.db to /home/you/backups/wame-20261013-093005.db (12.4 MiB)
+```
+
+`-keep N` only touches files in the copy's folder named exactly like `wame-YYYYMMDD-HHMMSS.db`;
+anything else there (including copies you named yourself) is left alone. It's off (`0`) by default.
+
+The copy holds your session keys, like the database itself: keep it private and encrypt it before it
+leaves the machine. To restore, stop wame and put the copy in place of `wame.db` (remove the old
+`wame.db-wal` and `wame.db-shm` files too).
+
 ### `wame logout`
 
 Unlinks the device from your phone and deletes the session. Messages stored in the
@@ -197,12 +228,18 @@ set `-log-file`, so they don't break the screen or a script's output.
 
 Each HTTP request produces one line with `method`, `path`, `status`, `duration_ms` and
 `remote`. The query string is left out on purpose because it may contain the token.
-Requests to `/status`, `/messages/wait` and `/events` log at debug level unless they fail.
+Requests to `/status`, `/messages/wait`, `/events` and `/logs` log at debug level unless they fail.
 
 ```
 time=2026-10-10T22:41:03.120-03:00 level=INFO msg=http method=POST path=/send status=200 duration_ms=812 remote=127.0.0.1:52144
 time=2026-10-10T22:41:03.119-03:00 level=INFO msg=action actor=api action=send target=5511999999999@s.whatsapp.net detail="text, 6 chars"
 ```
+
+The newest 1000 app log records are also kept in memory for admins: `GET /logs`
+([API](API.md#get-logs)) and the [admin panel](ADMIN.md)'s Logs tab. That copy is taken before
+`-log-file`, `-log-format` or the quiet modes apply, so it's there even when the output goes nowhere,
+and it follows the same level (debug only with `-debug`). whatsmeow's logs aren't in it. It's lost on
+restart.
 
 Message text, the token and the webhook URL are never logged. `*.log` files are in `.gitignore`. More on the log fields and the audit table in
 [proposed-features/ADMIN-PANEL.md](proposed-features/ADMIN-PANEL.md#logging-today).
@@ -271,7 +308,8 @@ You can inspect the database with any SQLite tool, e.g.
 `sqlite3 ~/.config/wame/wame.db "select seq, chat, type, ts from wame_messages order by seq desc limit 10"`.
 
 Only one process can use a database at a time, so don't run `serve`, `tui` and `send` on
-the same file at once.
+the same file at once. To copy it while it's in use, use [`wame backup`](#wame-backup--keep-n-path)
+rather than `cp`, which can catch the file halfway through a write.
 
 ## Exit codes
 

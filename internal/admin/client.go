@@ -338,6 +338,21 @@ func (c *Client) Queue(ctx context.Context, status string, limit int) (QueuePage
 	return out, err
 }
 
+// Logs returns the server's recent app logs at level or above ("" for all), newest first; with since
+// set, only entries newer than that id.
+func (c *Client) Logs(ctx context.Context, level string, since int64, limit int) ([]bot.LogEntry, error) {
+	q := url.Values{"limit": {strconv.Itoa(limit)}}
+	if level != "" {
+		q.Set("level", level)
+	}
+	if since > 0 {
+		q.Set("since", strconv.FormatInt(since, 10))
+	}
+	var out api.LogPage
+	err := c.do(ctx, "GET", "logs", q, nil, &out)
+	return out.Entries, err
+}
+
 // CancelQueued cancels one queued message, or with batch set, every queued one in that batch.
 func (c *Client) CancelQueued(ctx context.Context, id int64, batch string) (int, error) {
 	path, q := "queue/"+strconv.FormatInt(id, 10), url.Values(nil)

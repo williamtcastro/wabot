@@ -28,9 +28,10 @@ const (
 	tabHealth
 	tabSettings
 	tabQueue
+	tabLogs
 )
 
-var tabNames = []string{"Status", "Chats", "Tokens", "Audit", "Health", "Settings", "Queue"}
+var tabNames = []string{"Status", "Chats", "Tokens", "Audit", "Health", "Settings", "Queue", "Logs"}
 
 type mode int
 
@@ -177,6 +178,15 @@ type model struct {
 	queueReload  termui.Debounce
 	confirmBatch string
 
+	logs        []bot.LogEntry
+	logsErr     error
+	logsSel     int
+	logsLevel   string
+	logsQuery   string
+	logsFollow  bool
+	logsTicking bool
+	logsReq     inflight
+
 	chats       []store.Chat
 	chatsReload termui.Debounce
 	chatsErr    error
@@ -219,7 +229,7 @@ func newModel(o Options) *model {
 	if o.Bell == nil {
 		o.Bell = func() {}
 	}
-	m := &model{c: o.Client, opts: o, profile: o.Profile, prompt: p, auditMore: true}
+	m := &model{c: o.Client, opts: o, profile: o.Profile, prompt: p, auditMore: true, logsFollow: true}
 	if m.c == nil {
 		m.mode = modeServers
 	}
@@ -236,7 +246,11 @@ func (m *model) loadAll() tea.Cmd {
 	if m.c == nil {
 		return nil
 	}
-	return tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadStats(), m.loadChats(), m.loadSettings(), m.loadQueue())
+	cmds := []tea.Cmd{m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadStats(), m.loadChats(), m.loadSettings(), m.loadQueue()}
+	if m.tab == tabLogs {
+		cmds = append(cmds, m.loadLogs(0), m.followLogs())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *model) pollEvery() time.Duration {
@@ -435,6 +449,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case queueReloadMsg:
 		return m, m.reloadQueue()
 
+	case logsMsg:
+		m.applyLogs(msg)
+		return m, nil
+
+	case logsTickMsg:
+		return m, m.logsTick()
+
 	case chatsReloadMsg:
 		m.chatsReload.Done()
 		if m.tab != tabChats {
@@ -538,7 +559,7 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			})
 		})
 	case modeFilter:
-		return m, m.auditFilterKey(k)
+		return m, m.filterKey(k)
 	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch:
 		return m, m.confirmKey(k.String() == "y")
 	case modeCreate:
@@ -676,6 +697,8 @@ func (m *model) setTab(t tab) tea.Cmd {
 		return m.loadSettings()
 	case tabQueue:
 		return tea.Batch(m.loadQueue(), m.loadStats())
+	case tabLogs:
+		return tea.Batch(m.loadLogs(0), m.followLogs())
 	}
 	return nil
 }
@@ -709,6 +732,8 @@ func (m *model) tabKey(k string) tea.Cmd {
 		return m.queueKey(k)
 	case tabAudit:
 		return m.auditKey(k)
+	case tabLogs:
+		return m.logsKey(k)
 	}
 	return nil
 }
@@ -763,20 +788,25 @@ func (m *model) auditKey(k string) tea.Cmd {
 	return nil
 }
 
-// auditFilterKey edits the audit filter as it's typed; esc clears it, enter keeps it.
-func (m *model) auditFilterKey(k tea.KeyMsg) tea.Cmd {
+// filterKey edits the open tab's filter (Audit or Logs) as it's typed; esc clears it, enter keeps it.
+func (m *model) filterKey(k tea.KeyMsg) tea.Cmd {
+	q := &m.auditQuery
+	if m.tab == tabLogs {
+		q = &m.logsQuery
+	}
 	var cmd tea.Cmd
 	switch k.String() {
 	case "esc":
 		m.mode = modeNormal
-		m.auditQuery = ""
+		*q = ""
 	case "enter":
 		m.mode = modeNormal
 	default:
 		m.prompt, cmd = m.prompt.Update(k)
-		m.auditQuery = m.prompt.Value()
+		*q = m.prompt.Value()
 	}
 	m.auditSel = clamp(m.auditSel, len(m.visibleAudit()))
+	m.logsSel = clamp(m.logsSel, len(m.visibleLogs()))
 	return cmd
 }
 

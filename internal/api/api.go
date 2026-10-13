@@ -102,6 +102,7 @@ func NewHandler(b *bot.Bot, authn *auth.Authenticator, version string) *Handler 
 
 	mux.HandleFunc("GET /audit", need(admin, a.audit))
 	mux.HandleFunc("GET /stats", need(admin, a.stats))
+	mux.HandleFunc("GET /logs", need(admin, a.logs))
 	mux.HandleFunc("GET /settings", need(admin, a.settings))
 	mux.HandleFunc("PATCH /settings", need(admin, a.updateSettings))
 	mux.HandleFunc("POST /webhook/test", need(admin, a.webhookTest))

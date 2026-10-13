@@ -20,11 +20,12 @@ wame admin -server https://wame.example.com
 | **5 Health** | the server's version and uptime; for sends, number lookups and auto-replies, a meter of the last minute's use against the limit, the per-chat gap and 429s (or dropped auto-replies) since startup; the webhook's queue, delivered / retried / replayed / given up / dropped counts and its latest failures | `j`/`k` pick a failure, `R` replay it, `t` send a test delivery |
 | **6 Settings** | the settings that change without a restart (send rate, chat gap, max wait, auto-replies, webhook filter, queue paused, queue jitter): the value in effect, the server's flag, and who changed it and when | `j`/`k` move, `Enter` change (toggles on/off ones), `x` back to the flag |
 | **7 Queue** | the [send queue](QUEUE.md): whether it's sending, paused, in [quiet hours](QUEUE.md#quiet-hours) (until when, in which zone), backing off or has no worker, what's waiting and what was sent or failed in the last 7 days, how many sent ones were delivered and read, the quiet hours, the jitter and the last error; below, the items (batch, recipient, state, attempts, who queued it, when it's due, error), never their text. A sent item's state shows its receipts like WhatsApp: `✓ sent`, `✓✓ delivered`, and a blue `✓✓ read` | `j`/`k` move, `f` filter by state, `x` cancel the marked item, `X` cancel its whole batch (asks first), `P` pause / resume |
+| **8 Logs** | the server's recent app logs, newest first: time, level (debug faint, info blue, warn amber, error red), message and attributes (dim); a card below shows the selected entry with every attribute. While the tab is open it follows new entries every 3 s ([details](#logs)) | `j`/`k` move, `f` level (all, info, warn, error), `/` filter, `Esc` clear the filter, `F` pause / follow |
 
 In every list, `j`/`k` or the arrows move, `Ctrl+D`/`Ctrl+U` or `PgDn`/`PgUp` page, and `g`/`G` or
 `Home`/`End` jump to the top / bottom. Times show in your local time zone, whatever the server's is.
 
-Everywhere: `1`–`7` or `Tab` / `Shift+Tab` switch tabs, `S` switches server (see
+Everywhere: `1`–`8` or `Tab` / `Shift+Tab` switch tabs, `S` switches server (see
 [Several servers](#several-servers)), `r` refreshes, `q` or `Ctrl+C` quits. The header shows unread
 chats, active tokens, failed actions in the last 24 h (red), a `!` on Health after a 429 or
 webhook failure in the last hour, a `•` on Settings while any is changed from its flag and the number
@@ -81,6 +82,19 @@ how the receiver answered, which is handy after changing its code or the secret.
 marked failed delivery again, once, with the same delivery id; it's marked `replayed` when the
 receiver accepts it. Only deliveries in the list can be replayed. See
 [`POST /webhook/test`, `POST /webhook/replay`](API.md#post-webhooktest-post-webhookreplay).
+
+## Logs
+
+The Logs tab reads [`GET /logs`](API.md#get-logs): the newest 1000 app log records the server keeps
+in memory since it started, at its log level (debug lines only when it runs with `-debug`). They're
+the same lines `docker logs` or `-log-file` show, with secrets taken out (tokens, the webhook URL and
+secret, anything under a key like `password` or `authorization`); message text is never logged in
+the first place. whatsmeow's own protocol logs go to the server's stdout and aren't here.
+
+`f` changes the lowest level shown and reloads; `/` filters what's loaded by message or attribute.
+Following polls `GET /logs?since=` every 3 seconds while the tab is open (not over the event stream)
+and adds new entries on top; if you've moved down the list, the selection stays on the same entry.
+`F` pauses that, and `F` again catches up. Leaving the tab stops the polling.
 
 ## Logging in a server remotely
 
@@ -168,16 +182,16 @@ Use `-insecure` (or `WAME_INSECURE=true` in a server's file) only on a network y
 Tailscale): the token would otherwise be readable by anyone on the path.
 
 A token without the admin scope can still open the panel and see the Status and Chats tabs (without
-the QR), but the Tokens, Audit and Health tabs say it needs the admin scope. Prefer a dedicated
+the QR), but the Tokens, Audit, Health and Logs tabs say it needs the admin scope. Prefer a dedicated
 admin token with an expiry over the owner secret, so it can be revoked (or rotated) on its own:
 
 ```sh
 wame token create ops-laptop -scopes admin -expires 720h   # on the server
 ```
 
-The Health tab, the usage columns, webhook test and replay, the Settings tab and the Queue tab need
-a recent server (`GET /stats`, `/settings`, `/webhook/*`, `/queue`); an older one says so instead of
-failing.
+The Health tab, the usage columns, webhook test and replay, the Settings, Queue and Logs tabs need
+a recent server (`GET /stats`, `/settings`, `/webhook/*`, `/queue`, `/logs`); an older one says so
+instead of failing.
 
 ## What it doesn't do (yet)
 

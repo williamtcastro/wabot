@@ -40,6 +40,7 @@ Base URL: whatever you passed to `-addr` (default `http://127.0.0.1:8080` for `s
 | GET | `/audit` | log of control actions (sends, edits, logins…) |
 | GET | `/stats` | limiter, webhook, queue and alert health, per-token usage |
 | GET | `/metrics` | Prometheus metrics |
+| GET | `/logs` | the server's recent app logs, secrets removed |
 | GET, PATCH | `/settings` | read or change rate limits, auto-replies, the webhook filter and the send queue without a restart |
 | POST | `/webhook/test` | send a signed test delivery |
 | POST | `/webhook/replay` | send a recently failed delivery again |
@@ -128,7 +129,7 @@ the token name is what the [audit log](#get-audit) records as the actor.
 | `GET /chats` | read | only allowed chats are listed |
 | `GET /contacts`, `GET /groups` | read | 403 |
 | `POST /check` | send | 403 |
-| `GET /audit`, `GET /stats`, `GET /metrics`, `GET /settings`, `PATCH /settings`, `POST /webhook/test`, `POST /webhook/replay`, `POST /alerts/test` | admin | n/a |
+| `GET /audit`, `GET /stats`, `GET /metrics`, `GET /logs`, `GET /settings`, `PATCH /settings`, `POST /webhook/test`, `POST /webhook/replay`, `POST /alerts/test` | admin | n/a |
 | `GET /optouts`, `POST /optouts`, `DELETE /optouts/{chat}` | admin | n/a |
 | `GET /tokens`, `POST /tokens`, `DELETE /tokens/{name}` | admin | n/a |
 | `GET /docs`, `GET /openapi.yaml` | none | public |
@@ -828,6 +829,44 @@ when wame restarts. The webhook URL, its secret and message content are never in
   [`-alert-gotify`](#alerts). Otherwise it shows how many alerts went out or failed, the title of the
   last one sent and `last_error` / `last_error_at` from the last failure (with the Gotify address
   replaced by `gotify`). The URL and the app token are never included.
+
+## `GET /logs`
+
+The server's recent app logs (the `log/slog` lines it writes to stderr or `-log-file`), newest
+first. Requires `admin`; it's what the [admin panel](ADMIN.md)'s Logs tab shows. The newest 1000
+records are kept in memory, at the server's log level (debug only with `-debug`), and lost on
+restart. whatsmeow's own protocol logs go to stdout separately and aren't included.
+
+| Parameter | |
+|---|---|
+| `level` | lowest level to return: `debug` (default), `info`, `warn` or `error` |
+| `since` | only entries with a higher `id`: pass the newest `id` you have to tail |
+| `before` | only entries with a lower `id`: pass the oldest you have to page back |
+| `limit` | at most this many (default 200, max 1000) |
+
+```sh
+curl -H "Authorization: Bearer $WAME_TOKEN" "http://127.0.0.1:8080/logs?level=warn&limit=50"
+```
+
+```json
+{
+  "entries": [
+    { "id": 812, "time": "2026-10-13T09:41:03.120-03:00", "level": "warn", "msg": "http",
+      "attrs": { "method": "POST", "path": "/send", "status": "429", "duration_ms": "30001", "remote": "127.0.0.1:52144" } },
+    { "id": 790, "time": "2026-10-13T09:40:11.002-03:00", "level": "warn", "msg": "delivery failed",
+      "attrs": { "component": "webhook", "delivery": "4711-message-a1b2c3d4", "attempt": "1", "status": "500", "will_retry": "true" } }
+  ]
+}
+```
+
+`id`s grow by one per record (across all levels), so a gap means entries filtered out or dropped
+from the buffer. Attribute values are strings; groups become dotted keys (`req.status`). Nothing
+here is more than what the log output already has, minus secrets: message text is never logged,
+attributes whose key contains `token`, `secret`, `password`, `authorization`, `cookie`, `key`,
+`url` or `webhook` are replaced with `[redacted]`, and the owner secret, webhook URL and webhook
+secret are replaced wherever they appear (an error message, for example). Values over 1 KiB are cut.
+Successful requests to `/logs` are logged at debug level, so polling it doesn't fill the buffer
+(unless the server runs with `-debug`).
 
 ## `GET /settings`, `PATCH /settings`
 

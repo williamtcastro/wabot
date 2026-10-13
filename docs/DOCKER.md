@@ -138,6 +138,7 @@ WAME_TOKEN=… wame admin
 docker logs -f wame                                                   # app logs
 docker exec wame wame token create claude -scopes read -expires 720h  # safe while serving
 docker exec wame wame token list
+docker exec wame wame backup /data/backups/                           # safe while serving
 ```
 
 Commands that connect to WhatsApp (`login`, `send`, `logout`, `mcp`, `tui`) need the session to
@@ -216,10 +217,24 @@ Don't run the old copy afterwards: two processes using one WhatsApp session log 
 
 ## Backups
 
-Stop the container (or accept a backup that may miss the last seconds of writes), then:
+Use [`wame backup`](CLI.md#wame-backup--keep-n-path) inside the running container. It copies the
+database through a read-only connection with SQLite's `VACUUM INTO`, so there's no need to stop
+anything, and it works in the distroless image (no shell or `sqlite3` needed):
 
 ```sh
-docker run --rm -v wame-data:/data:ro -v "$PWD":/backup alpine tar czf /backup/wame-data.tgz -C /data .
+docker exec wame wame backup /data/backups/            # → /data/backups/wame-YYYYMMDD-HHMMSS.db
+docker exec wame wame backup -keep 7 /data/backups/    # and keep only the 7 newest there
+docker cp wame:/data/backups/wame-20261013-093005.db .  # take a copy off the volume
 ```
 
-For a host folder, back up the folder. Either way the archive holds the session keys: encrypt it.
+`docker exec` runs as the container's user (uid 65532, or your `--user`), which is the one that owns
+`/data`, so the backup folder can live there; it's created `0700` on the first run and each copy is
+`0600`. `WAME_DB` is already set in the image, so there's no `-db` to pass. Copying `wame.db` with
+`cp` or `tar` while the server runs can catch it halfway through a write; `wame backup` can't.
+
+For a nightly copy, run the same `docker exec` line from the host's cron or a systemd timer, with
+`-keep` so old ones go away. With a host folder the copies land in it, ready for your usual backup
+tool. Either way they hold the session keys: encrypt anything that leaves the machine.
+
+To restore, stop the container, replace `wame.db` with the copy and delete `wame.db-wal` and
+`wame.db-shm`, as in [Moving an existing database in](#moving-an-existing-database-in).

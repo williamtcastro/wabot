@@ -31,6 +31,7 @@ import (
 	"github.com/williamtcastro/wame/internal/auth"
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/mcpserver"
+	"github.com/williamtcastro/wame/internal/store"
 	"github.com/williamtcastro/wame/internal/tui"
 )
 
@@ -52,6 +53,8 @@ Usage:
                                        admin panel for a running server: status, login, chats, tokens,
                                        audit, health
                                        (WAME_SERVER, WAME_TOKEN: env, ./.env or ~/.config/wame/admin.env)
+  wame backup [-keep N] [PATH]        copy the database safely, even while a server has it open
+                                       (default: wame-YYYYMMDD-HHMMSS.db next to it; PATH may be a dir/)
   wame version                        print the version
   wame logout                         unlink the device and delete the session
 
@@ -107,8 +110,12 @@ func main() {
 	case "version", "--version":
 		fmt.Println("wame", version)
 		return
-	case "admin":
-		if err := adminCommand(args); err != nil {
+	case "admin", "backup":
+		command := adminCommand
+		if cmd == "backup" {
+			command = backupCommand
+		}
+		if err := command(args); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -181,7 +188,9 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 	if quiet || cmd == "mcp" {
 		waLogger = waLog.Noop
 	}
-	log, closeLog, err := newLogger(c.logFormat, c.logFile, level, quiet)
+	logs := bot.NewLogBuffer(logBufferSize)
+	logs.Scrub(c.token, c.webhook, c.webhookSecret)
+	log, closeLog, err := newLogger(c.logFormat, c.logFile, level, quiet, logs)
 	if err != nil {
 		return err
 	}
@@ -198,6 +207,7 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 		return err
 	}
 	defer b.Close()
+	b.Logs = logs
 	b.Typing = c.typing
 	b.Online = c.online
 	if c.webhook != "" {
@@ -532,8 +542,12 @@ func legacyDBNotice(path string) {
 	fmt.Fprintf(os.Stderr, "notice: ./wabot.db is no longer the default; move it with 'mkdir -p %[1]s && mv wabot.db %[1]s/wame.db' (and its -wal/-shm files) or pass '-db wabot.db'\n", dir)
 }
 
-// newLogger builds the app logger. format is "text" or "json"; file "" means stderr.
-func newLogger(format, file, level string, quiet bool) (*slog.Logger, io.Closer, error) {
+// logBufferSize is how many app log records GET /logs can return.
+const logBufferSize = 1000
+
+// newLogger builds the app logger. format is "text" or "json"; file "" means stderr. Records also go
+// to logs (for GET /logs) when it's set, whatever the output.
+func newLogger(format, file, level string, quiet bool, logs *bot.LogBuffer) (*slog.Logger, io.Closer, error) {
 	var w io.Writer = os.Stderr
 	var closer io.Closer = io.NopCloser(nil)
 	switch {
@@ -551,10 +565,14 @@ func newLogger(format, file, level string, quiet bool) (*slog.Logger, io.Closer,
 		lvl = slog.LevelInfo
 	}
 	opts := &slog.HandlerOptions{Level: lvl}
+	var h slog.Handler = slog.NewTextHandler(w, opts)
 	if format == "json" {
-		return slog.New(slog.NewJSONHandler(w, opts)), closer, nil
+		h = slog.NewJSONHandler(w, opts)
 	}
-	return slog.New(slog.NewTextHandler(w, opts)), closer, nil
+	if logs != nil {
+		h = logs.Wrap(h)
+	}
+	return slog.New(h), closer, nil
 }
 
 // tokenCommand manages API tokens. It only touches the database, so it's safe to run while serve is up.
@@ -688,6 +706,67 @@ func mcpCommand(ctx context.Context, b *bot.Bot, args []string) error {
 	}
 	b.Log.Info("MCP server on stdio", "as", p.Name, "scopes", p.Scopes)
 	return mcpserver.New(b, version, &p).Run(ctx, &mcp.StdioTransport{})
+}
+
+// backupCommand copies the database with VACUUM INTO over a read-only connection. It never calls
+// bot.New, which would upgrade the schema and connect to WhatsApp.
+func backupCommand(args []string) error {
+	fs := flag.NewFlagSet("backup", flag.ExitOnError)
+	fs.Usage = func() { fmt.Println(usage) }
+	db := fs.String("db", envOr("WAME_DB", defaultDB()), "")
+	keep := fs.Int("keep", 0, "")
+	_ = fs.Parse(args)
+	if fs.NArg() > 1 || *keep < 0 {
+		return errors.New("usage: wame backup [-db PATH] [-keep N] [PATH]")
+	}
+	dest, err := backupDest(*db, fs.Arg(0), time.Now())
+	if err != nil {
+		return err
+	}
+	size, err := store.Backup(context.Background(), *db, dest)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("backed up %s to %s (%s)\n", *db, dest, byteSize(size))
+	if *keep == 0 {
+		return nil
+	}
+	removed, err := store.PruneBackups(filepath.Dir(dest), *keep)
+	for _, p := range removed {
+		fmt.Println("removed old backup", p)
+	}
+	return err
+}
+
+// backupDest is where a backup goes: path itself, a new file inside path when it's a directory (or
+// ends in a separator, which creates it), or next to the database when path is empty.
+func backupDest(db, path string, now time.Time) (string, error) {
+	name := store.BackupName(now)
+	if path == "" {
+		return filepath.Join(filepath.Dir(db), name), nil
+	}
+	if strings.HasSuffix(path, "/") || strings.HasSuffix(path, string(filepath.Separator)) {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return "", err
+		}
+	}
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		return filepath.Join(path, name), nil
+	}
+	return path, nil
+}
+
+func byteSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // adminCommand opens the admin panel for a server over its HTTP API; it never touches the local database.

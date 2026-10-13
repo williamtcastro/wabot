@@ -208,7 +208,7 @@ func TestListKeysAndTabNumbers(t *testing.T) {
 	if m.tokSel != 0 {
 		t.Fatalf("g in tokens: sel %d", m.tokSel)
 	}
-	press(m, "8")
+	press(m, "9")
 	if m.tab != tabTokens {
 		t.Fatal("a digit past the last tab switched tabs")
 	}
