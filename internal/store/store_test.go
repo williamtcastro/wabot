@@ -50,16 +50,16 @@ func seqs(msgs []Message) []int64 {
 func TestMigrateFromV1KeepsRowids(t *testing.T) {
 	ctx := context.Background()
 	db := openDB(t)
-	_, err := db.Exec(`CREATE TABLE wabot_messages (
+	_, err := db.Exec(`CREATE TABLE wame_messages (
 		chat TEXT NOT NULL, id TEXT NOT NULL, sender TEXT NOT NULL, push_name TEXT NOT NULL DEFAULT '',
 		from_me INTEGER NOT NULL, is_group INTEGER NOT NULL, type TEXT NOT NULL, text TEXT NOT NULL,
 		ts INTEGER NOT NULL, UNIQUE (chat, id));
-		CREATE INDEX wabot_messages_ts ON wabot_messages (chat, ts);
-		INSERT INTO wabot_messages VALUES
+		CREATE INDEX wame_messages_ts ON wame_messages (chat, ts);
+		INSERT INTO wame_messages VALUES
 			('` + maria + `', 'A1', '` + maria + `', 'Maria', 0, 0, 'text', 'oi', 1000),
 			('` + john + `', 'A2', '` + john + `', 'John', 0, 0, 'text', 'hello', 2000),
 			('` + ana + `', 'A3', '` + ana + `', 'Ana', 0, 0, 'text', 'olá', 3000);
-		DELETE FROM wabot_messages WHERE id = 'A2';`)
+		DELETE FROM wame_messages WHERE id = 'A2';`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestMigrateFromV1KeepsRowids(t *testing.T) {
 func TestMigrateAddsMissingColumns(t *testing.T) {
 	ctx := context.Background()
 	db := openDB(t)
-	if _, err := db.Exec(`CREATE TABLE wabot_messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, chat TEXT NOT NULL,
+	if _, err := db.Exec(`CREATE TABLE wame_messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, chat TEXT NOT NULL,
 		id TEXT NOT NULL, sender TEXT NOT NULL, push_name TEXT NOT NULL DEFAULT '', from_me INTEGER NOT NULL,
 		is_group INTEGER NOT NULL, type TEXT NOT NULL, text TEXT NOT NULL, ts INTEGER NOT NULL, UNIQUE (chat, id))`); err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestMigrateAddsMissingColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('wabot_messages') WHERE name IN ('raw_sender', 'deleted', 'file_size')`).Scan(&n); err != nil || n != 3 {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('wame_messages') WHERE name IN ('raw_sender', 'deleted', 'file_size')`).Scan(&n); err != nil || n != 3 {
 		t.Fatalf("added columns = %d (%v), want 3", n, err)
 	}
 }

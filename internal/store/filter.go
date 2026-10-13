@@ -126,7 +126,7 @@ func (f Filter) where() (string, []any) {
 		}
 	}
 	if q := ftsQuery(f.Text); q != "" {
-		conds = append(conds, "seq IN (SELECT rowid FROM wabot_messages_fts WHERE wabot_messages_fts MATCH ?)")
+		conds = append(conds, "seq IN (SELECT rowid FROM wame_messages_fts WHERE wame_messages_fts MATCH ?)")
 		args = append(args, q)
 	}
 	return strings.Join(conds, " AND "), args

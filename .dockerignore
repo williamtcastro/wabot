@@ -3,7 +3,6 @@
 _demo
 docs/wame-tui.png
 wame
-wabot
 bin
 *.db
 *.db-*

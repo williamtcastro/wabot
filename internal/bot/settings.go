@@ -12,7 +12,7 @@ import (
 )
 
 // Settings are the values an admin can change while wame runs. The flags give the defaults;
-// overrides live in wabot_settings and win over the flags on the next start too.
+// overrides live in wame_settings and win over the flags on the next start too.
 type Settings struct {
 	Rate          int
 	ChatGap       time.Duration

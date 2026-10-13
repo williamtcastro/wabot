@@ -121,7 +121,7 @@ addresses unless you pass `-insecure`.
 ### `wame logout`
 
 Unlinks the device from your phone and deletes the session. Messages stored in the
-`wabot_messages` table and the audit log are kept; delete the database file to remove everything.
+`wame_messages` table and the audit log are kept; delete the database file to remove everything.
 
 ### `wame version`
 
@@ -139,7 +139,10 @@ wame was called `wabot`. After switching binaries nothing has to change:
 - **Database:** with no `-db`/`WAME_DB`, wame uses `~/.config/wame/wame.db`, or
   `~/.config/wabot/wabot.db` if that exists and the new one doesn't. To move it, stop wame and run
   `mkdir -p ~/.config/wame && for f in ~/.config/wabot/wabot.db*; do mv "$f" ~/.config/wame/"$(basename "$f" | sed s/wabot/wame/)"; done`.
-  The tables inside keep their `wabot_` names.
+  On its first start, wame renames the tables inside from `wabot_*` to `wame_*` (keeping every
+  row) and rebuilds the search index, in one transaction. Don't go back to a `wabot` build
+  afterwards: it would create new, empty `wabot_*` tables, and wame then refuses to start until
+  those are removed (it names them).
 - **Environment:** every `WAME_*` variable falls back to its old `WABOT_*` name.
 - **Tokens:** new tokens start with `wame_`; existing `wabot_…` tokens keep working.
 - **Webhooks:** headers are now `X-Wame-Event`, `X-Wame-Delivery`, `X-Wame-Timestamp` and
@@ -224,15 +227,15 @@ wame's own tables:
 
 | Table | Holds |
 |---|---|
-| `wabot_messages` | every message the bot has seen or sent, which powers `/messages`, `/events`, `/chats` and the TUI (columns below) |
-| `wabot_messages_fts` | full-text index of `wabot_messages.text` (SQLite FTS5, accents folded) for `q=` and `/search`. Kept in sync by triggers on insert, update of `text` and delete |
-| `wabot_chat_state` | per chat, `read_seq`: the read position behind `unread` in `/chats` and the TUI badges |
-| `wabot_groups` | cached group names and admin lists (`jid`, `name`, `admins` as JSON, `updated`), so names show before connecting |
-| `wabot_audit` | one row per control action (send, react, edit, delete, read, pair, logout…), served by `GET /audit` |
-| `wabot_tokens` | API tokens: id, name, SHA-256 hash of the token (never the token itself), scopes, chats, rate, created/expires/last-used times, revoked flag, `created_by`. Rows are never deleted |
-| `wabot_settings` | runtime overrides from `PATCH /settings` or the admin panel (`key`, `value`, `updated_by`, `updated_at`). They win over the flags on every start; deleting a row (or resetting it there) brings the flag back |
+| `wame_messages` | every message the bot has seen or sent, which powers `/messages`, `/events`, `/chats` and the TUI (columns below) |
+| `wame_messages_fts` | full-text index of `wame_messages.text` (SQLite FTS5, accents folded) for `q=` and `/search`. Kept in sync by triggers on insert, update of `text` and delete |
+| `wame_chat_state` | per chat, `read_seq`: the read position behind `unread` in `/chats` and the TUI badges |
+| `wame_groups` | cached group names and admin lists (`jid`, `name`, `admins` as JSON, `updated`), so names show before connecting |
+| `wame_audit` | one row per control action (send, react, edit, delete, read, pair, logout…), served by `GET /audit` |
+| `wame_tokens` | API tokens: id, name, SHA-256 hash of the token (never the token itself), scopes, chats, rate, created/expires/last-used times, revoked flag, `created_by`. Rows are never deleted |
+| `wame_settings` | runtime overrides from `PATCH /settings` or the admin panel (`key`, `value`, `updated_by`, `updated_at`). They win over the flags on every start; deleting a row (or resetting it there) brings the flag back |
 
-`wabot_messages` columns:
+`wame_messages` columns:
 
 | Column | |
 |---|---|
@@ -246,9 +249,9 @@ wame's own tables:
 | `raw_chat`, `raw_sender` | the JIDs exactly as WhatsApp sent them (possibly `…@lid`), needed for replies, reactions, deletes and read receipts |
 
 Databases from older versions are upgraded automatically on startup, with no command to run:
-`wabot_messages` is rebuilt with the new columns and the explicit `seq` column (keeping every
+`wame_messages` is rebuilt with the new columns and the explicit `seq` column (keeping every
 message's existing number), missing tables are created, and the search index is built from the
-stored messages. When `wabot_chat_state` is first created, every chat's read position is set to
+stored messages. When `wame_chat_state` is first created, every chat's read position is set to
 its newest message, so nothing already stored shows as unread.
 
 When WhatsApp reveals which phone number a hidden `…@lid` ID belongs to, messages stored under
@@ -256,10 +259,10 @@ the `@lid` chat are moved to the phone-number chat, and leftover duplicates are 
 
 At startup wame sets the database file and its `-wal`/`-shm` files to mode `0600` (owner only).
 
-`wabot_audit` columns: `id`, `at` (Unix ms), `actor`, `action`, `target`, `detail`, `ok`, `error`.
+`wame_audit` columns: `id`, `at` (Unix ms), `actor`, `action`, `target`, `detail`, `ok`, `error`.
 
 You can inspect the database with any SQLite tool, e.g.
-`sqlite3 ~/.config/wame/wame.db "select seq, chat, type, ts from wabot_messages order by seq desc limit 10"`.
+`sqlite3 ~/.config/wame/wame.db "select seq, chat, type, ts from wame_messages order by seq desc limit 10"`.
 
 Only one process can use a database at a time, so don't run `serve`, `tui` and `send` on
 the same file at once.

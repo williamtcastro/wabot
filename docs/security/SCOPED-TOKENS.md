@@ -69,7 +69,7 @@ WhatsApp session keys.
 
 ### Storage
 
-Table `wabot_tokens` holds `id` (primary key), `name` (UNIQUE, never deleted, so revoked names stay
+Table `wame_tokens` holds `id` (primary key), `name` (UNIQUE, never deleted, so revoked names stay
 reserved), `hash = SHA-256(full plaintext)`, scopes, chats, rate, created, expires, last_used and
 revoked. The plaintext is returned once, by `POST /tokens` or `wame token create`. `GET /tokens`
 leaves out the hash (`json:"-"`). Audit `detail` holds only the scope list, and the request log
@@ -192,7 +192,7 @@ real tokens from look-alikes without a DB.
 
 ### F1: token-less mode comes back on a LAN listener (High)
 
-**Status: fixed.** Once any row has ever existed in `wabot_tokens`, tokens are required forever, even
+**Status: fixed.** Once any row has ever existed in `wame_tokens`, tokens are required forever, even
 if every token is revoked or expired (`Store.HasTokens`, `Authenticator.Required`). `localOnly` now
 also requires a loopback `RemoteAddr`, so a LAN client can't pass by sending `Host: localhost`. The
 CLI message is accurate again. Regression test: `TestF1TokenlessModeNeverReturns`.
@@ -230,7 +230,7 @@ the owner, log out, and mint persistent admin tokens.
 
 **Fix (both parts):**
 
-1. Make the mode sticky. Require a token once any row exists in `wabot_tokens`, revoked or expired
+1. Make the mode sticky. Require a token once any row exists in `wame_tokens`, revoked or expired
    included. Or decide token-less vs required once in `serve`, and refuse to fall back when the
    listener isn't loopback.
 2. Defense in depth: in `localOnly`, also require `r.RemoteAddr` to be a loopback IP.
@@ -340,7 +340,7 @@ owner secret can). A token minted by another token records `created_by`, can't o
 recursively. Regression test: `TestF5ChildTokensAreBoundToTheirParent`.
 
 **Where:** `internal/api/authz.go:185-220` (`createToken`); there is no parent/child link in
-`wabot_tokens`.
+`wame_tokens`.
 
 **Proof:** in `TestSec_F5_AdminOutlivesItsExpiry`:
 
@@ -483,7 +483,7 @@ with a fresh id on `ErrTokenID` (up to 3 times).
 `id` primary key. That needs about a million tokens before a collision becomes likely, so the impact
 is a misleading error, not a security issue.
 
-**Fix:** retry `Issue` with a new id when the violation is on `wabot_tokens.id`.
+**Fix:** retry `Issue` with a new id when the violation is on `wame_tokens.id`.
 
 ### Checked and not a problem
 
@@ -577,7 +577,7 @@ go through the same `withAuth` and failed-login throttle.
 - **Revoke immediately** on any suspected leak (`wame token revoke NAME`). Open streams close within
   10 s, and tokens that token created are revoked with it.
 - **On a LAN listener**, an owner secret or any token ever created keeps the API locked; there is no
-  way back to token-less mode short of deleting the `wabot_tokens` rows by hand.
+  way back to token-less mode short of deleting the `wame_tokens` rows by hand.
 - **Pass secrets through environment variables** (`WAME_TOKEN`), not the `-token` flag, which shows
   up in `ps` and shell history. Generate the owner secret with `openssl rand -hex 24` (at least 16
   characters are required).

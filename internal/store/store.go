@@ -19,6 +19,9 @@ type Store struct {
 
 // Open creates or upgrades wame's tables in db.
 func Open(ctx context.Context, db *sql.DB) (*Store, error) {
+	if err := renameLegacyTables(ctx, db); err != nil {
+		return nil, fmt.Errorf("rename wabot_ tables: %w", err)
+	}
 	if err := migrate(ctx, db); err != nil {
 		return nil, fmt.Errorf("create message tables: %w", err)
 	}
@@ -38,7 +41,7 @@ func Open(ctx context.Context, db *sql.DB) (*Store, error) {
 }
 
 const messagesTable = `
-CREATE TABLE IF NOT EXISTS wabot_messages (
+CREATE TABLE IF NOT EXISTS wame_messages (
 	seq        INTEGER PRIMARY KEY AUTOINCREMENT,
 	chat       TEXT NOT NULL,
 	id         TEXT NOT NULL,
@@ -60,13 +63,13 @@ CREATE TABLE IF NOT EXISTS wabot_messages (
 	raw_sender TEXT NOT NULL DEFAULT '',
 	UNIQUE (chat, id)
 );
-CREATE INDEX IF NOT EXISTS wabot_messages_ts ON wabot_messages (chat, ts);`
+CREATE INDEX IF NOT EXISTS wame_messages_ts ON wame_messages (chat, ts);`
 
-// migrate creates wabot_messages, upgrading the first schema (implicit rowid, fewer columns) in place.
+// migrate creates wame_messages, upgrading the first schema (implicit rowid, fewer columns) in place.
 // seq is AUTOINCREMENT so a number is never reused or renumbered, even after deletes or VACUUM.
 func migrate(ctx context.Context, db *sql.DB) error {
 	cols := map[string]bool{}
-	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info('wabot_messages')`)
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info('wame_messages')`)
 	if err != nil {
 		return err
 	}
@@ -97,14 +100,14 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	list := strings.Join(copied, ", ")
 	for _, stmt := range []string{
-		`ALTER TABLE wabot_messages RENAME TO wabot_messages_v1`,
-		`DROP INDEX IF EXISTS wabot_messages_ts`,
+		`ALTER TABLE wame_messages RENAME TO wame_messages_v1`,
+		`DROP INDEX IF EXISTS wame_messages_ts`,
 		messagesTable,
-		`INSERT INTO wabot_messages (seq, ` + list + `) SELECT rowid, ` + list + ` FROM wabot_messages_v1 ORDER BY rowid`,
-		`DROP TABLE wabot_messages_v1`,
+		`INSERT INTO wame_messages (seq, ` + list + `) SELECT rowid, ` + list + ` FROM wame_messages_v1 ORDER BY rowid`,
+		`DROP TABLE wame_messages_v1`,
 	} {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("upgrade wabot_messages: %w", err)
+			return fmt.Errorf("upgrade wame_messages: %w", err)
 		}
 	}
 	return tx.Commit()
@@ -124,7 +127,7 @@ func addMissingColumns(ctx context.Context, db *sql.DB, have map[string]bool) er
 		if len(f) < 2 || have[f[0]] || f[0] == "CREATE" || f[0] == "UNIQUE" || f[0] == "seq" || f[0] == ");" {
 			continue
 		}
-		if _, err := db.ExecContext(ctx, `ALTER TABLE wabot_messages ADD COLUMN `+strings.Join(f, " ")); err != nil {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE wame_messages ADD COLUMN `+strings.Join(f, " ")); err != nil {
 			return err
 		}
 	}
@@ -138,7 +141,7 @@ func save(db execer, m Message) (seq int64, inserted bool, err error) {
 	if m.Media != nil {
 		mime, name, size = m.Media.Mimetype, m.Media.FileName, m.Media.Size
 	}
-	res, err := db.Exec(`INSERT OR IGNORE INTO wabot_messages
+	res, err := db.Exec(`INSERT OR IGNORE INTO wame_messages
 		(chat, id, sender, push_name, from_me, is_group, type, text, ts, reply_to, mimetype, file_name, file_size, edited, raw, raw_chat, raw_sender)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		m.Chat, m.ID, m.Sender, m.PushName, m.FromMe, m.IsGroup, m.Type, m.Text, m.Timestamp.UnixMilli(),
@@ -185,7 +188,7 @@ func (s *Store) Import(msgs []Message) error {
 	}
 	for _, m := range msgs {
 		if m.Edited {
-			res, err := tx.Exec(`UPDATE wabot_messages SET text = ?, edited = 1 WHERE chat = ? AND id = ?`, m.Text, m.Chat, m.ID)
+			res, err := tx.Exec(`UPDATE wame_messages SET text = ?, edited = 1 WHERE chat = ? AND id = ?`, m.Text, m.Chat, m.ID)
 			if err == nil {
 				if n, _ := res.RowsAffected(); n > 0 {
 					continue
@@ -199,7 +202,7 @@ func (s *Store) Import(msgs []Message) error {
 		imported[m.Chat] = true
 	}
 	for chat := range imported {
-		if _, err := tx.Exec(`INSERT INTO wabot_chat_state (chat, read_seq) SELECT ?, MAX(seq) FROM wabot_messages WHERE chat = ?
+		if _, err := tx.Exec(`INSERT INTO wame_chat_state (chat, read_seq) SELECT ?, MAX(seq) FROM wame_messages WHERE chat = ?
 			ON CONFLICT (chat) DO UPDATE SET read_seq = excluded.read_seq WHERE excluded.read_seq > read_seq`, chat, chat); err != nil {
 			return err
 		}
@@ -236,7 +239,7 @@ func (s *Store) Query(f Filter, limit int, oldestFirst bool) []Message {
 	if oldestFirst {
 		order = "seq ASC"
 	}
-	rows, err := s.db.Query(`SELECT `+msgCols+` FROM wabot_messages WHERE `+where+` ORDER BY `+order+` LIMIT ?`,
+	rows, err := s.db.Query(`SELECT `+msgCols+` FROM wame_messages WHERE `+where+` ORDER BY `+order+` LIMIT ?`,
 		append(args, limit)...)
 	if err != nil {
 		return []Message{}
@@ -253,7 +256,7 @@ func (s *Store) Query(f Filter, limit int, oldestFirst bool) []Message {
 
 func (s *Store) LastSeq() int64 {
 	var seq sql.NullInt64
-	_ = s.db.QueryRow(`SELECT MAX(seq) FROM wabot_messages`).Scan(&seq)
+	_ = s.db.QueryRow(`SELECT MAX(seq) FROM wame_messages`).Scan(&seq)
 	return seq.Int64
 }
 
@@ -270,7 +273,7 @@ func (s *Store) GetBySeq(seq int64) (Message, error) { return s.getWhere(`seq = 
 
 func (s *Store) getWhere(where string, args ...any) (Message, error) {
 	s.RelinkLIDs()
-	m, err := scanMessage(s.db.QueryRow(`SELECT `+msgCols+` FROM wabot_messages WHERE `+where, args...))
+	m, err := scanMessage(s.db.QueryRow(`SELECT `+msgCols+` FROM wame_messages WHERE `+where, args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, ErrNotFound
 	}
@@ -287,7 +290,7 @@ func (s *Store) MarkDeleted(chat, id string) error {
 }
 
 func (s *Store) update(chat, id, set string, args ...any) error {
-	_, err := s.db.Exec(`UPDATE wabot_messages SET `+set+` WHERE chat = ? AND id = ?`, append(args, chat, id)...)
+	_, err := s.db.Exec(`UPDATE wame_messages SET `+set+` WHERE chat = ? AND id = ?`, append(args, chat, id)...)
 	return err
 }
 
@@ -307,21 +310,21 @@ func (s *Store) RelinkLIDs() {
 	}
 	mapped := `replace(%s, '@lid', '') IN (SELECT lid FROM whatsmeow_lid_map)`
 	for _, col := range []string{"chat", "sender"} {
-		if _, err := s.db.Exec(`UPDATE OR IGNORE wabot_messages
+		if _, err := s.db.Exec(`UPDATE OR IGNORE wame_messages
 			SET ` + col + ` = (SELECT pn FROM whatsmeow_lid_map WHERE lid = replace(` + col + `, '@lid', '')) || '@s.whatsapp.net'
 			WHERE ` + col + ` LIKE '%@lid' AND ` + fmt.Sprintf(mapped, col)); err != nil {
 			return
 		}
 	}
 	// Rows left under @lid are copies of messages already stored under the phone number.
-	if _, err := s.db.Exec(`DELETE FROM wabot_messages WHERE chat LIKE '%@lid' AND ` + fmt.Sprintf(mapped, "chat")); err != nil {
+	if _, err := s.db.Exec(`DELETE FROM wame_messages WHERE chat LIKE '%@lid' AND ` + fmt.Sprintf(mapped, "chat")); err != nil {
 		return
 	}
-	_, _ = s.db.Exec(`INSERT INTO wabot_chat_state (chat, read_seq)
+	_, _ = s.db.Exec(`INSERT INTO wame_chat_state (chat, read_seq)
 		SELECT (SELECT pn FROM whatsmeow_lid_map WHERE lid = replace(chat, '@lid', '')) || '@s.whatsapp.net', read_seq
-		FROM wabot_chat_state WHERE chat LIKE '%@lid' AND ` + fmt.Sprintf(mapped, "chat") + `
+		FROM wame_chat_state WHERE chat LIKE '%@lid' AND ` + fmt.Sprintf(mapped, "chat") + `
 		ON CONFLICT (chat) DO UPDATE SET read_seq = MAX(read_seq, excluded.read_seq)`)
-	_, _ = s.db.Exec(`DELETE FROM wabot_chat_state WHERE chat LIKE '%@lid' AND ` + fmt.Sprintf(mapped, "chat"))
+	_, _ = s.db.Exec(`DELETE FROM wame_chat_state WHERE chat LIKE '%@lid' AND ` + fmt.Sprintf(mapped, "chat"))
 	s.mu.Lock()
 	s.lidKey = key
 	s.mu.Unlock()
@@ -333,11 +336,11 @@ func (s *Store) Chats(ctx context.Context, limit int, name func(chat, pushName s
 	s.RelinkLIDs()
 	rows, err := s.db.QueryContext(ctx, `
 SELECT chat, is_group, type, CASE WHEN deleted THEN '' ELSE text END, from_me, MAX(ts),
-	(SELECT push_name FROM wabot_messages p WHERE p.chat = m.chat AND p.from_me = 0 AND p.push_name <> '' AND p.is_group = 0
+	(SELECT push_name FROM wame_messages p WHERE p.chat = m.chat AND p.from_me = 0 AND p.push_name <> '' AND p.is_group = 0
 	 ORDER BY ts DESC LIMIT 1),
-	(SELECT COUNT(*) FROM wabot_messages u WHERE u.chat = m.chat AND u.from_me = 0 AND u.type <> 'reaction' AND u.deleted = 0
-	 AND u.seq > COALESCE((SELECT read_seq FROM wabot_chat_state r WHERE r.chat = m.chat), 0))
-FROM wabot_messages m WHERE type <> 'reaction' GROUP BY chat ORDER BY MAX(ts) DESC LIMIT ?`, limit)
+	(SELECT COUNT(*) FROM wame_messages u WHERE u.chat = m.chat AND u.from_me = 0 AND u.type <> 'reaction' AND u.deleted = 0
+	 AND u.seq > COALESCE((SELECT read_seq FROM wame_chat_state r WHERE r.chat = m.chat), 0))
+FROM wame_messages m WHERE type <> 'reaction' GROUP BY chat ORDER BY MAX(ts) DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -355,4 +358,66 @@ FROM wabot_messages m WHERE type <> 'reaction' GROUP BY chat ORDER BY MAX(ts) DE
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// legacyPrefix is the table prefix from before the rename to wame.
+const legacyPrefix = "wabot_"
+
+// renameLegacyTables moves a database from before the rename to the wame_ names, in one
+// transaction. Tables are renamed with their rows; indexes, triggers and the search index are
+// dropped, and the migrations after this one recreate them (rebuilding the search index).
+func renameLegacyTables(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `SELECT type, name FROM sqlite_master WHERE name LIKE 'wabot\_%' ESCAPE '\'`)
+	if err != nil {
+		return err
+	}
+	var tables, other [][2]string
+	for rows.Next() {
+		var typ, name string
+		if err := rows.Scan(&typ, &name); err != nil {
+			rows.Close()
+			return err
+		}
+		if typ == "table" {
+			tables = append(tables, [2]string{typ, name})
+		} else {
+			other = append(other, [2]string{typ, name})
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil || len(tables)+len(other) == 0 {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, o := range other {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DROP %s IF EXISTS "%s"`, strings.ToUpper(o[0]), o[1])); err != nil {
+			return err
+		}
+	}
+	// Dropping the search index also drops its shadow tables, so skip those below.
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS wabot_messages_fts`); err != nil {
+		return err
+	}
+	for _, t := range tables {
+		name := t[1]
+		if strings.HasPrefix(name, "wabot_messages_fts") {
+			continue
+		}
+		newName := "wame_" + strings.TrimPrefix(name, legacyPrefix)
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name = ?`, newName).Scan(&exists); err != nil {
+			return err
+		}
+		if exists > 0 {
+			return fmt.Errorf("both %s and %s exist; keep one and remove the other", name, newName)
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE "%s" RENAME TO "%s"`, name, newName)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

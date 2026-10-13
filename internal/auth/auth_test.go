@@ -125,7 +125,7 @@ func TestF2RequiredFailsClosed(t *testing.T) {
 	if a.Required() {
 		t.Fatal("fresh database: token-less mode")
 	}
-	if _, err := db.Exec(`ALTER TABLE wabot_tokens RENAME TO gone`); err != nil {
+	if _, err := db.Exec(`ALTER TABLE wame_tokens RENAME TO gone`); err != nil {
 		t.Fatal(err)
 	}
 	if !a.Required() {

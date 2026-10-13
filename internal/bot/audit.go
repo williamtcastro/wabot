@@ -7,7 +7,7 @@ import (
 	"github.com/williamtcastro/wame/internal/store"
 )
 
-// Audit records a control action in the wabot_audit table and the log. Message text is never stored.
+// Audit records a control action in the wame_audit table and the log. Message text is never stored.
 func (b *Bot) Audit(actor, action, target, detail string, err error) {
 	e := store.AuditEntry{At: time.Now(), Actor: actor, Action: action, Target: target, Detail: detail, OK: err == nil}
 	if err != nil {

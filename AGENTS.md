@@ -4,16 +4,17 @@ Guidance for AI coding agents working on this repo. Human-facing docs are in `RE
 
 ## What this is
 
-`wame` (WhatsApp manager: TUI & bot, formerly `wabot`) is a single Go binary that links to a WhatsApp
+`wame` (WhatsApp manager: TUI & bot) is a single Go binary that links to a WhatsApp
 account through [whatsmeow](https://github.com/tulir/whatsmeow) and exposes it as an HTTP API, an MCP
 server, a Bubble Tea TUI and a one-shot CLI. `wame admin` is a second Bubble Tea app: a remote admin
 panel that talks to a running server only over the HTTP API. All server state lives in one SQLite file
 (default `~/.config/wame/wame.db`); it also ships as a Docker image.
 
-**Kept from the old name, on purpose:** SQLite tables stay `wabot_*` (renaming them would need a
-migration of live databases), `WABOT_*` env vars are read as a fallback (`envOr`), a pre-rename
-`~/.config/wabot/wabot.db` is used when no `wame.db` exists (`defaultDB`), and `wabot_` tokens still
-authenticate (`auth.legacyPrefix`). Don't "finish the rename" on these.
+**Upgrades from the old name (`wabot`).** Use `wame` everywhere. The old name only appears in the
+code that reads what older installs left behind, and those readers stay: `store.renameLegacyTables`
+renames `wabot_*` tables to `wame_*` on startup (rebuilding indexes, triggers and the search index),
+`envOr` falls back to `WABOT_*` variables, `defaultDB` uses `~/.config/wabot/wabot.db` when there's no
+`wame.db`, and `wabot_` tokens still authenticate (`auth.legacyPrefix`). Don't remove these.
 
 ## Layout
 
@@ -23,13 +24,13 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 |---|---|---|
 | `main.go` | `main` | subcommands (`login`, `serve`, `tui`, `send`, `token`, `mcp`, `admin`, `version`, `logout`), flags, env vars, `usage`, the default DB path (`defaultDB`, `legacyDBNotice`), `newLogger` (slog setup), wiring of limiters/webhook and then `Bot.InitSettings` (stored runtime settings win over flags), `adminCommand` (`-profile`, flags → env → `./.env` → `admin.env`, never opens the DB), the startup guard `guardPublicAddr` (owner secret ≥ 16 chars; non-loopback needs an owner secret or any token ever created; `isLoopbackAddr`), `tokenCommand`, `mcpCommand` (stdio MCP), resolving a `-webhook-filter` chat number after login (`resolveWebhookChat`, via `SetChatIf` so a runtime filter change wins) |
 | `docs/docs.go` | `docs` | `//go:embed openapi.yaml` as `docs.OpenAPI` (embed can't reach a parent directory, so it lives next to the file) |
-| `internal/store/store.go` | `store` | `Store` (wraps `*sql.DB`, owns the LID relink cache key), `Open`, `wabot_messages` table and its migration from the old rowid schema, `Save`, `Import` (history sync, incl. edits), `Query`/`Messages`/`Get`/`GetBySeq`/`LastSeq`, `MarkEdited`/`MarkDeleted`, `RelinkLIDs`, `Chats` |
+| `internal/store/store.go` | `store` | `Store` (wraps `*sql.DB`, owns the LID relink cache key), `Open` (first `renameLegacyTables`, then each table's migration), `wame_messages` table and its migration from the old rowid schema, `Save`, `Import` (history sync, incl. edits), `Query`/`Messages`/`Get`/`GetBySeq`/`LastSeq`, `MarkEdited`/`MarkDeleted`, `RelinkLIDs`, `Chats` |
 | `internal/store/message.go` | `store` | `Message` (raw fields exported but `json:"-"`), `Media`, `MessageUpdate`, `Chat`, `ChatsChanged`, `ErrNotFound`, `Message.MediaFileName` |
 | `internal/store/filter.go` | `store` | `Filter`, `ParseFilter`, `Match` and its SQL twin `where` (shared by `/messages`, `/messages/wait`, `/events`, webhook), including the `q` text search (`textMatches` in Go mirrors the FTS query) |
-| `internal/store/state.go` | `store` | `migrateState`: `wabot_chat_state` (read positions, `MarkReadUpTo`/`MarkChatRead`/`ReadSeq`), `wabot_groups` (`SaveGroups`/`Groups`), the `wabot_messages_fts` index and its triggers, `ftsQuery`; the `ChatRead` event |
-| `internal/store/audit.go` | `store` | `wabot_audit` table, `AuditEntry`, `Store.Audit`, `Store.AuditLog` |
-| `internal/store/settings.go` | `store` | `wabot_settings` (runtime overrides: key, value, updated_by, updated_at), `Settings`, `SetSettings` (nil deletes) |
-| `internal/store/tokens.go` | `store` | `wabot_tokens` table, `Token`, `InsertToken` (`ErrTokenName` / `ErrTokenID`), `TokenByID`, `Tokens`, `RevokeToken` (cascades to tokens it created), `TouchToken`, `HasTokens` (any row ever) |
+| `internal/store/state.go` | `store` | `migrateState`: `wame_chat_state` (read positions, `MarkReadUpTo`/`MarkChatRead`/`ReadSeq`), `wame_groups` (`SaveGroups`/`Groups`), the `wame_messages_fts` index and its triggers, `ftsQuery`; the `ChatRead` event |
+| `internal/store/audit.go` | `store` | `wame_audit` table, `AuditEntry`, `Store.Audit`, `Store.AuditLog` |
+| `internal/store/settings.go` | `store` | `wame_settings` (runtime overrides: key, value, updated_by, updated_at), `Settings`, `SetSettings` (nil deletes) |
+| `internal/store/tokens.go` | `store` | `wame_tokens` table, `Token`, `InsertToken` (`ErrTokenName` / `ErrTokenID`), `TokenByID`, `Tokens`, `RevokeToken` (cascades to tokens it created), `TouchToken`, `HasTokens` (any row ever) |
 | `internal/auth/auth.go` | `auth` | `Scope` (`read`/`send`/`admin`), `Principal` (`Has`, `Restricted`), `Owner()`, `Issue` (token format, reserved names, `DefaultRate`, child expiry), `Authenticator` (`Required` fails closed, `Authenticate`), `CheckOwnerSecret` (`MinOwnerSecret` = 16) |
 | `internal/bot/bot.go` | `bot` | `Bot` type, `New`, `Start`, `PairPhone`, `Status`, pub/sub (`Subscribe`, `publish`), `InputError`/`BadInput`, `SleepUntil`, DB file permissions |
 | `internal/bot/events.go` | `bot` | whatsmeow event handler, incoming edits/deletes (`handleProtocol`), history import, auto-replies |
@@ -85,7 +86,7 @@ rejects cycles anyway). `store` knows nothing about whatsmeow's client: it deals
 
 **Where new code goes:**
 
-- SQL, schema, filters, anything that reads or writes `wabot_*` tables: `internal/store`.
+- SQL, schema, filters, anything that reads or writes `wame_*` tables: `internal/store`.
 - Anything that talks to WhatsApp, enforces limits, audits or publishes events: `internal/bot`,
   in the file that matches (a new action goes in `actions.go`, a new event in `events.go`).
 - HTTP concerns (parsing requests, status codes, headers, scopes per route): `internal/api`. Handlers
@@ -119,7 +120,9 @@ driven by feeding it `tea.WindowSizeMsg` / `tea.KeyMsg` and running the returned
 synchronously. Never point a test at a real `wame.db` or connect to WhatsApp. Use only the fake
 numbers and names below.
 
-- `internal/store`: v1 → current migration keeps rowids as `seq` and is idempotent, `Filter` SQL vs
+- `internal/store`: the `wabot_*` → `wame_*` rename (`rename_test.go` builds a real pre-rename
+  database from the current schema and checks rows, read positions, search, integrity, and that two
+  copies are refused), v1 → current migration keeps rowids as `seq` and is idempotent, `Filter` SQL vs
   `Match`, `ChatOnly`, edit/delete/import, chats and audit.
 - `internal/bot`: `Limiter` (`ReserveN` is all-or-nothing, `Stats`), `ParseRecipient`, `handleProtocol`
   ignoring forged edits and non-admin revokes, `audited`, `cappedBody` / `limitedTransport`, media
@@ -220,15 +223,15 @@ real API with fake data (run with `-v` to see the output).
   are a delete by someone who is actually a group admin (checked against the cached participant list in
   `Bot.group`). Keep that check; otherwise anyone could rewrite stored messages.
 - Classify message variants in one place (`classify` in `internal/bot/message.go`).
-- Schema changes to `wabot_messages`: new columns only need to be added to `messagesTable` (`internal/store/store.go`)
+- Schema changes to `wame_messages`: new columns only need to be added to `messagesTable` (`internal/store/store.go`)
   (`addMissingColumns` adds them to existing databases on startup, so give them a DEFAULT). Anything else
   needs an upgrade step in `migrate` that keeps the `seq` numbers. Other tables go through
   `migrateState` (`internal/store/state.go`), `migrateAudit`, `migrateTokens` or `migrateSettings`: create them idempotently and handle the
-  first-run backfill there (as `wabot_chat_state` does: existing history counts as read). Upgrades must
+  first-run backfill there (as `wame_chat_state` does: existing history counts as read). Upgrades must
   run automatically on startup; there is no separate migrate command.
-- Tables: `wabot_messages`, `wabot_messages_fts` (FTS5 over `text`, external content, kept in sync by
-  the `wabot_messages_fts_insert/_delete/_update` triggers, so write `text` only through normal
-  UPDATE/INSERT), `wabot_chat_state`, `wabot_groups`, `wabot_audit`, `wabot_tokens`, `wabot_settings`. Unread counts and search must
+- Tables: `wame_messages`, `wame_messages_fts` (FTS5 over `text`, external content, kept in sync by
+  the `wame_messages_fts_insert/_delete/_update` triggers, so write `text` only through normal
+  UPDATE/INSERT), `wame_chat_state`, `wame_groups`, `wame_audit`, `wame_tokens`, `wame_settings`. Unread counts and search must
   agree with `Filter.Match` / `textMatches`, which the live paths use.
 - The TUI is designed for desktop terminals (~100+ columns). Don't spend effort on narrow layouts.
 - **Don't block in `Update`.** Network and DB calls go in a `tea.Cmd` that returns a message. Capture the
@@ -244,7 +247,7 @@ real API with fake data (run with `-v` to see the output).
   Layout: `grid` for cards side by side (equal heights), `besides` only for a tall card like the QR;
   the header drops detail by width instead of truncating. Older servers answer 404 on newer routes:
   show "update the server" rather than an error.
-- **Runtime settings** (`/settings`) are stored in `wabot_settings` and win over flags at every start
+- **Runtime settings** (`/settings`) are stored in `wame_settings` and win over flags at every start
   until reset; `InitSettings` must run after the limiters and webhook are built. Limits change through
   `Limiter.Set` only, and `Limiter` reads its fields under its lock; auto-reply is atomic
   (`SetAutoReply` / `AutoReplyOn`), never a plain field.
@@ -284,7 +287,7 @@ real API with fake data (run with `-v` to see the output).
   (or `ExpandAllowlist`); `Resolve` / `CanonicalChat` are for unrestricted callers only. Error text for
   chats outside the list stays fixed ("this token can't access that chat") so it can't be used as an
   oracle.
-- Tokens are required forever once any row exists in `wabot_tokens`, and `Required()` fails closed. Don't
+- Tokens are required forever once any row exists in `wame_tokens`, and `Required()` fails closed. Don't
   add any path back to token-less mode. Token-less `localOnly` checks loopback `RemoteAddr`, loopback
   `Host` and same-origin; keep all three. Only `/docs` and `/openapi.yaml` are public.
 - Tokens can't mint `admin` tokens over the API; children carry `created_by`, can't outlive the parent and

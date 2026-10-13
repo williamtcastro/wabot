@@ -31,7 +31,7 @@ var (
 )
 
 const tokensTable = `
-CREATE TABLE IF NOT EXISTS wabot_tokens (
+CREATE TABLE IF NOT EXISTS wame_tokens (
 	id        TEXT PRIMARY KEY,
 	name      TEXT NOT NULL UNIQUE,
 	hash      BLOB NOT NULL,
@@ -53,14 +53,14 @@ func migrateTokens(ctx context.Context, db *sql.DB) error {
 func (s *Store) InsertToken(t Token) error {
 	scopes, _ := json.Marshal(t.Scopes)
 	chats, _ := json.Marshal(t.Chats)
-	_, err := s.db.Exec(`INSERT INTO wabot_tokens (id, name, hash, scopes, chats, rate, created, expires, created_by) VALUES (?,?,?,?,?,?,?,?,?)`,
+	_, err := s.db.Exec(`INSERT INTO wame_tokens (id, name, hash, scopes, chats, rate, created, expires, created_by) VALUES (?,?,?,?,?,?,?,?,?)`,
 		t.ID, t.Name, t.Hash, string(scopes), string(chats), t.Rate, t.Created.UnixMilli(), millisOrZero(t.Expires), t.CreatedBy)
 	switch {
 	case err == nil:
 		return nil
-	case strings.Contains(err.Error(), "wabot_tokens.name"):
+	case strings.Contains(err.Error(), "wame_tokens.name"):
 		return ErrTokenName
-	case strings.Contains(err.Error(), "wabot_tokens.id"):
+	case strings.Contains(err.Error(), "wame_tokens.id"):
 		return ErrTokenID
 	}
 	return err
@@ -84,7 +84,7 @@ func scanToken(r scanner) (Token, error) {
 }
 
 func (s *Store) TokenByID(id string) (Token, error) {
-	t, err := scanToken(s.db.QueryRow(`SELECT `+tokenCols+` FROM wabot_tokens WHERE id = ?`, id))
+	t, err := scanToken(s.db.QueryRow(`SELECT `+tokenCols+` FROM wame_tokens WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return t, ErrNotFound
 	}
@@ -92,7 +92,7 @@ func (s *Store) TokenByID(id string) (Token, error) {
 }
 
 func (s *Store) Tokens() ([]Token, error) {
-	rows, err := s.db.Query(`SELECT ` + tokenCols + ` FROM wabot_tokens ORDER BY created`)
+	rows, err := s.db.Query(`SELECT ` + tokenCols + ` FROM wame_tokens ORDER BY created`)
 	if err != nil {
 		return nil, err
 	}
@@ -112,9 +112,9 @@ func (s *Store) Tokens() ([]Token, error) {
 // and audit history remain meaningful. It reports how many tokens were revoked.
 func (s *Store) RevokeToken(name string) (int, error) {
 	res, err := s.db.Exec(`WITH RECURSIVE tree(name) AS (
-			SELECT name FROM wabot_tokens WHERE name = ?
-			UNION SELECT t.name FROM wabot_tokens t JOIN tree ON t.created_by = tree.name)
-		UPDATE wabot_tokens SET revoked = 1 WHERE revoked = 0 AND name IN (SELECT name FROM tree)`, name)
+			SELECT name FROM wame_tokens WHERE name = ?
+			UNION SELECT t.name FROM wame_tokens t JOIN tree ON t.created_by = tree.name)
+		UPDATE wame_tokens SET revoked = 1 WHERE revoked = 0 AND name IN (SELECT name FROM tree)`, name)
 	if err != nil {
 		return 0, err
 	}
@@ -123,14 +123,14 @@ func (s *Store) RevokeToken(name string) (int, error) {
 }
 
 func (s *Store) TouchToken(id string, at time.Time) {
-	_, _ = s.db.Exec(`UPDATE wabot_tokens SET last_used = ? WHERE id = ?`, at.UnixMilli(), id)
+	_, _ = s.db.Exec(`UPDATE wame_tokens SET last_used = ? WHERE id = ?`, at.UnixMilli(), id)
 }
 
 // HasTokens reports whether any token was ever created. From then on the API requires a token on every
 // request, even after all of them are revoked or expired, so it can never fall back to token-less mode.
 func (s *Store) HasTokens() (bool, error) {
 	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM wabot_tokens`).Scan(&n); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM wame_tokens`).Scan(&n); err != nil {
 		return false, err
 	}
 	return n > 0, nil

@@ -46,7 +46,7 @@ logging and audit groundwork that already exists for it.
   `/delete`, `/read`. The panel can call these from the browser with no new backend code.
 - **Live updates:** `/events` streams `message`, `update` and `status` and resumes with
   `Last-Event-ID`, so the panel can use a plain `EventSource`.
-- **Audit:** every control action is stored in `wabot_audit` and served by `GET /audit`.
+- **Audit:** every control action is stored in `wame_audit` and served by `GET /audit`.
 - **Structured logs:** `log/slog`, text or JSON, one line per HTTP request and per action.
 
 ## What's missing
@@ -54,7 +54,7 @@ logging and audit groundwork that already exists for it.
 1. **Webhook delivery log.** *Partly built:* `GET /stats` has delivery counters, queue depth and
    the last 20 failed attempts in memory, and `POST /webhook/replay` resends one of them. Still
    missing: a persistent log. Add a
-   `wabot_webhook_deliveries` table (`delivery`, `event`, `seq`, `attempt`, `status`, `error`,
+   `wame_webhook_deliveries` table (`delivery`, `event`, `seq`, `attempt`, `status`, `error`,
    `at`, `done`), written by `Webhook.send`, pruned to the last N days, served by
    `GET /admin/webhook` together with queue length (`len(w.queue)`) and capacity.
 2. **Limiter snapshot.** **Built** as `Limiter.Stats()` (use in the last minute, next free slot,
@@ -85,7 +85,7 @@ logging and audit groundwork that already exists for it.
    `maria` for a panel login, with token names and panel names sharing one namespace). Current scopes are
    `read`, `send` and `admin`; a viewer maps to `read`.
 8. **Settings persistence.** **Built:** `GET`/`PATCH /settings` for `rate`, `chat_gap`,
-   `max_wait`, `auto_reply` and `webhook_filter`, stored in `wabot_settings`, overriding flags on
+   `max_wait`, `auto_reply` and `webhook_filter`, stored in `wame_settings`, overriding flags on
    startup until reset, each change audited (`action=settings`; none of these are secrets).
 
 ## Logging today
@@ -123,7 +123,7 @@ Configured by `-log-format text|json`, `-log-file PATH` (stderr otherwise) and `
 
 whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 
-### Audit table (`wabot_audit`)
+### Audit table (`wame_audit`)
 
 | Column | |
 |---|---|
@@ -199,7 +199,7 @@ snapshot, audit filters, optional log ring buffer. (The API side of the limiter 
 in-memory webhook health exists: `GET /stats`.)
 
 **Phase 4: runtime settings.** Edit form for limiter, auto-reply and webhook filter. (The API side
-exists: `GET`/`PATCH /settings` and the `wabot_settings` table.)
+exists: `GET`/`PATCH /settings` and the `wame_settings` table.)
 
 No JavaScript build step at any phase. Server-rendered fragments for htmx can use
 `html/template`.

@@ -124,7 +124,7 @@ func TestExistingHistoryStartsRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixtures(t, s)
-	if _, err := db.Exec(`DROP TABLE wabot_chat_state`); err != nil {
+	if _, err := db.Exec(`DROP TABLE wame_chat_state`); err != nil {
 		t.Fatal(err)
 	}
 	s, err = Open(context.Background(), db)

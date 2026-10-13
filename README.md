@@ -229,7 +229,8 @@ reset. All flags and commands: [docs/CLI.md](docs/CLI.md).
 ## Upgrading from wabot
 
 wame used to be called `wabot`, and existing setups keep working:
-- a database at `~/.config/wabot/wabot.db` is still picked up;
+- a database at `~/.config/wabot/wabot.db` is still picked up, and its tables are renamed to
+  `wame_*` on the first start;
 - `WABOT_*` environment variables are still read;
 - `wabot_…` tokens still authenticate.
 

@@ -42,7 +42,7 @@ agent ── POST /drafts ──► pending ──approve──► sending ─�
 
 Two layers; the stricter one wins.
 
-**Per chat** (`wabot_draft_policy`, set by an `approve`-scope token or the TUI):
+**Per chat** (`wame_draft_policy`, set by an `approve`-scope token or the TUI):
 
 | Mode | Effect on `POST /send` from a token | Effect on `POST /drafts` |
 |---|---|---|
@@ -187,7 +187,7 @@ meanwhile).
 New tables via a `migrateDrafts` in `internal/store/drafts.go`:
 
 ```sql
-CREATE TABLE IF NOT EXISTS wabot_drafts (
+CREATE TABLE IF NOT EXISTS wame_drafts (
 	id           TEXT PRIMARY KEY,           -- "d_" + random
 	chat         TEXT NOT NULL,
 	text         TEXT NOT NULL,
@@ -206,10 +206,10 @@ CREATE TABLE IF NOT EXISTS wabot_drafts (
 	sent_seq     INTEGER NOT NULL DEFAULT 0,
 	error        TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS wabot_drafts_status ON wabot_drafts (status, created_at);
-CREATE UNIQUE INDEX IF NOT EXISTS wabot_drafts_idem ON wabot_drafts (author, idem_key) WHERE idem_key <> '';
+CREATE INDEX IF NOT EXISTS wame_drafts_status ON wame_drafts (status, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS wame_drafts_idem ON wame_drafts (author, idem_key) WHERE idem_key <> '';
 
-CREATE TABLE IF NOT EXISTS wabot_draft_policy (
+CREATE TABLE IF NOT EXISTS wame_draft_policy (
 	chat TEXT PRIMARY KEY,
 	mode TEXT NOT NULL                       -- auto|drafts|blocked
 );
@@ -220,7 +220,7 @@ CREATE TABLE IF NOT EXISTS wabot_draft_policy (
 - Draft text is stored in the DB like message text already is. Sent, rejected and expired drafts
   are pruned after 30 days.
 - `chat` goes through `PhoneJID` on insert. `RelinkLIDs` should also move `@lid` chats in both
-  tables (same pattern as `wabot_chat_state`).
+  tables (same pattern as `wame_chat_state`).
 
 ## Audit
 

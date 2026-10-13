@@ -20,7 +20,7 @@ type AuditEntry struct {
 
 func migrateAudit(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
-CREATE TABLE IF NOT EXISTS wabot_audit (
+CREATE TABLE IF NOT EXISTS wame_audit (
 	id     INTEGER PRIMARY KEY AUTOINCREMENT,
 	at     INTEGER NOT NULL,
 	actor  TEXT NOT NULL,
@@ -30,13 +30,13 @@ CREATE TABLE IF NOT EXISTS wabot_audit (
 	ok     INTEGER NOT NULL,
 	error  TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS wabot_audit_at ON wabot_audit (at);`)
+CREATE INDEX IF NOT EXISTS wame_audit_at ON wame_audit (at);`)
 	return err
 }
 
 // Audit inserts e; its ID is ignored.
 func (s *Store) Audit(e AuditEntry) error {
-	_, err := s.db.Exec(`INSERT INTO wabot_audit (at, actor, action, target, detail, ok, error) VALUES (?,?,?,?,?,?,?)`,
+	_, err := s.db.Exec(`INSERT INTO wame_audit (at, actor, action, target, detail, ok, error) VALUES (?,?,?,?,?,?,?)`,
 		e.At.UnixMilli(), e.Actor, e.Action, e.Target, e.Detail, e.OK, e.Error)
 	return err
 }
@@ -46,7 +46,7 @@ func (s *Store) AuditLog(limit int, before int64) ([]AuditEntry, error) {
 	if before <= 0 {
 		before = 1<<63 - 1
 	}
-	rows, err := s.db.Query(`SELECT id, at, actor, action, target, detail, ok, error FROM wabot_audit
+	rows, err := s.db.Query(`SELECT id, at, actor, action, target, detail, ok, error FROM wame_audit
 		WHERE id < ? ORDER BY id DESC LIMIT ?`, before, limit)
 	if err != nil {
 		return nil, err

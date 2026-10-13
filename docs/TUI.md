@@ -73,7 +73,7 @@ are imported automatically.
 
 ## Unread
 
-Each chat has a read position stored in the database (`wabot_chat_state`). The sidebar badge
+Each chat has a read position stored in the database (`wame_chat_state`). The sidebar badge
 counts incoming messages after it (reactions and deleted messages don't count). A chat becomes
 read when:
 

@@ -87,14 +87,14 @@ owner, but only for local use:
 
 Once any token has been created, tokens are required on every request, from localhost too, **for
 good**: even after every token is revoked or expired, and even if the token table can't be read.
-There's no way back to token-less mode short of deleting the rows in `wabot_tokens` by hand.
+There's no way back to token-less mode short of deleting the rows in `wame_tokens` by hand.
 
 ## Tokens and scopes
 
 ### Format and storage
 
 Tokens look like `wame_<id>_<secret>`: an 8-character id and 43 characters of random secret (256
-bits). Only a SHA-256 hash is stored, in `wabot_tokens`. The plaintext is shown **once**, when the
+bits). Only a SHA-256 hash is stored, in `wame_tokens`. The plaintext is shown **once**, when the
 token is created; it can't be recovered. The `wame_` prefix makes leaked tokens easy to scan for
 (`wame_[a-z2-7]{8}_[A-Za-z0-9_-]{43}`).
 
@@ -223,7 +223,7 @@ the `message` and `update` SSE events and the webhook:
 | `media` | omitted for non-media types. `path` is the download URL relative to the API base |
 | `edited`, `deleted` | omitted unless `true`. A deleted message keeps its `media` metadata, but the file can't be downloaded any more |
 
-Messages are stored in the `wabot_messages` table of the session database, so they survive
+Messages are stored in the `wame_messages` table of the session database, so they survive
 restarts. Messages from before the bot was linked aren't there, except for whatever WhatsApp
 sends in its one-time history sync right after a fresh login. Those imported messages also get
 new `seq` values (with old timestamps), so a cursor reader started before the import will see them.
@@ -260,7 +260,7 @@ which matches as a prefix, so `q=bom di` finds "bom dia" while you're still typi
 are ignored (`cafe` finds "café"). Punctuation is ignored. Captions and document file names are
 searched too, since they're stored as the message text. Deleted messages aren't found (their text
 is cleared), and edited messages are found by their current text. In SQL this uses an FTS5 index
-(`wabot_messages_fts`); for live `/events`, `/messages/wait` wake-ups and the webhook the same rule
+(`wame_messages_fts`); for live `/events`, `/messages/wait` wake-ups and the webhook the same rule
 is applied in Go.
 
 ```sh
@@ -609,7 +609,7 @@ curl -H "Authorization: Bearer $T" "localhost:8080/chats?limit=10"
 
 `name` is the address-book name, the group subject, `Me` for your own chat, or `~ProfileName`
 when the person isn't in your contacts. Group names and admin lists are cached in the database
-(`wabot_groups`), so they're available right away at startup, even offline; they're refreshed
+(`wame_groups`), so they're available right away at startup, even offline; they're refreshed
 in the background on connect and when older than 10 minutes. A group that was never fetched
 shows as `group <id>` until then.
 
@@ -621,7 +621,7 @@ position. The read position moves forward when:
 - you call `POST /read` (without ids, the whole chat),
 - you read the chat on your phone or another linked device (WhatsApp's "read-self" receipts).
 
-It's kept in `wabot_chat_state`, so it survives restarts. When a database is upgraded to this
+It's kept in `wame_chat_state`, so it survives restarts. When a database is upgraded to this
 version, everything already stored counts as read, and so does history imported after a fresh
 login.
 
@@ -769,7 +769,7 @@ curl -H "$H" -X PATCH localhost:8080/settings -d '{"rate": null}'     # back to 
   `webhook_filter` uses the [filter syntax](#filters) and only matters with `-webhook` (a `chat=`
   number is taken as typed; use the JID if WhatsApp knows it differently).
 - Every value is checked before any is applied, so a bad one changes nothing (400).
-- Changes apply at once and are stored in the `wabot_settings` table, so they **win over the flags
+- Changes apply at once and are stored in the `wame_settings` table, so they **win over the flags
   on the next start too**, until reset with `null`. `default` shows the flag's value.
 - Each change is audited as `settings`, with the changes in `detail`.
 

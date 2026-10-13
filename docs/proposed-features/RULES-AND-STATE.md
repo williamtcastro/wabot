@@ -143,8 +143,8 @@ or goes through an agent.
 - `GET /events?events=routed` for a token returns only messages routed to **that** token, as
   `event: routed`, `data: {"rule":"support-pt","message":{…}}`, with `id: <seq>`.
 - To make it resumable like `message` events, routing decisions are stored:
-  `wabot_routes (seq INTEGER, token TEXT, rule TEXT, PRIMARY KEY (token, seq))`, pruned after
-  7 days. Catch-up reads it joined with `wabot_messages`, so `Last-Event-ID` works.
+  `wame_routes (seq INTEGER, token TEXT, rule TEXT, PRIMARY KEY (token, seq))`, pruned after
+  7 days. Catch-up reads it joined with `wame_messages`, so `Last-Event-ID` works.
 - `GET /messages/wait?routed=true` does the same for long-pollers.
 
 ### API
@@ -178,9 +178,9 @@ are only logged (debug level, rule name and `seq`, never text).
 
 ### Where rules live
 
-- **DB:** `wabot_rules (name TEXT PRIMARY KEY, priority INTEGER, enabled INTEGER, dry_run INTEGER,
+- **DB:** `wame_rules (name TEXT PRIMARY KEY, priority INTEGER, enabled INTEGER, dry_run INTEGER,
   spec TEXT /* JSON of match, actions, stop */, version INTEGER, updated_at INTEGER, updated_by TEXT)`
-  and `wabot_rule_webhooks (name, url, secret_ref)`. Secrets are stored as env var names
+  and `wame_rule_webhooks (name, url, secret_ref)`. Secrets are stored as env var names
   (`secret_env`), not values, so a DB copy doesn't leak them.
 - **File:** `-rules PATH` / `WAME_RULES`. Loaded at startup and on `SIGHUP`; a bad file keeps the
   previous rules and logs the error. File rules win over DB rules with the same name.
@@ -225,8 +225,8 @@ curl -X PUT -H "Authorization: Bearer $T" -H 'If-Match: "3"' \
 - Writes aren't audited per call (too chatty); `DELETE` of a whole namespace (if added) would be.
   Values are never logged.
 
-Note the name clash: `wabot_chat_state` already exists (read positions). The new table is
-`wabot_kv`.
+Note the name clash: `wame_chat_state` already exists (read positions). The new table is
+`wame_kv`.
 
 ### Storage interface
 
@@ -259,7 +259,7 @@ so `writeError` already maps them to 404.
 ### SQLite backend (default)
 
 ```sql
-CREATE TABLE IF NOT EXISTS wabot_kv (
+CREATE TABLE IF NOT EXISTS wame_kv (
 	ns         TEXT NOT NULL,
 	chat       TEXT NOT NULL,
 	key        TEXT NOT NULL,
@@ -270,7 +270,7 @@ CREATE TABLE IF NOT EXISTS wabot_kv (
 	updated_at INTEGER NOT NULL,
 	PRIMARY KEY (ns, chat, key)
 );
-CREATE INDEX IF NOT EXISTS wabot_kv_expires ON wabot_kv (expires_at) WHERE expires_at > 0;
+CREATE INDEX IF NOT EXISTS wame_kv_expires ON wame_kv (expires_at) WHERE expires_at > 0;
 ```
 
 - CAS is one statement: `UPDATE … SET value=?, version=version+1 WHERE ns=? AND chat=? AND key=?
@@ -336,8 +336,8 @@ or bots outside wame that already use Redis.
 
 ## Where the code goes
 
-- `internal/store`: `mentions` and `ptt` columns; `wabot_rules`, `wabot_rule_webhooks`,
-  `wabot_routes` tables and queries (in a new `rules.go`); LID relink for `wabot_routes` and `wabot_kv`.
+- `internal/store`: `mentions` and `ptt` columns; `wame_rules`, `wame_rule_webhooks`,
+  `wame_routes` tables and queries (in a new `rules.go`); LID relink for `wame_routes` and `wame_kv`.
 - `internal/kv`: `Store` interface, `sqlite.go`, `redis.go`, shared limit checks in `bot`.
 - `internal/bot/rules.go`: `Rule`, `ruleSet`, load/validate (from DB and file), `evaluate(m)`,
   action dispatch, counters, the rule reaction budget. Hooked in `Bot.handle` next to
@@ -369,7 +369,7 @@ state backends behaving differently (one shared conformance test suite run again
 - rules: match table for every field; order and `stop`; `drop` suppresses default webhook and
   auto-reply but not storage/SSE; dry run sends nothing; bad regex / unknown token rejected;
   file reload keeps old rules on error; reaction budget drops.
-- routed stream: only the target token sees it; `Last-Event-ID` replay from `wabot_routes`.
+- routed stream: only the target token sees it; `Last-Event-ID` replay from `wame_routes`.
 - kv conformance suite (SQLite and miniredis): get/set/delete, CAS success and 412, create-only,
   TTL expiry, limits, namespaces isolated, concurrent CAS (N goroutines, exactly one wins per version).
 - api: scopes and allowlists (404), `ETag`/`If-Match`, 412 body.
@@ -380,6 +380,6 @@ state backends behaving differently (one shared conformance test suite run again
 - Should rules see edits/deletes (`update` events)?
 - Rule conditions on state (`when: {state: {ns: shared, key: handoff, equals: human}}`) to stop
   routing to a bot while a human handles the chat: phase 2, or v1 since it's the main use case?
-- With Redis configured, should routing decisions (`wabot_routes`) also go to Redis Streams, or
+- With Redis configured, should routing decisions (`wame_routes`) also go to Redis Streams, or
   stay in SQLite?
 - Do we need state that isn't per chat (per contact across chats, global)?

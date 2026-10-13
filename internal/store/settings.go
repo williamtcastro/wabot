@@ -16,7 +16,7 @@ type Setting struct {
 
 func migrateSettings(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `
-CREATE TABLE IF NOT EXISTS wabot_settings (
+CREATE TABLE IF NOT EXISTS wame_settings (
 	key        TEXT PRIMARY KEY,
 	value      TEXT NOT NULL,
 	updated_by TEXT NOT NULL,
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS wabot_settings (
 
 // Settings returns every override, by key.
 func (s *Store) Settings() (map[string]Setting, error) {
-	rows, err := s.db.Query(`SELECT key, value, updated_by, updated_at FROM wabot_settings`)
+	rows, err := s.db.Query(`SELECT key, value, updated_by, updated_at FROM wame_settings`)
 	if err != nil {
 		return nil, err
 	}
@@ -55,9 +55,9 @@ func (s *Store) SetSettings(changes map[string]*string, by string) error {
 	now := time.Now().UnixMilli()
 	for k, v := range changes {
 		if v == nil {
-			_, err = tx.Exec(`DELETE FROM wabot_settings WHERE key = ?`, k)
+			_, err = tx.Exec(`DELETE FROM wame_settings WHERE key = ?`, k)
 		} else {
-			_, err = tx.Exec(`INSERT INTO wabot_settings (key, value, updated_by, updated_at) VALUES (?,?,?,?)
+			_, err = tx.Exec(`INSERT INTO wame_settings (key, value, updated_by, updated_at) VALUES (?,?,?,?)
 				ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
 				k, *v, by, now)
 		}
