@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,10 +23,9 @@ import (
 	"github.com/williamtcastro/wame/internal/store"
 )
 
-// contactsServer is the real API with the /contacts routes of the plan (docs/proposed-features/
-// CONTACTS.md) stubbed on top of the bot's methods, so the panel is tested without the API's
-// handlers. With gone set they answer 404, as on a server older than the contact list (whose
-// GET /contacts still answers, from the address book).
+// contactsServer is the real API (api.NewHandler) on a scratch database. With gone set the
+// /contacts/ routes answer 404, as on a server older than the contact list (whose GET /contacts
+// still answers, from the address book).
 func contactsServer(t *testing.T, gone bool) (*bot.Bot, *Client) {
 	t.Helper()
 	b, err := bot.New(context.Background(), filepath.Join(t.TempDir(), "wame.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -95,7 +95,7 @@ func TestContactsTabListsAndEdits(t *testing.T) {
 	m := newTestModel(t, Options{Client: c})
 	press(m, "9")
 	view := flat(m.View())
-	for _, want := range []string{"9 Contacts", "contacts · 2 of 2", "John", "Maria", "own", "+5511999999999", "clients", "vip", "/ filter", "e edit", "x delete", "I/E import/export"} {
+	for _, want := range []string{"9 Contacts", "contacts · 2 of 2", "John", "Maria", "own", "+5511999999999", "clients", "vip", "/ filter", "e edit", "x delete", "I/E csv", "enter chat"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("contacts view lacks %q:\n%s", want, view)
 		}
@@ -387,17 +387,127 @@ func TestContactsHeaderAndFootersFit(t *testing.T) {
 			t.Fatalf("width %d: %q", width, header)
 		}
 	}
-	m := newModel(Options{Client: c, Profiles: []Profile{{Name: "prod"}}})
-	m.width, m.height = 120, 30
-	for _, set := range []func(){
-		func() { m.tab = tabContacts },
-		func() { m.tokensErr = &APIError{Code: http.StatusForbidden} },
-		func() { m.tab = tabChats },
-	} {
-		set()
-		keys := flat(m.viewKeys())
-		if !strings.HasSuffix(keys, "r refresh q quit") || strings.Contains(keys, "…") {
-			t.Fatalf("tab %v: the footer is cut at 120 columns: %q", m.tab, keys)
+	for _, width := range []int{100, 120} {
+		m := newModel(Options{Client: c, Profiles: []Profile{{Name: "prod"}}})
+		m.width, m.height = width, 30
+		for _, set := range []func(){
+			func() { m.tab = tabContacts },
+			func() { m.tokensErr = &APIError{Code: http.StatusForbidden} },
+			func() { m.tab = tabChats },
+		} {
+			set()
+			keys := flat(m.viewKeys())
+			if !strings.HasSuffix(keys, "r refresh q quit") || strings.Contains(keys, "…") || ansi.StringWidth(keys) > width {
+				t.Fatalf("tab %v: the footer is cut at %d columns: %q", m.tab, width, keys)
+			}
+			if m.tab == tabContacts && (!strings.Contains(keys, "/ filter") || width == 120 && !strings.Contains(keys, "enter chat") ||
+				m.contactsReadOnly() && width == 120 && !strings.Contains(keys, "j/k move")) {
+				t.Fatalf("the footer drops keys that fit at %d columns: %q", width, keys)
+			}
 		}
+	}
+}
+
+func TestContactsNotesWithLineBreaksKept(t *testing.T) {
+	b, c := contactsServer(t, false)
+	seedContacts(t, b)
+	notes := "a\nb"
+	if _, err := b.PatchContact(t.Context(), "api", "5511999999999", bot.ContactInput{Notes: &notes}); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestModel(t, Options{Client: c})
+	press(m, "9")
+	selectContact(t, m, maria)
+	if !strings.Contains(flat(m.View()), "a b") {
+		t.Fatalf("the card must fold the notes onto one line:\n%s", flat(m.View()))
+	}
+	press(m, "e")
+	if len(m.form) != 2 || !strings.Contains(flat(m.View()), "line breaks") {
+		t.Fatalf("notes with line breaks must not be editable in the one-line form: %d fields\n%s", len(m.form), flat(m.View()))
+	}
+	m.form[0].SetValue("Maria Silva")
+	press(m, "enter", "enter")
+	if o := ownOf(t, b, "5511999999999"); o == nil || o.Name != "Maria Silva" || o.Notes != notes {
+		t.Fatalf("after the edit: notice %q, server %+v", m.notice, o)
+	}
+}
+
+func TestContactsTabReentryReloadsTheCard(t *testing.T) {
+	b, c := contactsServer(t, false)
+	seedContacts(t, b)
+	m := newTestModel(t, Options{Client: c})
+	press(m, "9")
+	selectContact(t, m, maria)
+	notes := "call after 10"
+	if _, err := b.PatchContact(t.Context(), "other-panel", "5511999999999", bot.ContactInput{Notes: &notes}); err != nil {
+		t.Fatal(err)
+	}
+	press(m, "2", "9")
+	if view := flat(m.View()); !strings.Contains(view, "call after 10") {
+		t.Fatalf("the card is stale after coming back to the tab:\n%s", view)
+	}
+	press(m, "e")
+	if len(m.form) != 3 || m.form[2].Value() != "call after 10" {
+		t.Fatalf("the edit form starts from a stale card: %d fields", len(m.form))
+	}
+}
+
+func TestContactsTagPromptCompletesEveryTag(t *testing.T) {
+	b, c := contactsServer(t, false)
+	seedContacts(t, b)
+	m := newTestModel(t, Options{Client: c})
+	press(m, "9", "t", "c", "tab")
+	if v := m.prompt.Value(); v != "clients" {
+		t.Fatalf("first tag: %q", v)
+	}
+	press(m, " ", "v", "tab")
+	if v := m.prompt.Value(); v != "clients vip" {
+		t.Fatalf("second tag: %q", v)
+	}
+	press(m, " ")
+	if got := m.prompt.MatchedSuggestions(); slices.Contains(got, "clients vip clients") {
+		t.Fatalf("a typed tag is suggested again: %q", got)
+	}
+}
+
+func TestContactsCardDoesNotShowTheLastPersonsError(t *testing.T) {
+	b, c := contactsServer(t, false)
+	seedContacts(t, b)
+	m := newTestModel(t, Options{Client: c})
+	press(m, "9")
+	m.contactView, m.contactViewErr = bot.ContactView{Contact: bot.Contact{JID: maria}}, errors.New("maria's card failed")
+	m.contactSel = slices.IndexFunc(m.visibleContacts(), func(c bot.Contact) bool { return c.JID == john })
+	if view := flat(m.View()); strings.Contains(view, "maria's card failed") || !strings.Contains(view, "loading") {
+		t.Fatalf("John's card shows Maria's error:\n%s", view)
+	}
+}
+
+func TestContactTagsOlderAnswerDropped(t *testing.T) {
+	_, c := contactsServer(t, false)
+	m := newTestModel(t, Options{Client: c})
+	older, newer := m.contactTagsReq.start(), m.contactTagsReq.start()
+	m.Update(contactTagsMsg{seq: newer, tags: []store.TagCount{{Tag: "vip", Count: 1}}})
+	m.Update(contactTagsMsg{seq: older, err: &APIError{Code: http.StatusForbidden}})
+	if m.contactTagsErr != nil || len(m.contactTags) != 1 || m.contactsReadOnly() {
+		t.Fatalf("an older answer overwrote a newer one: %v %+v", m.contactTagsErr, m.contactTags)
+	}
+}
+
+func TestContactsFilterSearchesTheServerWhenCapped(t *testing.T) {
+	b, c := contactsServer(t, false)
+	seedContacts(t, b)
+	m := newTestModel(t, Options{Client: c})
+	press(m, "9")
+	m.contactsCapped = true
+	if !strings.Contains(flat(m.View()), "searches the server") {
+		t.Fatalf("no hint that the list is capped:\n%s", flat(m.View()))
+	}
+	press(m, "/", "j", "o", "h", "n", "enter")
+	if len(m.contacts) != 1 || m.contacts[0].JID != john || m.contactsQ != "john" || !m.contactsCapped {
+		t.Fatalf("the filter didn't go to the server: %+v", m.contacts)
+	}
+	press(m, "esc")
+	if len(m.contacts) != 2 || m.contactsQ != "" || m.contactsCapped {
+		t.Fatalf("esc must reload everyone: %+v", m.contacts)
 	}
 }

@@ -70,7 +70,10 @@ Nothing is ever written to WhatsApp or to the phone.
 - **Edit** (`e`): a form with the name, the tags (separated by spaces) and the notes. Only what you
   changed is sent (`PATCH`), and tags go as additions and removals, so another panel's edit in the
   meantime isn't undone. An empty field clears it. The notes field shows up once the card has
-  loaded; notes are drawn on one line, newlines folded.
+  loaded, and only when the notes fit on one line as stored: notes with line breaks (or tabs,
+  runs of spaces, control characters) are left out of the form, so saving it can't flatten them;
+  change those through the API or a CSV export and import. The card folds the notes onto one
+  line and wraps them to at most 3 lines.
 - **Delete** (`x`): removes your name, tags, notes, language and time zone for the person marked
   when you pressed it; the address book and WhatsApp names stay.
 - **Import** (`I`): a local CSV file with a `number` column and any of `name`, `tags`, `notes`,
@@ -80,8 +83,12 @@ Nothing is ever written to WhatsApp or to the phone.
   line stores nothing and names the line.
 - **Export** (`E`): saves your list as CSV in the import's columns to a new file (mode 0600; `~/`
   works). An existing file is never overwritten.
-- **Tags** (`t`): show only people with every tag typed (`clients vip`); `Tab` completes a known tag,
-  and the prompt lists them with their counts. An empty prompt shows everyone again.
+- **Tags** (`t`): show only people with every tag typed (`clients vip`); `Tab` completes the known tag
+  being typed (each one, not only the first), and the prompt lists them with their counts. An
+  empty prompt shows everyone again.
+- **Filter** (`/`): narrows the loaded list as you type. The tab loads the first 5000 people; when
+  there are more, the header says so and `Enter` on the filter asks the server
+  (`GET /contacts?q=`), so people past the first 5000 are found too.
 - `p` on the Chats tab jumps here with that chat's person selected, even when nothing is stored
   about them yet, so `e` names them. Groups aren't contacts.
 

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -28,10 +27,12 @@ const (
 type (
 	contactsMsg struct {
 		seq  int
+		q    string
 		list []bot.Contact
 		err  error
 	}
 	contactTagsMsg struct {
+		seq  int
 		tags []store.TagCount
 		err  error
 	}
@@ -55,10 +56,12 @@ type (
 )
 
 // contactForm is what the edit form showed when it opened, so only fields the user changed are sent.
+// notesOK means the notes field is there; notesLocked, that the notes can't be shown on one line as
+// stored, so the form leaves them alone.
 type contactForm struct {
-	jid, label        string
-	name, tags, notes string
-	notesOK           bool
+	jid, label           string
+	name, tags, notes    string
+	notesOK, notesLocked bool
 }
 
 func (m *model) loadContactsTab() tea.Cmd {
@@ -69,17 +72,27 @@ func (m *model) loadContacts() tea.Cmd {
 	if m.c == nil {
 		return nil
 	}
-	seq, tags := m.contactsReq.start(), strings.Fields(m.contactTag)
+	seq, tags, q := m.contactsReq.start(), strings.Fields(m.contactTag), ""
+	if m.contactsCapped {
+		q = strings.TrimSpace(m.contactQuery)
+	}
 	return m.call(func(ctx context.Context, c *Client) tea.Msg {
-		list, err := c.Contacts(ctx, ContactsQuery{Tags: tags, Limit: contactsLimit})
-		return contactsMsg{seq, list, err}
+		list, err := c.Contacts(ctx, ContactsQuery{Q: q, Tags: tags, Limit: contactsLimit})
+		return contactsMsg{seq, q, list, err}
 	})
 }
 
+// contactsSearch reports whether the filter has to go to the server: the list holds only the first
+// contactsLimit people, and it was loaded for another filter.
+func (m *model) contactsSearch() bool {
+	return m.contactsCapped && strings.TrimSpace(m.contactQuery) != m.contactsQ
+}
+
 func (m *model) loadContactTags() tea.Cmd {
+	seq := m.contactTagsReq.start()
 	return m.call(func(ctx context.Context, c *Client) tea.Msg {
 		tags, err := c.ContactTags(ctx)
-		return contactTagsMsg{tags, err}
+		return contactTagsMsg{seq, tags, err}
 	})
 }
 
@@ -99,16 +112,8 @@ func (m *model) loadContactView(jid string) tea.Cmd {
 func safeContact(c bot.Contact) bot.Contact {
 	c.Phone, c.Display, c.Source = safe(c.Phone), safe(c.Display), safe(c.Source)
 	c.Own, c.Book, c.Business, c.Push = safe(c.Own), safe(c.Book), safe(c.Business), safe(c.Push)
-	c.Tags = safeList(c.Tags)
+	c.Tags = termui.SafeLines(c.Tags)
 	return c
-}
-
-func safeList(list []string) []string {
-	out := make([]string, len(list))
-	for i, s := range list {
-		out[i] = safe(s)
-	}
-	return out
 }
 
 func safeView(v bot.ContactView) bot.ContactView {
@@ -116,13 +121,16 @@ func safeView(v bot.ContactView) bot.ContactView {
 	if v.Own != nil {
 		o := *v.Own
 		o.Name, o.Notes, o.Language, o.TimeZone = safe(o.Name), safe(o.Notes), safe(o.Language), safe(o.TimeZone)
-		o.CreatedBy, o.UpdatedBy, o.Tags = safe(o.CreatedBy), safe(o.UpdatedBy), safeList(o.Tags)
+		o.CreatedBy, o.UpdatedBy, o.Tags = safe(o.CreatedBy), safe(o.UpdatedBy), termui.SafeLines(o.Tags)
 		v.Own = &o
 	}
 	return v
 }
 
 func (m *model) applyContactTags(msg contactTagsMsg) {
+	if !m.contactTagsReq.done(msg.seq) {
+		return
+	}
 	m.contactTagsErr = msg.err
 	if msg.err != nil {
 		return
@@ -140,6 +148,9 @@ func (m *model) applyContacts(msg contactsMsg) tea.Cmd {
 	m.contactsErr = msg.err
 	if msg.err != nil {
 		return nil
+	}
+	if m.contactsQ = msg.q; msg.q == "" {
+		m.contactsCapped = len(msg.list) >= contactsLimit
 	}
 	selected, _ := m.selectedContact()
 	for i := range msg.list {
@@ -177,10 +188,13 @@ func (m *model) applyContactView(msg contactViewMsg) {
 	if c, ok := m.selectedContact(); !ok || c.JID != msg.jid {
 		return
 	}
-	m.contactViewErr = msg.err
+	m.contactViewErr, m.contactNotes = msg.err, ""
 	if msg.err != nil {
 		m.contactView = bot.ContactView{Contact: bot.Contact{JID: msg.jid}}
 		return
+	}
+	if msg.v.Own != nil {
+		m.contactNotes = msg.v.Own.Notes
 	}
 	m.contactView = safeView(msg.v)
 	m.contactView.JID = msg.jid
@@ -258,17 +272,15 @@ func (m *model) contactsKey(k string) tea.Cmd {
 			return m.loadContacts()
 		}
 		m.listFilterKey(k, "")
+		if m.contactsSearch() {
+			return m.loadContacts()
+		}
 		return m.contactSelected()
 	case "t":
 		m.startPrompt(modeContactTag, "tags that must all be set, e.g. clients vip; empty shows everyone")
 		m.prompt.SetValue(m.contactTag)
 		m.prompt.CursorEnd()
-		tags := make([]string, len(m.contactTags))
-		for i, t := range m.contactTags {
-			tags[i] = t.Tag
-		}
-		m.prompt.ShowSuggestions = true
-		m.prompt.SetSuggestions(tags)
+		m.suggestTags()
 	case "e":
 		if !ok {
 			m.setNotice("no contact marked", true)
@@ -307,7 +319,7 @@ func (m *model) jumpToContact(jid string) tea.Cmd {
 	switch {
 	case jid == "":
 		return nil
-	case !strings.HasSuffix(jid, "@s.whatsapp.net") && !strings.HasSuffix(jid, "@lid"):
+	case !termui.IsPersonChat(jid):
 		m.setNotice("contacts are people, not groups", true)
 		return nil
 	}
@@ -337,18 +349,38 @@ func (m *model) contactTagKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.prompt, cmd = m.prompt.Update(k)
+	m.suggestTags()
 	return m, cmd
+}
+
+// suggestTags completes the tag being typed: each suggestion is the prompt up to its last space
+// plus a known tag not typed yet, since the input only completes a whole value.
+func (m *model) suggestTags() {
+	v := m.prompt.Value()
+	head := v[:strings.LastIndex(v, " ")+1]
+	typed := strings.Fields(strings.ToLower(head))
+	var list []string
+	for _, t := range m.contactTags {
+		if !slices.Contains(typed, t.Tag) {
+			list = append(list, head+t.Tag)
+		}
+	}
+	m.prompt.ShowSuggestions = true
+	m.prompt.SetSuggestions(list)
 }
 
 func (m *model) startContactForm(c bot.Contact) {
 	f := contactForm{jid: c.JID, label: contactLabel(c), name: c.Own, tags: strings.Join(c.Tags, " ")}
 	if v := m.contactView; v.JID == c.JID && m.contactViewErr == nil {
 		if v.Own != nil {
-			f.name, f.tags, f.notes = v.Own.Name, strings.Join(v.Own.Tags, " "), v.Own.Notes
+			f.name, f.tags, f.notes = v.Own.Name, strings.Join(v.Own.Tags, " "), m.contactNotes
 		}
 		f.notesOK = true
+		if safe(f.notes) != f.notes {
+			f.notesOK, f.notesLocked, f.notes = false, true, ""
+		}
 	}
-	f.name, f.notes = strings.TrimSpace(f.name), strings.TrimSpace(f.notes)
+	f.name = strings.TrimSpace(f.name)
 	values := []string{f.name, f.tags}
 	limits := []int{bot.MaxContactName, store.MaxContactTags * (bot.MaxContactTag + 1)}
 	if f.notesOK {
@@ -455,7 +487,13 @@ func (m *model) checkImport(path string) tea.Cmd {
 }
 
 func readImport(path string) ([]byte, error) {
-	f, err := os.Open(expandHome(path))
+	path = termui.ExpandHome(path)
+	if fi, err := os.Stat(path); err != nil {
+		return nil, err
+	} else if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s isn't a regular file", path)
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -505,35 +543,15 @@ func (m *model) exportContacts(path string) tea.Cmd {
 		if err != nil {
 			return noticeMsg{"not exported: " + contactsErrText(err), true}
 		}
-		if err := writeNew(expandHome(path), data); err != nil {
+		err = termui.WriteNew(termui.ExpandHome(path), data)
+		if errors.Is(err, os.ErrExist) {
+			return noticeMsg{"not exported: " + path + " already exists: pick a new name", true}
+		}
+		if err != nil {
 			return noticeMsg{"not exported: " + err.Error(), true}
 		}
 		return noticeMsg{"exported your contacts to " + path, false}
 	})
-}
-
-func writeNew(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		return fmt.Errorf("%s already exists: pick a new name", path)
-	}
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(data)
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	return err
-}
-
-func expandHome(path string) string {
-	if rest, ok := strings.CutPrefix(path, "~/"); ok {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, rest)
-		}
-	}
-	return path
 }
 
 func (m *model) applyContactDone(msg contactDoneMsg) tea.Cmd {
@@ -550,8 +568,13 @@ func (m *model) applyContactDone(msg contactDoneMsg) tea.Cmd {
 	default:
 		m.setNotice(msg.notice, false)
 	}
-	m.contactView, m.contactViewErr = bot.ContactView{}, nil
+	m.resetContactView()
 	return tea.Batch(m.loadContactsTab(), m.loadAudit(false))
+}
+
+// resetContactView drops the card, so the next one shown (and the edit form) is loaded fresh.
+func (m *model) resetContactView() {
+	m.contactView, m.contactViewErr, m.contactNotes = bot.ContactView{}, nil, ""
 }
 
 func (m *model) viewContacts() string {
@@ -563,8 +586,8 @@ func (m *model) viewContacts() string {
 	}
 	vis := m.visibleContacts()
 	head := fmt.Sprintf("contacts · %d of %d", len(vis), len(m.contacts))
-	if len(m.contacts) >= contactsLimit {
-		head += fmt.Sprintf(" (the first %d)", contactsLimit)
+	if m.contactsCapped {
+		head += fmt.Sprintf(" (the first %d; a / filter searches the server on enter)", contactsLimit)
 	}
 	if m.contactTag != "" {
 		head += fmt.Sprintf(" · tagged %s (esc clears)", safe(m.contactTag))
@@ -606,7 +629,7 @@ func (m *model) contactDetail() string {
 	v := m.contactView
 	var rows [][2]string
 	switch {
-	case v.JID != c.JID && m.contactViewErr == nil:
+	case v.JID != c.JID:
 		rows = [][2]string{{"Number", cmp.Or(c.Phone, displayJID(safe(c.JID)))}, {"", styleDim.Render("loading…")}}
 	case isNotFound(m.contactViewErr):
 		rows = [][2]string{{"", styleWarn.Render("This server doesn't have GET /contacts/{number} yet: update wame on it.")}}
@@ -639,6 +662,9 @@ func (m *model) contactDetail() string {
 
 // clipLines wraps s to w columns and keeps the first n lines.
 func clipLines(s string, w, n int) string {
+	if s == "" {
+		return ""
+	}
 	lines := strings.Split(lipgloss.NewStyle().Width(max(w, 10)).Render(s), "\n")
 	if len(lines) > n {
 		lines = append(lines[:n-1], fit(lines[n-1], max(w-1, 1))+"…")
@@ -658,7 +684,10 @@ func (m *model) viewContactForm() string {
 		lines = append(lines, marker+label+" "+m.form[i].View())
 	}
 	lines = append(lines, "", styleDim.Render("Empty clears a field. Tags: separated by spaces, like clients vip."))
-	if !f.notesOK {
+	switch {
+	case f.notesLocked:
+		lines = append(lines, styleDim.Render("Notes aren't shown: they have line breaks or characters the form can't keep. Edit them through the API or a CSV export and import."))
+	case !f.notesOK:
 		lines = append(lines, styleDim.Render("Notes aren't shown: the card didn't load, or this token can't read them."))
 	}
 	return lipgloss.NewStyle().Width(min(m.width-12, 84)).Render(strings.Join(lines, "\n"))

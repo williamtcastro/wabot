@@ -12,6 +12,7 @@ import (
 
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/store"
+	"github.com/williamtcastro/wame/internal/termui"
 )
 
 const tuiHelp = `Moving around
@@ -162,7 +163,7 @@ func (m *model) command(line string) tea.Cmd {
 		if m.active == "" {
 			return m.setNotice("no chat open", true)
 		}
-		chat, path := m.active, expandHome(path)
+		chat, path := m.active, termui.ExpandHome(path)
 		return m.do(func(ctx context.Context) (string, error) {
 			data, err := os.ReadFile(path)
 			if err != nil {
@@ -238,21 +239,13 @@ func contactInput(cmd, rest string) (bot.ContactInput, error) {
 // applyContact shows the new name and tags of the open chat; the chat list follows on reload.
 func (m *model) applyContact(msg contactMsg) tea.Cmd {
 	if msg.chat == m.active {
-		m.activeName, m.activeTags = safeLine(msg.v.Display), safeTags(msg.v.Tags)
+		m.activeName, m.activeTags = safeLine(msg.v.Display), termui.SafeLines(msg.v.Tags)
 	}
 	notice := "no tags"
 	if len(msg.v.Tags) > 0 {
 		notice = "tags: " + strings.Join(msg.v.Tags, " ")
 	}
 	return tea.Batch(m.setNotice(msg.v.Display+" · "+notice, false), m.chatsChanged())
-}
-
-func safeTags(tags []string) []string {
-	out := make([]string, len(tags))
-	for i, t := range tags {
-		out[i] = safeLine(t)
-	}
-	return out
 }
 
 func (m *model) openByName(q string) tea.Cmd {
@@ -332,18 +325,14 @@ func (m *model) save(ctx context.Context, target store.Message) (string, error) 
 		if i > 0 {
 			path = filepath.Join(dir, fmt.Sprintf("%s (%d)%s", strings.TrimSuffix(name, ext), i, ext))
 		}
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if os.IsExist(err) {
+		err := termui.WriteNew(path, data)
+		if errors.Is(err, os.ErrExist) {
 			continue
 		}
 		if err != nil {
 			return "", err
 		}
-		_, err = f.Write(data)
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		return "saved " + path, err
+		return "saved " + path, nil
 	}
 	return "", fmt.Errorf("%s: too many files with that name in %s", name, dir)
 }

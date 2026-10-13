@@ -3,6 +3,7 @@ package admin
 import (
 	"cmp"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -290,6 +291,7 @@ func (m *model) viewNotice() string {
 
 func (m *model) viewKeys() string {
 	var keys [][2]string
+	var optional []string // keys dropped, in order, when the line is too wide
 	switch m.mode {
 	case modeServers:
 		keys = [][2]string{{"j/k", "move"}, {"enter", "connect"}, {"esc", "cancel"}}
@@ -311,6 +313,8 @@ func (m *model) viewKeys() string {
 		modeConfirmDeleteContact, modeConfirmImport:
 		keys = [][2]string{{"y", "confirm"}, {"any key", "cancel"}}
 	default:
+		tabsKey := fmt.Sprintf("1-%d", len(tabNames))
+		optional = []string{tabsKey}
 		switch m.tab {
 		case tabStatus:
 			if m.status.LoggedIn {
@@ -348,22 +352,34 @@ func (m *model) viewKeys() string {
 			}
 			keys = [][2]string{{"j/k", "move"}, {"f", "level"}, {"/", "filter"}, {"F", follow}}
 		case tabContacts:
-			keys = [][2]string{{"/", "filter"}, {"t", "tag"}, {"e", "edit"}, {"x", "delete"}, {"I/E", "import/export"}}
+			keys = [][2]string{{"j/k", "move"}, {"/", "filter"}, {"t", "tag"}, {"e", "edit"}, {"x", "delete"}, {"I/E", "csv"}, {"enter", "chat"}}
 			if m.contactsReadOnly() {
 				keys = [][2]string{{"j/k", "move"}, {"/", "filter"}, {"t", "tag"}, {"enter", "chat"}}
 			}
+			optional = []string{"j/k", tabsKey, "enter"}
 		}
-		keys = append(keys, [2]string{fmt.Sprintf("1-%d", len(tabNames)), "tabs"})
+		keys = append(keys, [2]string{tabsKey, "tabs"})
 		if len(m.opts.Profiles) > 0 {
 			keys = append(keys, [2]string{"S", "servers"})
 		}
 		keys = append(keys, [2]string{"r", "refresh"}, [2]string{"q", "quit"})
 	}
-	parts := make([]string, len(keys))
-	for i, k := range keys {
-		parts[i] = styleKey.Render(k[0]) + " " + styleDim.Render(k[1])
+	render := func() string {
+		parts := make([]string, len(keys))
+		for i, k := range keys {
+			parts[i] = styleKey.Render(k[0]) + " " + styleDim.Render(k[1])
+		}
+		return " " + strings.Join(parts, "   ")
 	}
-	return ansi.Truncate(" "+strings.Join(parts, "   "), m.width, "…")
+	line := render()
+	for _, drop := range optional {
+		if ansi.StringWidth(line) <= m.width {
+			break
+		}
+		keys = slices.DeleteFunc(keys, func(k [2]string) bool { return k[0] == drop })
+		line = render()
+	}
+	return ansi.Truncate(line, m.width, "…")
 }
 
 // card is a bordered box of total width w with a title.

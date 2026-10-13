@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/williamtcastro/wame/internal/bot"
@@ -557,5 +559,65 @@ func TestNameAndTagCommands(t *testing.T) {
 	command("/name Family")
 	if !m.noticeErr || !strings.Contains(m.notice, "not groups") {
 		t.Fatalf("/name on a group: %q", m.notice)
+	}
+}
+
+func TestNameCompletionOnlyForNamedPeople(t *testing.T) {
+	group, lid := "120363000000000000@g.us", "123456789012345@lid"
+	msgs := append(chatMessages(),
+		store.Message{ID: "G1", Chat: group, Sender: ana, IsGroup: true, Type: "text", Text: "oi", Timestamp: time.Now()},
+		store.Message{ID: "L1", Chat: lid, Sender: lid, Type: "text", Text: "oi", Timestamp: time.Now()})
+	m := newTestModel(t, msgs...)
+	name := "Maria"
+	if _, err := m.bot.PatchContact(t.Context(), "api", maria, bot.ContactInput{Name: &name}); err != nil {
+		t.Fatal(err)
+	}
+	run(m, m.loadChats())
+	for chat, want := range map[string]int{group: 0, lid: 0, maria: 1} {
+		run(m, m.open(chat))
+		m.input.SetValue("")
+		typeText(m, "/name ")
+		if got := m.input.MatchedSuggestions(); len(got) != want {
+			t.Errorf("%s (%q): /name suggestions %q", chat, m.activeName, got)
+		}
+	}
+}
+
+func TestOpenSurfacesContactErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wame.db")
+	b, err := bot.New(context.Background(), path, waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range chatMessages() {
+		if _, _, err := b.Store.Save(x); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`DROP TABLE wame_contacts`); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(b, make(chan any))
+	m.Update(tea.WindowSizeMsg{Width: 110, Height: 24})
+	run(m, m.open(maria))
+	if m.active != maria || !m.noticeErr || !strings.HasPrefix(m.notice, "contact: ") {
+		t.Fatalf("a failed contact lookup must show: active %q, notice %q", m.active, m.notice)
+	}
+}
+
+func TestOpeningTheSelfChatShowsMe(t *testing.T) {
+	m := newTestModel(t, chatMessages()...)
+	self, _ := types.ParseJID("5511999999999:1@s.whatsapp.net")
+	m.bot.Client.Store.ID = &self
+	t.Cleanup(func() { m.bot.Client.Store.ID = nil })
+	m.chats = nil // the title must come from the contact lookup, not the chat list
+	run(m, m.open(maria))
+	if m.activeName != "Me" {
+		t.Fatalf("own chat title = %q, want Me", m.activeName)
 	}
 }

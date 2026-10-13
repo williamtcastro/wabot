@@ -190,7 +190,8 @@ While the input starts with `/`:
   - `/to `: names of your chats and address-book contacts, the number for chats without a
     contact name, and group JIDs.
   - `/send `: numbers and group JIDs of your chats.
-  - `/name `: the open chat's current name, to edit it (not when it's only a push name or a number).
+  - `/name `: the open chat's current name, to edit it (only for a person, and not when it's only a
+    push name, a number or a bare JID).
   - `/file `: files and folders on disk, relative to the current directory or starting with
     `~/`. Hidden files only show up once you type a `.`; names containing spaces are skipped
     (`/file` can't take them anyway).

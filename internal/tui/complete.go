@@ -11,6 +11,7 @@ import (
 
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/store"
+	"github.com/williamtcastro/wame/internal/termui"
 )
 
 // suggest refreshes the input's completions for the command being typed and resizes the layout
@@ -54,7 +55,7 @@ func (m *model) suggest() tea.Cmd {
 				return contactNamesMsg(names)
 			}
 		}
-	case cmd == "/name" && m.active != "" && !strings.HasPrefix(m.activeName, "~") && !strings.HasPrefix(m.activeName, "+"):
+	case cmd == "/name" && termui.IsPersonChat(m.active) && ownableName(m.activeName):
 		list = []string{"/name " + m.activeName}
 	case cmd == "/send":
 		for _, c := range m.chats {
@@ -96,9 +97,14 @@ func chatTarget(c store.Chat) string {
 	return c.Name
 }
 
+// ownableName reports whether a chat's name is worth offering to /name: not a push name, a number or a bare JID.
+func ownableName(name string) bool {
+	return name != "" && !strings.HasPrefix(name, "~") && !strings.HasPrefix(name, "+") && !strings.Contains(name, "@")
+}
+
 // readDirNames lists a directory for /file completion (directories end in "/"); it runs off the UI loop.
 func readDirNames(dir string) []string {
-	entries, _ := os.ReadDir(cmp.Or(expandHome(dir), "."))
+	entries, _ := os.ReadDir(cmp.Or(termui.ExpandHome(dir), "."))
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
@@ -123,13 +129,4 @@ func pathSuggestions(typed string, names []string) []string {
 		}
 	}
 	return out
-}
-
-func expandHome(path string) string {
-	if rest, ok := strings.CutPrefix(path, "~/"); ok {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, rest)
-		}
-	}
-	return path
 }

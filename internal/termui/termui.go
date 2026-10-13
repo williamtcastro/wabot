@@ -1,10 +1,11 @@
 // Package termui holds what the local TUI and the admin panel share: sanitizing untrusted text,
-// the colour palette, list navigation, debouncing and the clipboard.
+// the colour palette, list navigation, debouncing, the clipboard and local files.
 package termui
 
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -43,6 +44,20 @@ func Safe(s string) string {
 // SafeLine is Safe for single-line fields: runs of whitespace, newlines included, become one space.
 func SafeLine(s string) string {
 	return strings.Join(strings.Fields(Safe(s)), " ")
+}
+
+// SafeLines is SafeLine for each string of a list.
+func SafeLines(list []string) []string {
+	out := make([]string, len(list))
+	for i, s := range list {
+		out[i] = SafeLine(s)
+	}
+	return out
+}
+
+// IsPersonChat reports whether a JID is a person (a phone number or a LID), not a group or a list.
+func IsPersonChat(jid string) bool {
+	return strings.HasSuffix(jid, "@s.whatsapp.net") || strings.HasSuffix(jid, "@lid")
 }
 
 // UserOf is the user part of a JID, without the device or agent suffix.
@@ -107,4 +122,31 @@ func CopyToClipboard(text string) error {
 	}
 	termenv.NewOutput(os.Stdout).Copy(text)
 	return nil
+}
+
+// ExpandHome turns a leading "~/" into the home directory.
+func ExpandHome(path string) string {
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, rest)
+		}
+	}
+	return path
+}
+
+// WriteNew writes data to a file that must not exist yet (mode 0600). An existing file is an error
+// matching os.ErrExist; a failed write removes the partial file.
+func WriteNew(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(path)
+	}
+	return err
 }

@@ -205,6 +205,10 @@ type model struct {
 	contactTag          string
 	contactTags         []store.TagCount
 	contactTagsErr      error
+	contactTagsReq      inflight
+	contactsCapped      bool
+	contactsQ           string
+	contactNotes        string
 	contactView         bot.ContactView
 	contactViewReq      inflight
 	contactViewErr      error
@@ -295,7 +299,7 @@ func (m *model) loadAll() tea.Cmd {
 	}
 	if m.tab == tabContacts {
 		cmds = append(cmds, m.loadContactsTab())
-		m.contactView, m.contactViewErr = bot.ContactView{}, nil
+		m.resetContactView()
 	}
 	return tea.Batch(cmds...)
 }
@@ -807,6 +811,7 @@ func (m *model) setTab(t tab) tea.Cmd {
 	case tabLogs:
 		return tea.Batch(m.refreshLogs(), m.followLogs())
 	case tabContacts:
+		m.resetContactView()
 		return m.loadContactsTab()
 	}
 	return nil
@@ -952,6 +957,9 @@ func (m *model) filterKey(k tea.KeyMsg) tea.Cmd {
 	}
 	m.clampFiltered()
 	if m.tab == tabContacts {
+		if m.mode == modeNormal && m.contactsSearch() {
+			return tea.Batch(cmd, m.loadContacts())
+		}
 		return tea.Batch(cmd, m.contactSelected())
 	}
 	return cmd

@@ -52,11 +52,11 @@ type (
 	clearNoticeMsg int
 	panelMsg       struct{ title, body string }
 	openedMsg      struct {
-		seq           int
-		jid, name     string
-		tags          []string
-		msgs          []store.Message
-		readSeq, jump int64
+		seq               int
+		jid, name, notice string
+		tags              []string
+		msgs              []store.Message
+		readSeq, jump     int64
 	}
 	searchMsg struct {
 		query   string
@@ -202,12 +202,15 @@ func (m *model) load(seq int, jid string, jump int64) tea.Cmd {
 		}
 		slices.Reverse(msgs)
 		ctx := context.Background()
-		var tags []string
-		if v, err := m.bot.ContactOf(ctx, jid); err == nil {
-			tags = v.Tags
+		opened := openedMsg{seq: seq, jid: jid, name: jid, msgs: msgs, readSeq: m.bot.Store.ReadSeq(jid), jump: jump}
+		if !termui.IsPersonChat(jid) {
+			opened.name = m.bot.ChatName(ctx, jid, "")
+		} else if v, err := m.bot.ContactOf(ctx, jid); err != nil {
+			opened.notice = "contact: " + err.Error()
+		} else {
+			opened.name, opened.tags = v.Display, v.Tags
 		}
-		return openedMsg{seq: seq, jid: jid, name: m.bot.ChatName(ctx, jid, ""), tags: tags, msgs: msgs,
-			readSeq: m.bot.Store.ReadSeq(jid), jump: jump}
+		return opened
 	}
 }
 
@@ -340,7 +343,7 @@ func (m *model) applyOpened(msg openedMsg) tea.Cmd {
 	}
 	m.replyTo, m.editing, m.panelTitle = nil, nil, ""
 	m.active, m.activeName, m.msgs, m.sel = msg.jid, safeLine(msg.name), safeAll(msg.msgs), -1
-	m.activeTags = safeTags(msg.tags)
+	m.activeTags = termui.SafeLines(msg.tags)
 	if i := chatIndex(m.chats, msg.jid); i >= 0 {
 		m.activeName = m.chats[i].Name
 	}
@@ -365,6 +368,9 @@ func (m *model) applyOpened(msg openedMsg) tea.Cmd {
 			m.input.Blur()
 			m.render(false)
 		}
+	}
+	if msg.notice != "" {
+		return tea.Batch(m.markRead(msg.msgs), m.setNotice(msg.notice, true))
 	}
 	return m.markRead(msg.msgs)
 }

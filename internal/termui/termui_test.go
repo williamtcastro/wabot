@@ -68,3 +68,17 @@ func TestDebounce(t *testing.T) {
 		t.Fatal("after Done a trigger schedules again")
 	}
 }
+
+func TestSafeLinesAndIsPersonChat(t *testing.T) {
+	if got := SafeLines([]string{"vip\x1b[2J", " a\nb "}); len(got) != 2 || got[0] != "vip" || got[1] != "a b" {
+		t.Errorf("SafeLines = %q", got)
+	}
+	for jid, want := range map[string]bool{
+		"5511999999999@s.whatsapp.net": true, "123456789@lid": true,
+		"120363000000000000@g.us": false, "status@broadcast": false, "5511999999999": false,
+	} {
+		if IsPersonChat(jid) != want {
+			t.Errorf("IsPersonChat(%q) != %v", jid, want)
+		}
+	}
+}
