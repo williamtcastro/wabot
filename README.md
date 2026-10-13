@@ -25,8 +25,8 @@ It's one Go binary and one SQLite file, with no cgo and no external services. Bu
 | 🔌 **Script it over HTTP** | Send texts and files, reply, react, edit, delete and mark as read. Query history with filters and full-text search, long-poll or stream new messages, receive signed webhooks. Interactive docs at `/docs` |
 | 🤖 **Hand it to an AI agent** | A built-in MCP server (HTTP at `/mcp` or `wame mcp` on stdio) for Claude Code, Claude Desktop and other MCP clients. Message text comes back marked as untrusted |
 | 🔐 **Stay in control** | One token per agent or bot, with `read` / `send` / `admin` scopes, a chat allowlist, its own send rate, expiry and instant revocation. Every action is audited |
-| 🛰️ **Run it on a server** | A Docker image, and `wame admin`: a live terminal panel for a remote server with QR login, chats, token rotation and usage, the audit log, limiter and webhook health, the send queue, and settings you can change without a restart |
-| 📬 **Queue bulk sends** | `POST /queue` takes up to 1000 messages at once and a worker sends them at a safe pace, with random gaps, scheduled times, retries and back-off. The queue survives restarts and can be paused or canceled by batch |
+| 🛰️ **Run it on a server** | A Docker image, and `wame admin`: a live terminal panel for a remote server with QR login, chats, token rotation and usage, the audit log, limiter and webhook health, the send queue, the server's logs, and settings you can change without a restart. Gotify alerts, Prometheus metrics at `/metrics`, and `wame backup` for a safe copy of the database while it runs |
+| 📬 **Queue bulk sends** | `POST /queue` takes up to 1000 messages at once and a worker sends them at a safe pace, with random gaps, quiet hours, scheduled times, retries and back-off, and tracks when each one is delivered and read. The queue survives restarts and can be paused or canceled by batch |
 | 🐢 **Avoid bans** | Sends are spaced out by default: 20 per minute and 1 s between messages to the same chat. Number lookups and auto-replies have their own caps |
 
 > [!WARNING]
@@ -158,7 +158,7 @@ wame admin -server https://wame.example.com
 
 A terminal panel, updated live: connection status, a QR to link the server's WhatsApp from afar
 (or a pairing code), chats with search and sending, tokens (create, rotate, revoke), the audit log,
-limiter and webhook health, runtime settings and the send queue, across several saved servers. It uses only the HTTP API and
+limiter and webhook health, runtime settings, the send queue and the server's recent logs, across several saved servers. It uses only the HTTP API and
 refuses plain `http://` beyond localhost, so use HTTPS or an SSH tunnel. See [docs/ADMIN.md](docs/ADMIN.md).
 
 ## Bots and webhooks
@@ -188,6 +188,10 @@ wame send 120363012345678901@g.us "hello group"
 Only one process can use a session at a time. While `serve` or `tui` is running, send through the
 HTTP API instead.
 
+```sh
+wame backup -keep 7 ~/wame-backups/      # a consistent copy, even while the server runs
+```
+
 **Recipients** can be a phone number in any format with the country code (`5511999999999`,
 `+55 (11) 99999-9999`) or a JID (`…@s.whatsapp.net`, a group `…@g.us`, a `…@lid` user). Numbers
 are checked with WhatsApp first, which also handles Brazil's optional 9th digit.
@@ -207,6 +211,8 @@ The most used global flags:
 | `-online` | | `false` | appear online (off keeps notifications on your phone) |
 | `-autoreply` | | `true` | answer `!ping` / `!time` / `!help` |
 | `-queue-jitter` | `WAME_QUEUE_JITTER` | `2s` | random extra wait between [queued](docs/QUEUE.md) sends |
+| `-queue-quiet-hours` / `-queue-timezone` | `WAME_QUEUE_QUIET_HOURS` / `WAME_QUEUE_TIMEZONE` | off / `Local` | daily window when the queue sends nothing, e.g. `21:00-08:00`, and its time zone |
+| `-alert-gotify` / `-alert-gotify-token` / `-alert-delay` | `WAME_ALERT_GOTIFY*` / `WAME_ALERT_DELAY` | / / `2m` | push alerts to Gotify when WhatsApp disconnects or logs out, or the queue or webhook is in trouble |
 | `-log-format` / `-log-file` / `-debug` | `WAME_LOG_*` | `text` / stderr | logging |
 
 `-rate`, `-chat-gap`, `-max-wait`, `-autoreply`, `-webhook-filter` and `-queue-jitter` (plus pausing
