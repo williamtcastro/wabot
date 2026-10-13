@@ -8,26 +8,37 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mdp/qrterminal/v3"
+
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 var (
 	colAccent = lipgloss.Color("42")
+	colText   = lipgloss.Color("252")
 	colMuted  = lipgloss.Color("244")
 	colFaint  = lipgloss.Color("238")
 	colErr    = lipgloss.Color("203")
 	colWarn   = lipgloss.Color("214")
+	colInfo   = lipgloss.Color("39")
+	colPurple = lipgloss.Color("141")
 	colSel    = lipgloss.Color("236")
 
 	styleDim    = lipgloss.NewStyle().Foreground(colMuted)
 	styleFaint  = lipgloss.NewStyle().Foreground(colFaint)
 	styleErr    = lipgloss.NewStyle().Foreground(colErr)
 	styleWarn   = lipgloss.NewStyle().Foreground(colWarn)
-	styleBold   = lipgloss.NewStyle().Bold(true)
+	styleBold   = lipgloss.NewStyle().Bold(true).Foreground(colText)
 	styleAccent = lipgloss.NewStyle().Foreground(colAccent)
-	styleKey    = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
+	styleKey    = lipgloss.NewStyle().Foreground(colText).Background(colSel).Padding(0, 1)
+	styleLogo   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(colAccent).Padding(0, 1)
 	styleTab    = lipgloss.NewStyle().Padding(0, 1).Foreground(colMuted)
-	styleTabOn  = lipgloss.NewStyle().Padding(0, 1).Bold(true).Foreground(lipgloss.Color("0")).Background(colAccent)
-	styleBox    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colAccent).Padding(1, 2)
+	styleTabOn  = lipgloss.NewStyle().Padding(0, 1).Bold(true).Foreground(colText).Background(colSel)
+	styleCard   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colFaint).Padding(0, 1)
+	styleModal  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colAccent).Padding(1, 3)
+	styleDanger = styleModal.BorderForeground(colErr)
+	styleHead   = lipgloss.NewStyle().Foreground(colMuted).Bold(true)
+
+	scopeColors = map[string]lipgloss.Color{"read": colInfo, "send": colWarn, "admin": colErr}
 )
 
 func (m *model) bodyHeight() int { return max(m.height-5, 3) }
@@ -39,9 +50,15 @@ func (m *model) View() string {
 	var body string
 	switch {
 	case m.mode == modeCreate:
-		body = m.viewForm()
+		body = m.modal(styleModal, m.viewForm())
 	case m.mode == modeShowToken:
-		body = m.viewCreated()
+		body = m.modal(styleModal, m.viewCreated())
+	case m.mode == modePair:
+		body = m.modal(styleModal, m.viewPair())
+	case m.mode == modeConfirmLogout:
+		body = m.modal(styleDanger, m.viewConfirmLogout())
+	case m.mode == modeConfirmRevoke:
+		body = m.modal(styleDanger, m.viewConfirmRevoke())
 	case m.tab == tabStatus:
 		body = m.viewStatus()
 	case m.tab == tabTokens:
@@ -60,57 +77,77 @@ func (m *model) View() string {
 	for i, l := range lines {
 		lines[i] = ansi.Truncate(l, m.width, "…")
 	}
-	return strings.Join([]string{m.viewHeader(), m.viewTabs(), "", strings.Join(lines, "\n"), m.viewNotice(), m.viewKeys()}, "\n")
+	return strings.Join([]string{m.viewHeader(), styleFaint.Render(strings.Repeat("─", m.width)), strings.Join(lines, "\n"), m.viewNotice(), m.viewKeys()}, "\n")
+}
+
+func (m *model) modal(style lipgloss.Style, content string) string {
+	return lipgloss.Place(m.width, m.bodyHeight(), lipgloss.Center, lipgloss.Center, style.Render(content))
+}
+
+// connection describes the server's state as a colored dot and a short label.
+func (m *model) connection() (string, string) {
+	switch {
+	case m.statusErr != nil:
+		return styleErr.Render("●"), "unreachable"
+	case m.checked.IsZero():
+		return styleDim.Render("●"), "connecting…"
+	case m.status.Connected && m.status.LoggedIn:
+		return styleAccent.Render("●"), "connected"
+	case m.status.QR != "":
+		return styleWarn.Render("●"), "waiting for login"
+	}
+	return styleWarn.Render("●"), m.status.State
 }
 
 func (m *model) viewHeader() string {
-	dot, state := styleErr.Render("●"), "unreachable"
-	switch {
-	case m.statusErr != nil:
-		state = m.statusErr.Error()
-	case m.checked.IsZero():
-		dot, state = styleDim.Render("●"), "connecting…"
-	case m.status.Connected && m.status.LoggedIn:
-		dot, state = styleAccent.Render("●"), "connected"
-	case m.status.QR != "":
-		dot, state = styleWarn.Render("●"), "waiting for login"
-	default:
-		dot, state = styleWarn.Render("●"), m.status.State
-	}
-	return ansi.Truncate(fmt.Sprintf(" %s %s %s  %s %s", styleBold.Render("wame admin"), styleDim.Render("·"), m.c.Server(), dot, state), m.width, "…")
-}
-
-func (m *model) viewTabs() string {
-	parts := []string{" "}
+	parts := []string{" " + styleLogo.Render("◆ wame admin")}
 	for i, name := range tabNames {
 		label := fmt.Sprintf("%d %s", i+1, name)
+		switch tab(i) {
+		case tabTokens:
+			if n := m.activeTokens(); n > 0 {
+				label += " " + styleDim.Render(fmt.Sprint(n))
+			}
+		case tabAudit:
+			if n := m.recentFailures(); n > 0 {
+				label += " " + styleErr.Render(fmt.Sprintf("✗%d", n))
+			}
+		}
 		if tab(i) == m.tab {
 			parts = append(parts, styleTabOn.Render(label))
 		} else {
 			parts = append(parts, styleTab.Render(label))
 		}
 	}
-	return strings.Join(parts, " ")
+	left := strings.Join(parts, " ")
+	dot, state := m.connection()
+	right := dot + " " + state + styleFaint.Render("  ·  ") + styleDim.Render(m.c.base.Host)
+	if m.statusErr == nil && m.latency > 0 {
+		right += styleFaint.Render("  ·  ") + styleDim.Render(fmt.Sprintf("%d ms", m.latency.Milliseconds()))
+	}
+	right += " "
+	gap := m.width - ansi.StringWidth(left) - ansi.StringWidth(right)
+	if gap < 2 {
+		return ansi.Truncate(left+"  "+right, m.width, "…")
+	}
+	return left + strings.Repeat(" ", gap) + right
 }
 
 func (m *model) viewNotice() string {
-	switch m.mode {
-	case modePair, modeFilter:
-		return " " + m.prompt.View()
-	case modeConfirmLogout:
-		return " " + styleWarn.Render("Log out and unlink WhatsApp on this server? The session is deleted and needs a new login. y/N")
-	case modeConfirmRevoke:
-		if m.tokSel < len(m.tokens) {
-			return " " + styleWarn.Render(fmt.Sprintf("Revoke %s and every token it created? Open streams close within 10 s. y/N", m.tokens[m.tokSel].Name))
-		}
+	if m.mode == modeFilter {
+		return " " + styleAccent.Render("/") + " " + m.prompt.View()
 	}
 	if m.notice == "" {
 		return ""
 	}
 	if m.noticeErr {
-		return " " + styleErr.Render(m.notice)
+		return " " + styleErr.Render("✗ "+m.notice)
 	}
-	return " " + styleDim.Render(m.notice)
+	icon := styleAccent.Render("✓ ")
+	if strings.HasSuffix(m.notice, "…") {
+		icon = styleDim.Render("◌ ")
+	}
+	return " " + icon + styleDim.Render(m.notice)
 }
 
 func (m *model) viewKeys() string {
@@ -143,143 +180,323 @@ func (m *model) viewKeys() string {
 	for i, k := range keys {
 		parts[i] = styleKey.Render(k[0]) + " " + styleDim.Render(k[1])
 	}
-	return ansi.Truncate(" "+strings.Join(parts, styleFaint.Render("  ·  ")), m.width, "…")
+	return ansi.Truncate(" "+strings.Join(parts, "   "), m.width, "…")
+}
+
+// card is a bordered box of total width w with a title.
+func card(title string, w int, body string) string {
+	return styleCard.Width(max(w-2, 10)).Render(styleBold.Render(title) + "\n" + body)
+}
+
+func kv(rows [][2]string) string {
+	w := 0
+	for _, r := range rows {
+		w = max(w, ansi.StringWidth(r[0]))
+	}
+	lines := make([]string, len(rows))
+	for i, r := range rows {
+		lines[i] = styleDim.Render(pad(r[0], w)) + "  " + r[1]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *model) viewStatus() string {
 	if m.statusErr != nil {
-		return "  " + styleErr.Render("Can't reach the server: "+m.statusErr.Error()) + "\n\n  " +
-			styleDim.Render("Check the URL and token. Retrying every few seconds.")
+		return indent(card("Can't reach the server", min(m.width-2, 90),
+			styleErr.Render(m.statusErr.Error())+"\n\n"+
+				styleDim.Render("Check the URL and token. Retrying every few seconds.")), " ")
 	}
 	if m.checked.IsZero() {
 		return "  " + styleDim.Render("loading…")
 	}
 	s := m.status
-	yes := func(b bool) string {
+	colW := max((m.width-3)/2, 36)
+	yes := func(b bool, on, off string) string {
 		if b {
-			return styleAccent.Render("yes")
+			return styleAccent.Render("● " + on)
 		}
-		return styleWarn.Render("no")
+		return styleWarn.Render("○ " + off)
 	}
 	account := styleDim.Render("not linked")
 	if s.JID != "" {
-		account = "+" + userOf(s.JID)
+		account = styleBold.Render("+" + userOf(s.JID))
 		if s.PushName != "" {
-			account += "  " + styleDim.Render("("+s.PushName+")")
+			account += " " + styleDim.Render(s.PushName)
 		}
 	}
-	rows := [][2]string{
-		{"State", s.State},
-		{"Connected", yes(s.Connected)},
-		{"Logged in", yes(s.LoggedIn)},
+	whatsapp := card("WhatsApp", colW, kv([][2]string{
 		{"Account", account},
-		{"Checked", styleDim.Render(m.checked.Format("15:04:05"))},
-	}
-	var b strings.Builder
-	for _, r := range rows {
-		fmt.Fprintf(&b, "  %s %s\n", styleDim.Render(fmt.Sprintf("%-10s", r[0])), r[1])
-	}
+		{"Session", yes(s.LoggedIn, "linked", "not linked")},
+		{"Socket", yes(s.Connected, "connected", "disconnected")},
+		{"State", styleDim.Render(s.State)},
+	}))
+	server := card("Server", colW, kv([][2]string{
+		{"URL", m.c.Server()},
+		{"Latency", fmt.Sprintf("%d ms", m.latency.Milliseconds())},
+		{"Checked", styleDim.Render(m.checked.Format("15:04:05") + ", every " + pollEvery.String())},
+	}))
+	left := lipgloss.JoinVertical(lipgloss.Left, whatsapp, server)
+
+	var right string
 	switch {
 	case m.pairCode != "":
-		fmt.Fprintf(&b, "\n  Pairing code  %s\n  %s\n", styleBox.Padding(0, 2).Render(styleBold.Render(m.pairCode)),
-			styleDim.Render("On the phone: WhatsApp → Linked devices → Link a device → Link with phone number"))
+		right = card("Pairing code", colW, "\n  "+styleLogo.Render(m.pairCode)+"\n\n"+
+			styleDim.Render("On the phone: WhatsApp → Linked devices →\nLink a device → Link with phone number instead."))
 	case s.QR != "":
-		b.WriteString("\n  " + styleBold.Render("Scan to log in") + styleDim.Render("  WhatsApp → Linked devices → Link a device. It refreshes on its own; or press p to use a phone number.") + "\n\n")
 		var qr strings.Builder
 		qrterminal.GenerateHalfBlock(s.QR, qrterminal.L, &qr)
-		for _, l := range strings.Split(strings.TrimRight(qr.String(), "\n"), "\n") {
-			b.WriteString("  " + l + "\n")
+		right = card("Scan to log in", colW, styleDim.Render("WhatsApp → Linked devices → Link a device.\nIt refreshes on its own; p pairs by phone number.")+
+			"\n"+strings.TrimRight(qr.String(), "\n"))
+	default:
+		right = lipgloss.JoinVertical(lipgloss.Left, card("Tokens", colW, m.tokenSummary()), card("Activity", colW, m.activitySummary()))
+		if !s.LoggedIn {
+			right = lipgloss.JoinVertical(lipgloss.Left, card("Not linked", colW,
+				styleWarn.Render("No QR yet.")+styleDim.Render(" The server shows one once it\nconnects; or press p to pair with a phone number.")), right)
 		}
-	case !s.LoggedIn:
-		b.WriteString("\n  " + styleDim.Render("Not linked and no QR yet. The server shows one once it connects; or press p to pair with a phone number.") + "\n")
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return indent(lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right), " ")
+}
+
+func (m *model) activeTokens() int {
+	n := 0
+	for _, t := range m.tokens {
+		if tokenLive(t) {
+			n++
+		}
+	}
+	return n
+}
+
+func tokenLive(t store.Token) bool {
+	return !t.Revoked && (t.Expires.IsZero() || t.Expires.After(time.Now()))
+}
+
+func (m *model) tokenSummary() string {
+	if m.tokensErr != nil {
+		return styleErr.Render(m.tokensErr.Error())
+	}
+	var expiring, revoked int
+	for _, t := range m.tokens {
+		switch {
+		case !tokenLive(t):
+			revoked++
+		case !t.Expires.IsZero() && time.Until(t.Expires) < 7*24*time.Hour:
+			expiring++
+		}
+	}
+	exp := styleDim.Render("0")
+	if expiring > 0 {
+		exp = styleWarn.Render(fmt.Sprint(expiring))
+	}
+	return kv([][2]string{
+		{"Active", styleBold.Render(fmt.Sprint(m.activeTokens()))},
+		{"Expiring in 7d", exp},
+		{"Revoked/expired", styleDim.Render(fmt.Sprint(revoked))},
+	})
+}
+
+func (m *model) recentFailures() int {
+	n := 0
+	since := time.Now().Add(-24 * time.Hour)
+	for _, e := range m.audit {
+		if e.At.After(since) && !e.OK {
+			n++
+		}
+	}
+	return n
+}
+
+func (m *model) activitySummary() string {
+	if m.auditErr != nil && len(m.audit) == 0 {
+		return styleErr.Render(m.auditErr.Error())
+	}
+	since := time.Now().Add(-24 * time.Hour)
+	var total int
+	for _, e := range m.audit {
+		if e.At.After(since) {
+			total++
+		}
+	}
+	fails := styleDim.Render("0")
+	if n := m.recentFailures(); n > 0 {
+		fails = styleErr.Render(fmt.Sprint(n))
+	}
+	last := styleDim.Render("none")
+	if len(m.audit) > 0 {
+		e := m.audit[0]
+		last = actionStyle(e.Action).Render(e.Action) + styleDim.Render(" by "+e.Actor+", "+relTime(e.At))
+	}
+	return kv([][2]string{
+		{"Actions (24h)", styleBold.Render(fmt.Sprint(total))},
+		{"Failed (24h)", fails},
+		{"Latest", last},
+	})
+}
+
+func scopeBadges(scopes []string) string {
+	parts := make([]string, len(scopes))
+	for i, s := range scopes {
+		parts[i] = lipgloss.NewStyle().Foreground(scopeColors[s]).Render(s)
+	}
+	return strings.Join(parts, " ")
 }
 
 func (m *model) viewTokens() string {
 	if m.tokensErr != nil {
-		return "  " + styleErr.Render(m.tokensErr.Error())
+		return indent(card("Tokens", min(m.width-2, 90), styleErr.Render(m.tokensErr.Error())), " ")
 	}
 	if len(m.tokens) == 0 {
-		return "  " + styleDim.Render("No tokens yet. Press n to create one for an agent or bot.")
+		return indent(card("No tokens yet", min(m.width-2, 70),
+			styleDim.Render("Press n to create one for an agent, bot or script.\nEach gets its own scopes, chats, rate and expiry.")), " ")
 	}
-	header := fmt.Sprintf("  %-18s %-16s %-8s %-6s %-12s %-12s %s", "NAME", "SCOPES", "CHATS", "RATE", "EXPIRES", "LAST USED", "CREATED BY")
-	lines := []string{styleDim.Render(header)}
-	start, end := window(m.tokSel, len(m.tokens), m.bodyHeight()-3)
+	cols := []int{20, 18, 10, 8, 12, 12}
+	row := func(cells ...string) string {
+		var b strings.Builder
+		for i, c := range cells {
+			if i < len(cols) {
+				b.WriteString(pad(fit(c, cols[i]), cols[i]) + " ")
+			} else {
+				b.WriteString(c)
+			}
+		}
+		return b.String()
+	}
+	detail := m.tokenDetail()
+	lines := []string{"   " + styleHead.Render(row("NAME", "SCOPES", "CHATS", "RATE", "EXPIRES", "LAST USED", "CREATED BY"))}
+	start, end := window(m.tokSel, len(m.tokens), m.bodyHeight()-2-lipgloss.Height(detail))
 	for i := start; i < end; i++ {
 		t := m.tokens[i]
 		chats := "all"
 		if len(t.Chats) > 0 {
-			chats = fmt.Sprint(len(t.Chats))
+			chats = plural(len(t.Chats), "chat")
 		}
-		rate := "-"
+		rate := "global"
 		if t.Rate > 0 {
-			rate = fmt.Sprintf("%d/m", t.Rate)
+			rate = fmt.Sprintf("%d/min", t.Rate)
 		}
 		expires := "never"
 		switch {
 		case t.Revoked:
-			expires = "revoked"
+			expires = styleErr.Render("revoked")
+		case !t.Expires.IsZero() && !tokenLive(t):
+			expires = styleErr.Render("expired")
+		case !t.Expires.IsZero() && time.Until(t.Expires) < 7*24*time.Hour:
+			expires = styleWarn.Render(relTime(t.Expires))
 		case !t.Expires.IsZero():
 			expires = relTime(t.Expires)
 		}
-		lastUsed := "never"
+		lastUsed := styleDim.Render("never")
 		if !t.LastUsed.IsZero() {
 			lastUsed = relTime(t.LastUsed)
 		}
-		createdBy := t.CreatedBy
-		if createdBy == "" {
-			createdBy = "owner"
+		createdBy := cmpOr(t.CreatedBy, "owner")
+		name, scopes := t.Name, scopeBadges(t.Scopes)
+		if !tokenLive(t) {
+			name, scopes = styleDim.Strikethrough(true).Render(name), styleDim.Render(strings.Join(t.Scopes, " "))
 		}
-		row := fmt.Sprintf("  %-18s %-16s %-8s %-6s %-12s %-12s %s", fit(t.Name, 18), fit(strings.Join(t.Scopes, ","), 16), chats, rate, expires, lastUsed, createdBy)
-		style := lipgloss.NewStyle()
-		if t.Revoked || (!t.Expires.IsZero() && t.Expires.Before(time.Now())) {
-			style = styleFaint
-		}
+		line := row(name, scopes, chats, rate, expires, lastUsed, styleDim.Render(createdBy))
 		if i == m.tokSel {
-			style = style.Background(colSel).Width(m.width)
-		}
-		lines = append(lines, style.Render(row))
-	}
-	if m.tokSel < len(m.tokens) {
-		if t := m.tokens[m.tokSel]; len(t.Chats) > 0 {
-			lines = append(lines, "", "  "+styleDim.Render("Chats: ")+strings.Join(t.Chats, ", "))
+			lines = append(lines, " "+styleAccent.Render("▌")+" "+lipgloss.NewStyle().Background(colSel).Width(m.width-3).Render(line))
+		} else {
+			lines = append(lines, "   "+line)
 		}
 	}
+	lines = append(lines, "", indent(detail, " "))
 	return strings.Join(lines, "\n")
+}
+
+func (m *model) tokenDetail() string {
+	if m.tokSel >= len(m.tokens) {
+		return ""
+	}
+	t := m.tokens[m.tokSel]
+	chats := "all chats"
+	if len(t.Chats) > 0 {
+		names := make([]string, len(t.Chats))
+		for i, c := range t.Chats {
+			names[i] = displayJID(c)
+		}
+		chats = strings.Join(names, ", ")
+	}
+	expires := "never"
+	if !t.Expires.IsZero() {
+		expires = t.Expires.Format("2006-01-02 15:04") + styleDim.Render(" ("+relTime(t.Expires)+")")
+	}
+	created := t.Created.Format("2006-01-02 15:04") + styleDim.Render(" by "+cmpOr(t.CreatedBy, "the owner"))
+	state := styleAccent.Render("● active")
+	if t.Revoked {
+		state = styleErr.Render("● revoked")
+	} else if !tokenLive(t) {
+		state = styleErr.Render("● expired")
+	}
+	left := kv([][2]string{{"ID", styleDim.Render(t.ID)}, {"State", state}, {"Scopes", scopeBadges(t.Scopes)}, {"Chats", chats}})
+	right := kv([][2]string{{"Created", created}, {"Expires", expires}, {"Rate", cmpOr(rateText(t.Rate), "global limit only")}})
+	w := min(m.width-2, 120)
+	return card(t.Name, w, lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width((w-4)/2).Render(left), right))
+}
+
+func rateText(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d sends per minute", n)
+}
+
+func actionStyle(action string) lipgloss.Style {
+	switch {
+	case strings.HasPrefix(action, "token"):
+		return lipgloss.NewStyle().Foreground(colPurple)
+	case action == "pair" || action == "logout" || action == "logged_out":
+		return lipgloss.NewStyle().Foreground(colWarn)
+	case action == "delete":
+		return lipgloss.NewStyle().Foreground(colErr)
+	}
+	return lipgloss.NewStyle().Foreground(colInfo)
 }
 
 func (m *model) viewAudit() string {
 	if m.auditErr != nil && len(m.audit) == 0 {
-		return "  " + styleErr.Render(m.auditErr.Error())
+		return indent(card("Audit log", min(m.width-2, 90), styleErr.Render(m.auditErr.Error())), " ")
 	}
 	entries := m.visibleAudit()
 	if len(entries) == 0 {
+		msg := "The audit log is empty."
 		if m.auditQuery != "" {
-			return "  " + styleDim.Render("Nothing matches "+fmt.Sprintf("%q", m.auditQuery)+" in the loaded entries.")
+			msg = fmt.Sprintf("Nothing matches %q in the loaded entries. Esc clears the filter.", m.auditQuery)
 		}
-		return "  " + styleDim.Render("The audit log is empty.")
+		return indent(card("Audit log", min(m.width-2, 90), styleDim.Render(msg)), " ")
 	}
-	header := fmt.Sprintf("  %-14s %-14s %-12s %-28s %s", "WHEN", "ACTOR", "ACTION", "TARGET", "DETAIL")
-	lines := []string{styleDim.Render(header)}
-	start, end := window(m.auditSel, len(entries), m.bodyHeight()-4)
+	cols := []int{2, 13, 16, 13, 22}
+	row := func(cells ...string) string {
+		var b strings.Builder
+		for i, c := range cells {
+			if i < len(cols) {
+				b.WriteString(pad(fit(c, cols[i]), cols[i]) + " ")
+			} else {
+				b.WriteString(c)
+			}
+		}
+		return b.String()
+	}
+	detail := m.auditDetail(entries)
+	lines := []string{"   " + styleHead.Render(row("", "WHEN", "ACTOR", "ACTION", "TARGET", "DETAIL"))}
+	start, end := window(m.auditSel, len(entries), m.bodyHeight()-3-lipgloss.Height(detail))
 	for i := start; i < end; i++ {
 		e := entries[i]
-		detail := e.Detail
-		style := lipgloss.NewStyle()
+		icon, detail := styleAccent.Render("✓"), styleDim.Render(e.Detail)
 		if !e.OK {
-			style = styleErr
-			detail = strings.TrimSpace(detail + "  ✗ " + e.Error)
+			icon, detail = styleErr.Render("✗"), styleErr.Render(strings.Join(nonEmpty(e.Detail, e.Error), " · "))
 		}
-		row := fmt.Sprintf("  %-14s %-14s %-12s %-28s %s", e.At.Format("Jan 02 15:04"), fit(e.Actor, 14), fit(e.Action, 12), fit(e.Target, 28), detail)
+		line := row(icon, styleDim.Render(when(e.At)), e.Actor, actionStyle(e.Action).Render(e.Action), displayJID(e.Target), detail)
 		if i == m.auditSel {
-			style = style.Background(colSel).Width(m.width)
+			lines = append(lines, " "+styleAccent.Render("▌")+" "+lipgloss.NewStyle().Background(colSel).Width(m.width-3).Render(ansi.Truncate(line, m.width-3, "…")))
+		} else {
+			lines = append(lines, "   "+line)
 		}
-		lines = append(lines, style.Render(ansi.Truncate(row, m.width, "…")))
 	}
 	footer := fmt.Sprintf("%d of %d loaded", len(entries), len(m.audit))
 	if m.auditQuery != "" {
-		footer += fmt.Sprintf(", filtered by %q (esc clears)", m.auditQuery)
+		footer += fmt.Sprintf(" · filtered by %q (esc clears)", m.auditQuery)
 	}
 	switch {
 	case m.auditBusy:
@@ -287,42 +504,78 @@ func (m *model) viewAudit() string {
 	case m.auditMore && m.auditQuery == "":
 		footer += " · move past the last row for older entries"
 	}
-	if m.auditSel < len(entries) && !entries[m.auditSel].OK {
-		lines = append(lines, "", "  "+styleErr.Render("Error: "+entries[m.auditSel].Error))
-	} else {
-		lines = append(lines, "", "")
-	}
-	lines = append(lines, "  "+styleDim.Render(footer))
+	lines = append(lines, "   "+styleFaint.Render(footer), indent(detail, " "))
 	return strings.Join(lines, "\n")
+}
+
+func (m *model) auditDetail(entries []store.AuditEntry) string {
+	if m.auditSel >= len(entries) {
+		return ""
+	}
+	e := entries[m.auditSel]
+	result := styleAccent.Render("✓ ok")
+	if !e.OK {
+		result = styleErr.Render("✗ " + e.Error)
+	}
+	rows := [][2]string{
+		{"When", e.At.Format("2006-01-02 15:04:05") + styleDim.Render(" ("+relTime(e.At)+")")},
+		{"Who", e.Actor},
+		{"Target", cmpOr(displayJID(e.Target), styleDim.Render("none"))},
+		{"Detail", cmpOr(e.Detail, styleDim.Render("none"))},
+		{"Result", result},
+	}
+	return card(fmt.Sprintf("#%d %s", e.ID, e.Action), min(m.width-2, 120), kv(rows))
 }
 
 func (m *model) viewForm() string {
-	lines := []string{"  " + styleBold.Render("New token") + styleDim.Render("  for an agent, bot or script. Only its hash is stored; you'll see it once."), ""}
+	lines := []string{styleBold.Render("New token"), styleDim.Render("For an agent, bot or script. Only its hash is stored; you'll see it once."), ""}
 	for i, f := range formFields {
-		label := fmt.Sprintf("%-8s", f.label)
+		label := styleDim.Render(pad(f.label, 8))
+		marker := "  "
 		if i == m.formFocus {
-			label = styleAccent.Render("› " + label)
-		} else {
-			label = "  " + styleDim.Render(label)
+			label, marker = styleAccent.Render(pad(f.label, 8)), styleAccent.Render("› ")
 		}
-		lines = append(lines, "  "+label+" "+m.form[i].View())
+		lines = append(lines, marker+label+" "+m.form[i].View())
 	}
 	lines = append(lines, "",
-		"  "+styleDim.Render("Signed in with an admin token rather than the owner secret, you can't grant the admin"),
-		"  "+styleDim.Render("scope, and the new token expires no later than yours."))
-	return strings.Join(lines, "\n")
+		styleDim.Render("With an admin token rather than the owner secret, you can't grant"),
+		styleDim.Render("the admin scope, and the new token expires no later than yours."))
+	return lipgloss.NewStyle().Width(min(m.width-12, 84)).Render(strings.Join(lines, "\n"))
 }
 
 func (m *model) viewCreated() string {
-	box := styleBox.Render(styleBold.Render("Token created") + "\n\n" + m.created + "\n\n" +
-		styleDim.Render("Store it now: it can't be shown again. Use it as\nAuthorization: Bearer <token>"))
-	return indent(box, "  ")
+	return styleAccent.Render("✓ Token created") + "\n\n" +
+		lipgloss.NewStyle().Background(colSel).Padding(0, 1).Render(m.created) + "\n\n" +
+		styleWarn.Render("Store it now: it can't be shown again.") + "\n" +
+		styleDim.Render("Send it as  Authorization: Bearer <token>")
 }
 
-func indent(s, pad string) string {
+func (m *model) viewPair() string {
+	return styleBold.Render("Pair with a phone number") + "\n" +
+		styleDim.Render("The server asks WhatsApp for an 8-character code to enter on that phone.") + "\n\n" +
+		m.prompt.View()
+}
+
+func (m *model) viewConfirmLogout() string {
+	return styleErr.Render("Log out of WhatsApp?") + "\n\n" +
+		"This unlinks the device and deletes the session on\n" + styleBold.Render(m.c.base.Host) + ". It needs a new QR or pairing code after.\n\n" +
+		styleKey.Render("y") + " log out   " + styleKey.Render("any key") + " cancel"
+}
+
+func (m *model) viewConfirmRevoke() string {
+	if m.tokSel >= len(m.tokens) {
+		return ""
+	}
+	t := m.tokens[m.tokSel]
+	return styleErr.Render("Revoke "+t.Name+"?") + "\n\n" +
+		"It stops working at once, with every token it created.\nOpen streams close within 10 s. This can't be undone.\n\n" +
+		styleKey.Render("y") + " revoke   " + styleKey.Render("any key") + " cancel"
+}
+
+func indent(s, prefix string) string {
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
-		lines[i] = pad + l
+		lines[i] = prefix + l
 	}
 	return strings.Join(lines, "\n")
 }
@@ -342,6 +595,49 @@ func fit(s string, w int) string {
 		return s
 	}
 	return ansi.Truncate(s, w, "…")
+}
+
+func pad(s string, w int) string {
+	if n := ansi.StringWidth(s); n < w {
+		return s + strings.Repeat(" ", w-n)
+	}
+	return s
+}
+
+func nonEmpty(parts ...string) []string {
+	var out []string
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func cmpOr(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
+
+// when is a compact timestamp: the time today, the weekday this week, the date otherwise.
+func when(t time.Time) string {
+	now := time.Now()
+	switch {
+	case t.YearDay() == now.YearDay() && t.Year() == now.Year():
+		return t.Format("15:04")
+	case now.Sub(t) < 6*24*time.Hour:
+		return t.Format("Mon 15:04")
+	}
+	return t.Format("Jan 02 15:04")
+}
+
+func displayJID(jid string) string {
+	if strings.HasSuffix(jid, "@s.whatsapp.net") {
+		return "+" + userOf(jid)
+	}
+	return jid
 }
 
 func relTime(t time.Time) string {

@@ -11,9 +11,13 @@ wame admin -server https://wame.example.com
 
 | Tab | Shows | Keys |
 |---|---|---|
-| **1 Status** | connection state, linked account, a QR code to scan while the server isn't linked, the pairing code after `p` | `p` pair with a phone number, `L` log out (asks first) |
-| **2 Tokens** | every token: scopes, chat allowlist, rate, expiry, last use, who created it; revoked and expired ones dimmed | `j`/`k` move, `n` new token, `x` revoke (asks first) |
-| **3 Audit** | the audit log, newest first; failed actions in red with their error | `j`/`k`, `Ctrl+D`/`Ctrl+U`, `g`/`G` move, `/` filter, `Esc` clear the filter |
+| **1 Status** | cards for the WhatsApp session (account, linked, socket) and the server (URL, latency); a summary of tokens (active, expiring within 7 days, revoked) and of the last 24 h of activity. While the server isn't linked, the QR to scan instead, or the pairing code after `p` | `p` pair with a phone number, `L` log out (asks first) |
+| **2 Tokens** | every token with colored scopes (`read`, `send`, `admin`), chats, rate, expiry (amber within 7 days), last use and creator; revoked and expired ones struck through. A card below shows the selected token in full, including its chat allowlist | `j`/`k` move, `n` new token, `x` revoke (asks first) |
+| **3 Audit** | the audit log, newest first, with ✓ / ✗ and actions colored by kind; a card below shows the selected entry with its full time and error | `j`/`k`, `Ctrl+D`/`Ctrl+U`, `g`/`G` move, `/` filter, `Esc` clear the filter |
+
+The header shows the connection state, the server and its latency, the number of active tokens on
+the Tokens tab and, in red, failed actions in the last 24 hours on the Audit tab. Confirmations,
+the token form and the new token open as dialogs over the current tab.
 
 Everywhere: `1`–`3` or `Tab` / `Shift+Tab` switch tabs, `r` refreshes, `q` or `Ctrl+C` quits.
 Status refreshes every 3 seconds, and so does the open Tokens or Audit tab (Audit only while

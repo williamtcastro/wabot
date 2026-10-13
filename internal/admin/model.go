@@ -42,8 +42,9 @@ const (
 
 type (
 	statusMsg struct {
-		s   bot.Status
-		err error
+		s       bot.Status
+		latency time.Duration
+		err     error
 	}
 	tokensMsg struct {
 		tokens []store.Token
@@ -83,6 +84,7 @@ type model struct {
 	status    bot.Status
 	statusErr error
 	checked   time.Time
+	latency   time.Duration
 	pairCode  string
 
 	tokens    []store.Token
@@ -136,8 +138,9 @@ func call[T any](f func(ctx context.Context) T) tea.Cmd {
 
 func (m *model) loadStatus() tea.Cmd {
 	return call(func(ctx context.Context) tea.Msg {
+		start := time.Now()
 		s, err := m.c.Status(ctx)
-		return statusMsg{s, err}
+		return statusMsg{s, time.Since(start), err}
 	})
 }
 
@@ -181,7 +184,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case statusMsg:
-		m.status, m.statusErr, m.checked = msg.s, msg.err, time.Now()
+		m.status, m.statusErr, m.checked, m.latency = msg.s, msg.err, time.Now(), msg.latency
 		if msg.s.LoggedIn {
 			m.pairCode = ""
 		}
