@@ -190,6 +190,8 @@ HTTP API instead.
 
 ```sh
 wame backup -keep 7 ~/wame-backups/      # a consistent copy, even while the server runs
+wame queue import promo.csv              # queue a CSV (to,text,send_at,reply_to) on a running server
+wame queue status -batch promo           # its progress
 ```
 
 **Recipients** can be a phone number in any format with the country code (`5511999999999`,
