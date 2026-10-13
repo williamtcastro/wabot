@@ -2,9 +2,6 @@ package admin
 
 import (
 	"context"
-	"encoding/csv"
-	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -44,8 +40,6 @@ func contactsServer(t *testing.T, gone bool) (*bot.Bot, *Client) {
 	mux.Handle("/", api.NewHandler(b, a, "test"))
 	if gone {
 		mux.HandleFunc("/contacts/", http.NotFound)
-	} else {
-		stubContactRoutes(mux, b, a)
 	}
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -54,86 +48,6 @@ func contactsServer(t *testing.T, gone bool) (*bot.Bot, *Client) {
 		t.Fatal(err)
 	}
 	return b, c
-}
-
-func stubContactRoutes(mux *http.ServeMux, b *bot.Bot, a *auth.Authenticator) {
-	reply := func(w http.ResponseWriter, v any, err error) {
-		w.Header().Set("Content-Type", "application/json")
-		if err != nil {
-			code := http.StatusInternalServerError
-			if _, ok := errors.AsType[bot.InputError](err); ok {
-				code = http.StatusBadRequest
-			} else if errors.Is(err, store.ErrNotFound) {
-				code = http.StatusNotFound
-			}
-			w.WriteHeader(code)
-			v = map[string]string{"error": err.Error()}
-		}
-		_ = json.NewEncoder(w).Encode(v)
-	}
-	route := func(pattern string, admin bool, h func(http.ResponseWriter, *http.Request, auth.Principal)) {
-		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			p, err := a.Authenticate(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-			if err != nil {
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			if admin && !p.Has(auth.Admin) {
-				w.WriteHeader(http.StatusForbidden)
-				_ = json.NewEncoder(w).Encode(map[string]string{"error": "this token needs the admin scope"})
-				return
-			}
-			h(w, r, p)
-		})
-	}
-	route("GET /contacts", false, func(w http.ResponseWriter, r *http.Request, p auth.Principal) {
-		q := r.URL.Query()
-		limit, _ := strconv.Atoi(q.Get("limit"))
-		list, err := b.Contacts(r.Context(), bot.ContactQuery{Q: q.Get("q"), Tags: q["tag"], Known: q.Get("known") == "1", Allow: p.Chats, Limit: limit})
-		reply(w, list, err)
-	})
-	route("GET /contacts/tags", false, func(w http.ResponseWriter, r *http.Request, p auth.Principal) {
-		tags, err := b.ContactTags()
-		reply(w, tags, err)
-	})
-	route("GET /contacts/{number}", false, func(w http.ResponseWriter, r *http.Request, p auth.Principal) {
-		v, err := b.ContactOf(r.Context(), r.PathValue("number"))
-		if !p.Has(auth.Admin) {
-			v.Own = nil
-		}
-		reply(w, v, err)
-	})
-	route("PATCH /contacts/{number}", true, func(w http.ResponseWriter, r *http.Request, p auth.Principal) {
-		var in bot.ContactInput
-		if err := json.NewDecoder(io.LimitReader(r.Body, bot.MaxContactBody)).Decode(&in); err != nil {
-			reply(w, nil, bot.BadInput("%v", err))
-			return
-		}
-		v, err := b.PatchContact(r.Context(), p.Name, r.PathValue("number"), in)
-		reply(w, v, err)
-	})
-	route("DELETE /contacts/{number}", true, func(w http.ResponseWriter, r *http.Request, p auth.Principal) {
-		err := b.DeleteContact(r.Context(), p.Name, r.PathValue("number"))
-		reply(w, map[string]bool{"deleted": true}, err)
-	})
-	route("POST /contacts/import", true, func(w http.ResponseWriter, r *http.Request, p auth.Principal) {
-		res, err := b.ImportContacts(r.Context(), p.Name, io.LimitReader(r.Body, bot.MaxContactImportBytes), bot.ContactImportOptions{DryRun: r.URL.Query().Get("dry_run") == "1"})
-		reply(w, res, err)
-	})
-	route("GET /contacts/export", true, func(w http.ResponseWriter, r *http.Request, p auth.Principal) {
-		list, err := b.Store.Contacts(store.ContactFilter{})
-		if err != nil {
-			reply(w, nil, err)
-			return
-		}
-		w.Header().Set("Content-Type", "text/csv")
-		cw := csv.NewWriter(w)
-		_ = cw.Write(bot.ContactImportColumns)
-		for _, c := range list {
-			_ = cw.Write([]string{strings.TrimSuffix(c.JID, "@s.whatsapp.net"), c.Name, strings.Join(c.Tags, " "), c.Notes, c.Language, c.TimeZone})
-		}
-		cw.Flush()
-	})
 }
 
 func seedContacts(t *testing.T, b *bot.Bot) {
