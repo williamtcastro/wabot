@@ -202,22 +202,6 @@ locally prints `wame dev`. `--version` works too.
 
 Prints usage (also `-h` / `--help`).
 
-## Upgrading from wabot
-
-wame was called `wabot`. After switching binaries nothing has to change:
-
-- **Database:** with no `-db`/`WAME_DB`, wame uses `~/.config/wame/wame.db`, or
-  `~/.config/wabot/wabot.db` if that exists and the new one doesn't. To move it, stop wame and run
-  `mkdir -p ~/.config/wame && for f in ~/.config/wabot/wabot.db*; do mv "$f" ~/.config/wame/"$(basename "$f" | sed s/wabot/wame/)"; done`.
-  On its first start, wame renames the tables inside from `wabot_*` to `wame_*` (keeping every
-  row) and rebuilds the search index, in one transaction. Don't go back to a `wabot` build
-  afterwards: it would create new, empty `wabot_*` tables, and wame then refuses to start until
-  those are removed (it names them).
-- **Environment:** every `WAME_*` variable falls back to its old `WABOT_*` name.
-- **Tokens:** new tokens start with `wame_`; existing `wabot_…` tokens keep working.
-- **Webhooks:** headers are now `X-Wame-Event`, `X-Wame-Delivery`, `X-Wame-Timestamp` and
-  `X-Wame-Signature` (same values and signing scheme). Update receivers that read `X-Wabot-*`.
-
 ## Flags
 
 | Flag | Env | Default | |

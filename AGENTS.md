@@ -10,11 +10,9 @@ server, a Bubble Tea TUI and a one-shot CLI. `wame admin` is a second Bubble Tea
 panel that talks to a running server only over the HTTP API. All server state lives in one SQLite file
 (default `~/.config/wame/wame.db`); it also ships as a Docker image.
 
-**Upgrades from the old name (`wabot`).** Use `wame` everywhere. The old name only appears in the
-code that reads what older installs left behind, and those readers stay: `store.renameLegacyTables`
-renames `wabot_*` tables to `wame_*` on startup (rebuilding indexes, triggers and the search index),
-`envOr` falls back to `WABOT_*` variables, `defaultDB` uses `~/.config/wabot/wabot.db` when there's no
-`wame.db`, and `wabot_` tokens still authenticate (`auth.legacyPrefix`). Don't remove these.
+**The old name.** Use `wame` everywhere. A few readers for installs from before the rename
+(`store.renameLegacyTables`, the `WABOT_*` fallback in `envOr`, the old path in `defaultDB`,
+`auth.legacyPrefix`) are still in the code; nothing documents them for users, and they can be removed.
 
 ## Layout
 

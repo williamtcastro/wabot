@@ -225,7 +225,7 @@ reset. All flags and commands: [docs/CLI.md](docs/CLI.md).
 
 | | |
 |---|---|
-| [CLI](docs/CLI.md) | every command and flag, logs, the database file, upgrading from wabot |
+| [CLI](docs/CLI.md) | every command and flag, logs, the database file |
 | [HTTP API](docs/API.md) | every endpoint with curl examples, filters, events, tokens, rate limiting, webhooks |
 | [OpenAPI spec](docs/openapi.yaml) | for Postman, Insomnia or Bruno; also served live at `/docs` |
 | [TUI](docs/TUI.md) | layout, keys and commands |
@@ -237,17 +237,6 @@ reset. All flags and commands: [docs/CLI.md](docs/CLI.md).
 | [Security review](docs/security/SCOPED-TOKENS.md) | the token system's threat model, findings and fixes, operational advice |
 | [Proposed features](docs/proposed-features/README.md) | ideas not built yet: admin panel, image previews, LLM context, drafts approval, rules and state |
 | [AGENTS.md](AGENTS.md) | code layout and conventions, for contributors and coding agents |
-
-## Upgrading from wabot
-
-wame used to be called `wabot`, and existing setups keep working:
-- a database at `~/.config/wabot/wabot.db` is still picked up, and its tables are renamed to
-  `wame_*` on the first start;
-- `WABOT_*` environment variables are still read;
-- `wabot_…` tokens still authenticate.
-
-The one breaking change is that webhook headers are now `X-Wame-*`. To move your database to the
-new path, see [docs/CLI.md](docs/CLI.md#upgrading-from-wabot).
 
 ## License
 
