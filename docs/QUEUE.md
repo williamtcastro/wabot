@@ -87,6 +87,13 @@ setting wakes it at once. Items whose `send_at` falls inside the window go out w
 `GET /stats` shows `quiet_until` while it holds, and the admin panel's Queue tab says "quiet hours
 until 08:00". Only the queue keeps quiet: `/send`, the TUI, the CLI and auto-replies don't.
 
+**Switching them off and on.** `queue_quiet` (`true` by default) turns the window off without
+forgetting it: `PATCH /settings {"queue_quiet": false}` lets the queue send at any hour, and `true`
+(or `null`) brings the same window back. `Q` on the admin panel's Queue tab does the same (or
+`Enter` on "Quiet hours on" in the Settings tab). While off, `GET /stats` has `quiet_off: true` and
+the tab shows the window marked "off"; while on, the panel's header shows `☾ quiet 21:00-08:00`,
+or `☾ quiet until 08:00` in amber while it's holding the queue.
+
 ## Opt-outs
 
 When someone answers a 1:1 chat with nothing but `STOP`, `SAIR`, `PARAR`, `CANCELAR`,

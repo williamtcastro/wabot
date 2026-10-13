@@ -226,16 +226,18 @@ func (m *model) viewHeader() string {
 	if m.c != nil {
 		host = styleDim.Render(cmp.Or(m.profile, m.c.base.Host))
 	}
-	// Longest first; drop detail, then the inactive tabs' names, until it fits. The state always stays.
+	// Longest first; drop detail, then the inactive tabs' names, until it fits. The state and the
+	// quiet-hours marker always stay.
+	quiet := m.quietBadge()
 	var right string
 	for _, compact := range []bool{false, true} {
 		left := m.tabsLine(compact)
 		for _, items := range [][]string{
-			{dot + " " + state, styleDim.Render(m.host()), live, latency},
-			{dot + " " + state, host, live, latency},
-			{dot + " " + state, host, live},
-			{dot + " " + state, live},
-			{dot + " " + state},
+			{quiet, dot + " " + state, styleDim.Render(m.host()), live, latency},
+			{quiet, dot + " " + state, host, live, latency},
+			{quiet, dot + " " + state, host, live},
+			{quiet, dot + " " + state, live},
+			{quiet, dot + " " + state},
 		} {
 			right = strings.Join(nonEmpty(items...), styleFaint.Render("  ·  ")) + " "
 			if gap := m.width - ansi.StringWidth(left) - ansi.StringWidth(right); gap >= 2 {
@@ -310,7 +312,7 @@ func (m *model) viewKeys() string {
 			if m.stats.Queue.Paused {
 				pause = "resume"
 			}
-			keys = [][2]string{{"j/k", "move"}, {"f", "filter"}, {"x", "cancel"}, {"X", "cancel batch"}, {"P", pause}}
+			keys = [][2]string{{"j/k", "move"}, {"f", "filter"}, {"x", "cancel"}, {"X", "cancel batch"}, {"P", pause}, {"Q", "quiet on/off"}}
 		case tabLogs:
 			follow := "pause"
 			if !m.logsFollow {
@@ -939,6 +941,19 @@ func when(t time.Time) string {
 
 // stamp formats a time from the server in the local zone; JSON keeps the server's (often UTC).
 func stamp(t time.Time, layout string) string { return t.Local().Format(layout) }
+
+// quietBadge advertises the queue's quiet hours in the header while they're switched on: amber while
+// they hold the queue, dim otherwise. Empty when no window is set or the switch is off.
+func (m *model) quietBadge() string {
+	q := m.stats.Queue
+	switch {
+	case q.QuietHours == "" || q.QuietOff:
+		return ""
+	case !q.QuietUntil.IsZero():
+		return styleWarn.Render("☾ quiet until " + stamp(q.QuietUntil, "15:04"))
+	}
+	return styleDim.Render("☾ quiet " + safe(q.QuietHours))
+}
 
 func displayJID(jid string) string {
 	if strings.HasSuffix(jid, "@s.whatsapp.net") {

@@ -35,7 +35,8 @@ var settingLabels = map[string][2]string{
 	"webhook_filter":    {"Webhook filter", "which messages go to the webhook, e.g. type=text&from_me=false"},
 	"queue_paused":      {"Queue paused", "hold queued messages; sending resumes where it stopped"},
 	"queue_jitter":      {"Queue jitter", "random extra wait, 0 up to this, between queued sends, e.g. 2s"},
-	"queue_quiet_hours": {"Quiet hours", "a window when queued messages wait, e.g. 21:00-08:00; empty turns it off"},
+	"queue_quiet_hours": {"Quiet hours", "a window when queued messages wait, e.g. 21:00-08:00; empty removes it"},
+	"queue_quiet":       {"Quiet hours on", "switch the quiet hours off and on again without losing the window"},
 	"queue_timezone":    {"Queue time zone", "the zone quiet hours are in, e.g. America/Sao_Paulo"},
 }
 

@@ -879,8 +879,8 @@ and the admin panel's and Prometheus' `/stats`, `/metrics`, `/queue`, `/tokens`,
 ## `GET /settings`, `PATCH /settings`
 
 Some flags can be changed while wame runs, without a restart: `rate`, `chat_gap`, `max_wait`,
-`auto_reply`, `webhook_filter`, `queue_paused`, `queue_jitter`, `queue_quiet_hours` and
-`queue_timezone`. Requires `admin`.
+`auto_reply`, `webhook_filter`, `queue_paused`, `queue_jitter`, `queue_quiet_hours`, `queue_quiet`
+and `queue_timezone`. Requires `admin`.
 
 ```sh
 curl -H "$H" localhost:8080/settings
@@ -898,6 +898,7 @@ curl -H "$H" -X PATCH localhost:8080/settings -d '{"rate": null}'     # back to 
   { "key": "queue_paused", "value": "false", "default": "false", "overridden": false },
   { "key": "queue_jitter", "value": "2s", "default": "2s", "overridden": false },
   { "key": "queue_quiet_hours", "value": "21:00-08:00", "default": "", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" },
+  { "key": "queue_quiet", "value": "true", "default": "true", "overridden": false },
   { "key": "queue_timezone", "value": "America/Sao_Paulo", "default": "Local (UTC)", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" }
 ]
 ```
@@ -909,7 +910,8 @@ curl -H "$H" -X PATCH localhost:8080/settings -d '{"rate": null}'     # back to 
   [send queue](#post-queue); it has no flag. `queue_quiet_hours` is a daily window like
   `21:00-08:00` (it may cross midnight; `""` turns it off) when the queue sends nothing, read on the
   clock of `queue_timezone`, an IANA name like `America/Sao_Paulo` (`Local`, the default, is the
-  server's zone). See [QUEUE.md](QUEUE.md#quiet-hours).
+  server's zone). `queue_quiet` (`true`/`false`) switches the window off and back on without losing
+  it. See [QUEUE.md](QUEUE.md#quiet-hours).
 - Every value is checked before any is applied, so a bad one changes nothing (400).
 - Changes apply at once and are stored in the `wame_settings` table, so they **win over the flags
   on the next start too**, until reset with `null`. `default` shows the flag's value.

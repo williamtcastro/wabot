@@ -24,12 +24,13 @@ type Settings struct {
 	QueuePaused   bool
 	QueueJitter   time.Duration
 	QuietHours    QuietHours
+	QuietOff      bool           // switches the window off without forgetting it
 	Timezone      *time.Location // nil means time.Local
 }
 
 // SettingKeys are the names used by the API, the table and the audit log, in display order.
 var SettingKeys = []string{"rate", "chat_gap", "max_wait", "auto_reply", "webhook_filter", "queue_paused", "queue_jitter",
-	"queue_quiet_hours", "queue_timezone"}
+	"queue_quiet_hours", "queue_quiet", "queue_timezone"}
 
 const maxSettingDuration = 10 * time.Minute
 
@@ -61,10 +62,20 @@ func (s Settings) get(key string) string {
 		return s.QueueJitter.String()
 	case "queue_quiet_hours":
 		return s.QuietHours.String()
+	case "queue_quiet":
+		return strconv.FormatBool(!s.QuietOff)
 	case "queue_timezone":
 		return zoneName(s.location())
 	}
 	return ""
+}
+
+// quietUntil is when the current quiet hours end, or zero when the queue may send now.
+func (s Settings) quietUntil(now time.Time) time.Time {
+	if s.QuietOff {
+		return time.Time{}
+	}
+	return s.QuietHours.Until(now, s.location())
 }
 
 func (s Settings) location() *time.Location {
@@ -95,15 +106,18 @@ func (s *Settings) set(key, value string) error {
 		s.ChatGap, err = duration()
 	case "max_wait":
 		s.MaxWait, err = duration()
-	case "auto_reply", "queue_paused":
+	case "auto_reply", "queue_paused", "queue_quiet":
 		b, perr := strconv.ParseBool(value)
 		if perr != nil {
 			return BadInput("%s must be true or false", key)
 		}
-		if key == "auto_reply" {
+		switch key {
+		case "auto_reply":
 			s.AutoReply = b
-		} else {
+		case "queue_paused":
 			s.QueuePaused = b
+		default:
+			s.QuietOff = !b
 		}
 	case "queue_jitter":
 		s.QueueJitter, err = duration()

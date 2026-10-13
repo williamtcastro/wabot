@@ -375,3 +375,33 @@ func TestCancelNotQueued(t *testing.T) {
 		t.Fatalf("missing = %v", err)
 	}
 }
+
+func TestQuietHoursSwitch(t *testing.T) {
+	b := newTestBot(t)
+	if _, err := b.InitSettings(Settings{Rate: 20}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	window := now.Add(-time.Hour).Format("15:04") + "-" + now.Add(time.Hour).Format("15:04")
+	if err := b.UpdateSettings("ops", map[string]*string{"queue_quiet_hours": &window}); err != nil {
+		t.Fatal(err)
+	}
+	if b.QueueStats().QuietUntil.IsZero() {
+		t.Fatal("quiet hours must hold the queue")
+	}
+	if err := b.UpdateSettings("ops", map[string]*string{"queue_quiet": new("false")}); err != nil {
+		t.Fatal(err)
+	}
+	if s := b.QueueStats(); !s.QuietUntil.IsZero() || !s.QuietOff || s.QuietHours != window {
+		t.Fatalf("off must release the queue and keep the window: %+v", s)
+	}
+	if d := b.outboxStep(t.Context()); d == outboxIdle {
+		t.Fatal("the worker still treats it as quiet")
+	}
+	if err := b.UpdateSettings("ops", map[string]*string{"queue_quiet": nil}); err != nil {
+		t.Fatal(err)
+	}
+	if s := b.QueueStats(); s.QuietUntil.IsZero() || s.QuietOff {
+		t.Fatalf("back on (the default) must hold it again: %+v", s)
+	}
+}

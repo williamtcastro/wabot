@@ -63,6 +63,7 @@ type QueueStats struct {
 	QuietHours    string    `json:"quiet_hours,omitempty"`
 	Timezone      string    `json:"timezone"`
 	QuietUntil    time.Time `json:"quiet_until,omitzero"`
+	QuietOff      bool      `json:"quiet_off,omitempty"`
 	CooldownUntil time.Time `json:"cooldown_until,omitzero"`
 	LastError     string    `json:"last_error,omitempty"`
 	LastErrorAt   time.Time `json:"last_error_at,omitzero"`
@@ -265,7 +266,7 @@ func (b *Bot) QueueStats() QueueStats {
 	b.outbox.mu.Lock()
 	defer b.outbox.mu.Unlock()
 	return QueueStats{OutboxCounts: c, Paused: s.QueuePaused, Running: b.outbox.running, JitterMS: s.QueueJitter.Milliseconds(),
-		QuietHours: s.QuietHours.String(), Timezone: zoneName(s.location()), QuietUntil: s.QuietHours.Until(time.Now(), s.location()),
+		QuietHours: s.QuietHours.String(), Timezone: zoneName(s.location()), QuietUntil: s.quietUntil(time.Now()), QuietOff: s.QuietOff,
 		CooldownUntil: cooldown, LastError: b.outbox.lastErr, LastErrorAt: b.outbox.lastErrAt}
 }
 
@@ -364,7 +365,7 @@ func (b *Bot) pruneOutbox() {
 // outboxStep sends at most one message and returns how long to wait before the next step.
 func (b *Bot) outboxStep(ctx context.Context) time.Duration {
 	s := b.currentSettings()
-	quietUntil := s.QuietHours.Until(time.Now(), s.location())
+	quietUntil := s.quietUntil(time.Now())
 	switch {
 	case s.QueuePaused:
 		return outboxIdle

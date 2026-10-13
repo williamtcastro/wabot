@@ -787,6 +787,7 @@ paths:
                 queue_paused: { nullable: true, description: "true holds the send queue" }
                 queue_jitter: { type: string, nullable: true, description: "Random extra wait between queued sends, up to 10m" }
                 queue_quiet_hours: { type: string, nullable: true, description: "Daily window when the queue sends nothing, like 21:00-08:00 (may cross midnight); empty turns it off" }
+                queue_quiet: { nullable: true, description: "false switches the quiet hours off without forgetting the window; true or null turns them back on" }
                 queue_timezone: { type: string, nullable: true, description: "IANA zone the quiet hours are read in, like America/Sao_Paulo; Local is the server's zone" }
             example: { rate: 10, auto_reply: false, chat_gap: null }
       responses:
@@ -1252,6 +1253,7 @@ components:
                 quiet_hours: { type: string, description: "The queue_quiet_hours window, absent when off", example: "21:00-08:00" }
                 timezone: { type: string, description: "The zone quiet hours are read in", example: "America/Sao_Paulo" }
                 quiet_until: { type: string, format: date-time, description: "Present while quiet hours hold the queue" }
+                quiet_off: { type: boolean, description: "The window is set but switched off (queue_quiet false)" }
                 cooldown_until: { type: string, format: date-time, description: "Backing off after repeated WhatsApp errors" }
                 last_error: { type: string }
                 last_error_at: { type: string, format: date-time }
@@ -1328,7 +1330,7 @@ components:
     SettingView:
       type: object
       properties:
-        key: { type: string, enum: [rate, chat_gap, max_wait, auto_reply, webhook_filter, queue_paused, queue_jitter, queue_quiet_hours, queue_timezone] }
+        key: { type: string, enum: [rate, chat_gap, max_wait, auto_reply, webhook_filter, queue_paused, queue_jitter, queue_quiet_hours, queue_quiet, queue_timezone] }
         value: { type: string, description: "Effective value" }
         default: { type: string, description: "The flag's value, used when not overridden" }
         overridden: { type: boolean }

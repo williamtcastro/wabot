@@ -724,3 +724,57 @@ func TestHealthWithoutAlerts(t *testing.T) {
 		t.Fatalf("test alert without a backend: %q", m.notice)
 	}
 }
+
+func TestQueueTabQuietSwitch(t *testing.T) {
+	b, c := newServer(t)
+	m := newTestModel(t, Options{Client: c})
+	press(m, "7", "Q")
+	if !m.noticeErr || !strings.Contains(m.notice, "no quiet hours set") {
+		t.Fatalf("Q without a window: %q", m.notice)
+	}
+	if err := b.UpdateSettings("api", map[string]*string{"queue_quiet_hours": new("21:00-08:00")}); err != nil {
+		t.Fatal(err)
+	}
+	press(m, "r", "Q")
+	if !b.QueueStats().QuietOff {
+		t.Fatalf("Q must switch quiet hours off: %q", m.notice)
+	}
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "21:00-08:00") || !strings.Contains(view, "off") {
+		t.Fatalf("the window must stay visible, marked off:\n%s", view)
+	}
+	press(m, "Q")
+	if b.QueueStats().QuietOff {
+		t.Fatal("Q again must switch them back on")
+	}
+}
+
+func TestHeaderAdvertisesQuietHours(t *testing.T) {
+	b, c := newServer(t)
+	m := newTestModel(t, Options{Client: c})
+	if strings.Contains(ansi.Strip(m.viewHeader()), "quiet") {
+		t.Fatal("no window set: nothing to advertise")
+	}
+	now := time.Now()
+	holding := now.Add(-time.Hour).Format("15:04") + "-" + now.Add(time.Hour).Format("15:04")
+	later := now.Add(2*time.Hour).Format("15:04") + "-" + now.Add(3*time.Hour).Format("15:04")
+	for _, w := range []struct{ window, want string }{
+		{holding, "☾ quiet until " + now.Add(time.Hour).Format("15:04")},
+		{later, "☾ quiet " + later},
+	} {
+		if err := b.UpdateSettings("api", map[string]*string{"queue_quiet_hours": &w.window}); err != nil {
+			t.Fatal(err)
+		}
+		press(m, "r")
+		for _, width := range []int{100, 120, 180} {
+			m.Update(tea.WindowSizeMsg{Width: width, Height: 40})
+			h := ansi.Strip(m.viewHeader())
+			if !strings.Contains(h, w.want) || ansi.StringWidth(h) > width {
+				t.Fatalf("width %d: want %q in the header:\n%s", width, w.want, h)
+			}
+		}
+	}
+	press(m, "7", "Q")
+	if h := ansi.Strip(m.viewHeader()); strings.Contains(h, "quiet") {
+		t.Fatalf("switched off: the header must not advertise it:\n%s", h)
+	}
+}

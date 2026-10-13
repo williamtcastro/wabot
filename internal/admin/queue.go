@@ -91,6 +91,13 @@ func (m *model) queueKey(k string) tea.Cmd {
 		}
 		m.queueSel = 0
 		return m.loadQueue()
+	case "Q":
+		if m.stats.Queue.QuietHours == "" {
+			m.setNotice("no quiet hours set: add a window on the Settings tab first", true)
+			return nil
+		}
+		next := strconv.FormatBool(m.stats.Queue.QuietOff)
+		return m.changeSetting("queue_quiet", &next, map[string]string{"true": "quiet hours on", "false": "quiet hours off"}[next])
 	case "P":
 		next := strconv.FormatBool(!m.stats.Queue.Paused)
 		return m.changeSetting("queue_paused", &next, map[string]string{"true": "queue paused", "false": "queue resumed"}[next])
@@ -157,7 +164,11 @@ func queueBody(q bot.QueueStats) string {
 			styleInfo.Render(fmt.Sprintf("%d read", q.Read)) + styleDim.Render(fmt.Sprintf(" of %d sent", q.Sent))})
 	}
 	if q.QuietHours != "" {
-		rows = append(rows, [2]string{"Quiet hours", safe(q.QuietHours) + styleDim.Render(" "+safe(q.Timezone))})
+		quiet := safe(q.QuietHours) + styleDim.Render(" "+safe(q.Timezone))
+		if q.QuietOff {
+			quiet = styleDim.Render(safe(q.QuietHours)+" "+safe(q.Timezone)+" · ") + styleWarn.Render("off")
+		}
+		rows = append(rows, [2]string{"Quiet hours", quiet})
 	}
 	if !q.OldestQueued.IsZero() && q.Queued > 0 {
 		rows = append(rows, [2]string{"Oldest", relTime(q.OldestQueued)})
