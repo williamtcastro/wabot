@@ -34,6 +34,8 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/queue -d '{
   (`/send`, the TUI, auto-replies) are never pushed back behind a long batch: they go first.
 - **Less robotic.** Between queued sends the worker waits an extra random 0 to `queue_jitter`
   (default `2s`; `-queue-jitter`, `WAME_QUEUE_JITTER`, or the setting).
+- **Quiet at night, if you want.** With [quiet hours](#quiet-hours) set, nothing queued goes out
+  in that window; it waits for the morning.
 - **Backs off when WhatsApp pushes back.** One failed send is retried later on its own (30 s, 1 min,
   2 min… up to 15 min, 5 attempts in all). Two or more failures in a row pause the whole queue for
   30 s, then 1 min, 2 min… up to 10 min, until a send works again. Sends wait while the server
@@ -50,13 +52,47 @@ token, so a misbehaving client can't fill the disk.
 ```
 queued ──▶ sending ──▶ sent
   ▲  │          │
-  │  │          ├──▶ failed      (bad number, not on WhatsApp, 5 attempts used, token revoked)
+  │  │          ├──▶ failed      (bad number, not on WhatsApp, 5 attempts used, token revoked, opted out)
   │  ▼          │
   │ canceled    └──▶ queued      (retry later)
 ```
 
 Finished items (sent, failed, canceled) are deleted after 7 days. The sent message itself stays
 in the message history like any other.
+
+**Delivered and read.** A sent item gains `delivered_at` when WhatsApp reports it reached the
+phone, and `read_at` when the person opened it (only if they share read receipts; a read also
+fills `delivered_at` when that receipt never came). They aren't states: the item stays `sent`.
+`counts.delivered` and `counts.read` count them among the sent ones, the admin panel shows
+✓ sent, ✓✓ delivered and a blue ✓✓ read, and each receipt sends one `queue` event (repeats don't).
+Receipts are matched by the item's message id, so they work after a restart too.
+
+```json
+{ "id": 41, "status": "sent", "message_id": "3EB0C4…", "delivered_at": "2026-10-12T21:41:05-03:00", "read_at": "2026-10-12T21:52:40-03:00", … }
+```
+
+## Quiet hours
+
+`queue_quiet_hours` (`-queue-quiet-hours`, `WAME_QUEUE_QUIET_HOURS`, or the
+[setting](API.md#get-settings-patch-settings)) is a daily window like `21:00-08:00`, read on the
+clock of `queue_timezone` (`-queue-timezone`, `WAME_QUEUE_TIMEZONE`; an IANA name like
+`America/Sao_Paulo`, default `Local`: the server's zone, which in Docker is UTC unless `TZ` is
+set). The window may cross midnight; empty turns it off. Inside it the worker sends nothing and
+sleeps until the window ends, then works through what's due, at the usual pace. Changing the
+setting wakes it at once. Items whose `send_at` falls inside the window go out when it ends.
+`GET /stats` shows `quiet_until` while it holds, and the admin panel's Queue tab says "quiet hours
+until 08:00". Only the queue keeps quiet: `/send`, the TUI, the CLI and auto-replies don't.
+
+## Opt-outs
+
+When someone answers a 1:1 chat with nothing but `STOP`, `SAIR`, `PARAR`, `CANCELAR`,
+`UNSUBSCRIBE` or `DESCADASTRAR` (any case, accents ignored), wame puts the chat on an opt-out list
+(`wame_optouts`) without replying, and audits it as `optout_add` by `whatsapp`. The list is
+checked when an item's turn comes, after its number is resolved to the chat WhatsApp uses: items
+to a listed chat fail with `recipient opted out` and don't take a send slot. Queuing to them is
+still accepted (the list can change before the item's turn, and one check at send time keeps
+every path consistent), so watch for that error. Direct sends aren't affected. Admins manage the
+list with [`/optouts`](API.md#get-optouts-post-optouts-delete-optoutschat).
 
 ## API
 
@@ -77,8 +113,9 @@ The same key with different messages is refused with 409, like on `/send`. A bod
 413.
 
 **Following progress.** `GET /queue?batch=promo-october` shows the counts. Or listen:
-`/events?events=queue` streams a `queue` event each time an item changes state, and with
-`-webhook` a `queue` delivery (`X-Wame-Event: queue`) goes out when an item is sent or fails.
+`/events?events=queue` streams a `queue` event each time an item changes state or a sent one is
+delivered or read, and with `-webhook` a `queue` delivery (`X-Wame-Event: queue`) goes out when an
+item is sent, fails, or is delivered or read.
 Neither includes the message text.
 
 ```json

@@ -39,6 +39,27 @@ type OutboxItem struct {
 	Chat      string    `json:"chat,omitempty"`
 	MessageID string    `json:"message_id,omitempty"`
 	Error     string    `json:"error,omitempty"`
+	Delivered time.Time `json:"delivered_at,omitzero"`
+	Read      time.Time `json:"read_at,omitzero"`
+}
+
+// Receipt progress of an item WhatsApp accepted, beyond its state.
+const (
+	OutboxDelivered = "delivered"
+	OutboxRead      = "read"
+)
+
+// Progress is the item's state or, for a sent item, delivered / read once WhatsApp reported that.
+func (it OutboxItem) Progress() string {
+	switch {
+	case it.Status != OutboxSent:
+		return it.Status
+	case !it.Read.IsZero():
+		return OutboxRead
+	case !it.Delivered.IsZero():
+		return OutboxDelivered
+	}
+	return it.Status
 }
 
 // OutboxFilter selects items; empty fields match everything.
@@ -56,6 +77,8 @@ type OutboxCounts struct {
 	Sent         int       `json:"sent"`
 	Failed       int       `json:"failed"`
 	Canceled     int       `json:"canceled"`
+	Delivered    int       `json:"delivered"`
+	Read         int       `json:"read"`
 	OldestQueued time.Time `json:"oldest_queued,omitzero"`
 	NextDue      time.Time `json:"next_due,omitzero"`
 }
@@ -120,20 +143,67 @@ CREATE TABLE IF NOT EXISTS wame_outbox (
 CREATE INDEX IF NOT EXISTS wame_outbox_due ON wame_outbox (status, due, id);
 CREATE INDEX IF NOT EXISTS wame_outbox_batch ON wame_outbox (batch, id);
 CREATE UNIQUE INDEX IF NOT EXISTS wame_outbox_key ON wame_outbox (actor, key) WHERE key != '';`)
+	if err != nil {
+		return err
+	}
+	if err := addColumns(ctx, db, "wame_outbox", outboxReceiptColumns); err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS wame_outbox_message ON wame_outbox (message_id) WHERE message_id != ''`)
 	return err
 }
 
-const outboxColumns = `id, batch, actor, token_id, key, recipient, text, reply_to, status, attempts, due, created_at, updated_at, chat, message_id, error`
+// outboxReceiptColumns came after the table did, so they're added to older databases on startup.
+var outboxReceiptColumns = []string{"delivered_at INTEGER NOT NULL DEFAULT 0", "read_at INTEGER NOT NULL DEFAULT 0"}
+
+// addColumns adds each "name type…" definition that table doesn't have yet.
+func addColumns(ctx context.Context, db *sql.DB, table string, defs []string) error {
+	have := map[string]bool{}
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, def := range defs {
+		if name, _, _ := strings.Cut(def, " "); !have[name] {
+			if _, err := db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+def); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+const outboxColumns = `id, batch, actor, token_id, key, recipient, text, reply_to, status, attempts, due, created_at, updated_at, chat, message_id, error, delivered_at, read_at`
+
+func unixMilliOrZero(ms int64) time.Time {
+	if ms == 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms)
+}
 
 func scanOutbox(row interface{ Scan(...any) error }) (OutboxItem, error) {
 	var it OutboxItem
-	var due, created, updated int64
+	var due, created, updated, delivered, read int64
 	err := row.Scan(&it.ID, &it.Batch, &it.Actor, &it.TokenID, &it.Key, &it.To, &it.Text, &it.ReplyTo, &it.Status,
-		&it.Attempts, &due, &created, &updated, &it.Chat, &it.MessageID, &it.Error)
+		&it.Attempts, &due, &created, &updated, &it.Chat, &it.MessageID, &it.Error, &delivered, &read)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = ErrNotFound
 	}
 	it.Due, it.Created, it.Updated = time.UnixMilli(due), time.UnixMilli(created), time.UnixMilli(updated)
+	it.Delivered, it.Read = unixMilliOrZero(delivered), unixMilliOrZero(read)
 	return it, err
 }
 
@@ -215,7 +285,8 @@ func (s *Store) ListOutbox(f OutboxFilter, limit int) ([]OutboxItem, error) {
 func (s *Store) CountOutbox(f OutboxFilter) (OutboxCounts, error) {
 	f.Status, f.Before = "", 0
 	where, args := f.where()
-	rows, err := s.db.Query(`SELECT status, COUNT(*), MIN(created_at), MIN(due) FROM wame_outbox`+where+` GROUP BY status`, args...)
+	rows, err := s.db.Query(`SELECT status, COUNT(*), MIN(created_at), MIN(due), SUM(delivered_at > 0), SUM(read_at > 0)
+		FROM wame_outbox`+where+` GROUP BY status`, args...)
 	if err != nil {
 		return OutboxCounts{}, err
 	}
@@ -223,13 +294,16 @@ func (s *Store) CountOutbox(f OutboxFilter) (OutboxCounts, error) {
 	var c OutboxCounts
 	for rows.Next() {
 		var status string
-		var n int
+		var n, delivered, read int
 		var oldest, due int64
-		if err := rows.Scan(&status, &n, &oldest, &due); err != nil {
+		if err := rows.Scan(&status, &n, &oldest, &due, &delivered, &read); err != nil {
 			return c, err
 		}
 		if p := c.of(status); p != nil {
 			*p = n
+		}
+		if status == OutboxSent {
+			c.Delivered, c.Read = delivered, read
 		}
 		if status == OutboxQueued {
 			c.OldestQueued, c.NextDue = time.UnixMilli(oldest), time.UnixMilli(due)
@@ -287,6 +361,27 @@ func (s *Store) CancelOutbox(id int64, f OutboxFilter) ([]OutboxItem, error) {
 	}
 	return s.queryOutbox(`UPDATE wame_outbox SET status = ?, updated_at = ?`+where+` RETURNING `+outboxColumns,
 		append([]any{OutboxCanceled, time.Now().UnixMilli()}, args...)...)
+}
+
+// MarkOutboxReceipt records a delivery receipt (or, with read, a read receipt) on the items sent
+// with these message ids and returns only the items it changed, so each change is reported once.
+// A read also sets delivered_at when it's missing: WhatsApp doesn't always send both.
+func (s *Store) MarkOutboxReceipt(messageIDs []string, read bool, at time.Time) ([]OutboxItem, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+	ms := at.UnixMilli()
+	set, unchanged, args := `delivered_at = ?`, `delivered_at = 0`, []any{ms}
+	if read {
+		set, unchanged = `read_at = ?, delivered_at = CASE WHEN delivered_at = 0 THEN ? ELSE delivered_at END`, `read_at = 0`
+		args = append(args, ms)
+	}
+	for _, id := range messageIDs {
+		args = append(args, id)
+	}
+	// message_id != '' lets SQLite use the partial index, and keeps unsent items out.
+	return s.queryOutbox(`UPDATE wame_outbox SET `+set+` WHERE message_id != '' AND message_id IN (`+placeholders(len(messageIDs))+`) AND `+
+		unchanged+` RETURNING `+outboxColumns, args...)
 }
 
 // RequeueSending puts items left in sending by a crash or shutdown back in the queue. They keep their

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/store"
@@ -118,6 +119,22 @@ var queueStyles = map[string]func(...string) string{
 	store.OutboxCanceled: styleFaint.Render,
 }
 
+// styleRead is the blue of WhatsApp's read ticks.
+var styleRead = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+
+// queueState shows a sent item's receipts the way WhatsApp does: ✓ sent, ✓✓ delivered, blue ✓✓ read.
+func queueState(it store.OutboxItem) string {
+	switch it.Progress() {
+	case store.OutboxRead:
+		return styleRead.Render("✓✓ read")
+	case store.OutboxDelivered:
+		return "✓✓ delivered"
+	case store.OutboxSent:
+		return styleDim.Render("✓ sent")
+	}
+	return queueStyles[it.Status](it.Status)
+}
+
 func queueBody(q bot.QueueStats) string {
 	state := styleAccent.Render("sending")
 	switch {
@@ -125,6 +142,8 @@ func queueBody(q bot.QueueStats) string {
 		state = styleWarn.Render("no worker") + styleDim.Render(" (serve or tui must be running)")
 	case q.Paused:
 		state = styleWarn.Render("paused")
+	case !q.QuietUntil.IsZero():
+		state = styleWarn.Render("quiet hours") + styleDim.Render(" until "+q.QuietUntil.Format("15:04")+" "+safe(q.Timezone))
 	case !q.CooldownUntil.IsZero():
 		state = styleWarn.Render("backing off") + styleDim.Render(" until "+stamp(q.CooldownUntil, "15:04:05"))
 	case q.Queued == 0:
@@ -133,6 +152,13 @@ func queueBody(q bot.QueueStats) string {
 	rows := [][2]string{
 		{"State", state},
 		{"Waiting", styleBold.Render(fmt.Sprint(q.Queued+q.Sending)) + styleDim.Render(fmt.Sprintf("  (%d sent, %d failed, %d canceled, kept a week)", q.Sent, q.Failed, q.Canceled))},
+	}
+	if q.Sent > 0 {
+		rows = append(rows, [2]string{"Receipts", fmt.Sprintf("%d delivered", q.Delivered) + styleDim.Render(" · ") +
+			styleRead.Render(fmt.Sprintf("%d read", q.Read)) + styleDim.Render(fmt.Sprintf(" of %d sent", q.Sent))})
+	}
+	if q.QuietHours != "" {
+		rows = append(rows, [2]string{"Quiet hours", q.QuietHours + styleDim.Render(" "+safe(q.Timezone))})
 	}
 	if !q.OldestQueued.IsZero() && q.Queued > 0 {
 		rows = append(rows, [2]string{"Oldest", relTime(q.OldestQueued)})
@@ -157,7 +183,7 @@ func (m *model) viewQueue() string {
 		filter = m.queueStatus
 	}
 	lines = append(lines, "   "+styleDim.Render(fmt.Sprintf("showing %s · %d of %d", filter, len(m.queue.Items), m.queue.Counts.Of(m.queueStatus))))
-	cols := []int{6, 14, 18, 9, 4, 12, 12}
+	cols := []int{6, 14, 18, 13, 4, 12, 12}
 	lines = append(lines, "   "+styleHead.Render(table(cols, "ID", "BATCH", "TO", "STATE", "TRY", "BY", "DUE", "ERROR")))
 	if len(m.queue.Items) == 0 {
 		return strings.Join(append(lines, "   "+styleDim.Render("nothing here")), "\n")
@@ -170,7 +196,7 @@ func (m *model) viewQueue() string {
 			due = styleDim.Render(relTime(it.Updated))
 		}
 		line := table(cols, fmt.Sprint(it.ID), fit(safe(it.Batch), 13), displayJID(safe(cmp.Or(it.Chat, it.To))),
-			queueStyles[it.Status](it.Status), fmt.Sprint(it.Attempts), fit(safe(it.Actor), 11), due, styleErr.Render(safe(it.Error)))
+			queueState(it), fmt.Sprint(it.Attempts), fit(safe(it.Actor), 11), due, styleErr.Render(safe(it.Error)))
 		lines = append(lines, m.row(line, i == m.queueSel))
 	}
 	return strings.Join(lines, "\n")

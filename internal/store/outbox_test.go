@@ -1,8 +1,10 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,6 +51,85 @@ func TestOutboxLifecycle(t *testing.T) {
 	}
 	if n, _ := s.PruneOutbox(time.Now().Add(time.Minute)); n != 1 {
 		t.Fatalf("pruned %d, want only the sent one", n)
+	}
+}
+
+func TestOutboxReceipts(t *testing.T) {
+	s := openStore(t)
+	items, _ := s.Enqueue([]OutboxItem{
+		{Batch: "promo", Actor: "ops", To: "5511999999999", Text: "Hi Maria"},
+		{Batch: "promo", Actor: "ops", To: "5511988887777", Text: "Hi John"},
+	})
+	for i, it := range items {
+		if _, err := s.ClaimOutbox(it.ID, fmt.Sprintf("MSG%d", i)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.FinishOutbox(it.ID, OutboxResult{Status: OutboxSent}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := time.Now()
+	changed, err := s.MarkOutboxReceipt([]string{"MSG0", "MSG1", "OTHER"}, false, at)
+	if err != nil || len(changed) != 2 || changed[0].Progress() != OutboxDelivered || !changed[0].Read.IsZero() {
+		t.Fatalf("delivered: %v %+v", err, changed)
+	}
+	if again, _ := s.MarkOutboxReceipt([]string{"MSG0"}, false, at); len(again) != 0 {
+		t.Fatal("a repeated receipt must not report a change")
+	}
+	read, _ := s.MarkOutboxReceipt([]string{"MSG1"}, true, at.Add(time.Second))
+	if len(read) != 1 || read[0].Progress() != OutboxRead || !read[0].Delivered.Equal(time.UnixMilli(at.UnixMilli())) {
+		t.Fatalf("read must keep the delivery time: %+v", read)
+	}
+	if again, _ := s.MarkOutboxReceipt([]string{"MSG1"}, false, at); len(again) != 0 {
+		t.Fatal("a late delivery receipt after read must not report a change")
+	}
+	c, _ := s.CountOutbox(OutboxFilter{})
+	if c.Sent != 2 || c.Delivered != 2 || c.Read != 1 {
+		t.Fatalf("counts %+v", c)
+	}
+	if none, err := s.MarkOutboxReceipt(nil, true, at); none != nil || err != nil {
+		t.Fatal("no ids, no query")
+	}
+	if _, err := s.Enqueue([]OutboxItem{{Batch: "promo", Actor: "ops", To: "552187654321", Text: "Hi Ana"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.MarkOutboxReceipt([]string{""}, true, at); len(got) != 0 {
+		t.Fatalf("an empty id must not match items not sent yet: %+v", got)
+	}
+	var detail string
+	var id, parent, unused int
+	if err := s.db.QueryRow(`EXPLAIN QUERY PLAN UPDATE wame_outbox SET read_at = 1 WHERE message_id != '' AND message_id IN (?, ?) AND read_at = 0`,
+		"A", "B").Scan(&id, &parent, &unused, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(detail, "wame_outbox_message") {
+		t.Fatalf("receipts must use the message id index, plan: %s", detail)
+	}
+}
+
+func TestOutboxReceiptColumnsAddedToOldTables(t *testing.T) {
+	db := openDB(t)
+	if _, err := db.Exec(`CREATE TABLE wame_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, batch TEXT NOT NULL, actor TEXT NOT NULL,
+		token_id TEXT NOT NULL DEFAULT '', key TEXT NOT NULL DEFAULT '', recipient TEXT NOT NULL, text TEXT NOT NULL,
+		reply_to TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, due INTEGER NOT NULL,
+		created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, chat TEXT NOT NULL DEFAULT '',
+		message_id TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '');
+		INSERT INTO wame_outbox (batch, actor, recipient, text, status, due, created_at, updated_at, message_id)
+		VALUES ('old', 'ops', '5511999999999', 'Hi Maria', 'sent', 1, 1, 1, 'OLD1')`); err != nil {
+		t.Fatal(err)
+	}
+	var s *Store
+	for range 2 {
+		var err error
+		if s, err = Open(context.Background(), db); err != nil {
+			t.Fatal(err)
+		}
+		if it, err := s.OutboxItem(1); err != nil || !it.Delivered.IsZero() || it.Batch != "old" {
+			t.Fatalf("%v %+v", err, it)
+		}
+	}
+	if got, _ := s.MarkOutboxReceipt([]string{"OLD1"}, true, time.Now()); len(got) != 1 {
+		t.Fatal("receipts must work on an upgraded table")
 	}
 }
 

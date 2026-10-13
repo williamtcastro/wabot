@@ -69,6 +69,10 @@ Flags (right after the command, before other arguments):
   -online                appear "online" while connected (off: your phone keeps getting notifications)
   -autoreply             answer !ping, !time and !help (default true)
   -queue-jitter D        wait a random 0–D more between queued sends (env WAME_QUEUE_JITTER, default 2s)
+  -queue-quiet-hours W   send nothing from the queue in this daily window, e.g. 21:00-08:00
+                         (env WAME_QUEUE_QUIET_HOURS, default off)
+  -queue-timezone TZ     time zone of the quiet hours, e.g. America/Sao_Paulo
+                         (env WAME_QUEUE_TIMEZONE, default Local: the server's zone)
   -log-format F          text or json (env WAME_LOG_FORMAT, default text)
   -log-file PATH         write app logs to PATH instead of stderr (env WAME_LOG_FILE)
   -debug                 verbose logs, including whatsmeow's
@@ -79,6 +83,7 @@ type config struct {
 	db, addr, token, phone                string
 	webhook, webhookSecret, webhookFilter string
 	logFormat, logFile                    string
+	quietHours, timezone                  string
 	rate                                  int
 	chatGap, maxWait, queueJitter         time.Duration
 	autoreply, typing, online, debug      bool
@@ -132,6 +137,8 @@ func main() {
 		os.Exit(2)
 	}
 	fs.DurationVar(&c.queueJitter, "queue-jitter", queueJitter, "")
+	fs.StringVar(&c.quietHours, "queue-quiet-hours", envOr("WAME_QUEUE_QUIET_HOURS", ""), "")
+	fs.StringVar(&c.timezone, "queue-timezone", envOr("WAME_QUEUE_TIMEZONE", "Local"), "")
 	fs.BoolVar(&c.typing, "typing", false, "")
 	fs.BoolVar(&c.online, "online", false, "")
 	fs.BoolVar(&c.debug, "debug", false, "")
@@ -189,8 +196,17 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 		}
 		b.StartWebhook(c.webhook, c.webhookSecret)
 	}
+	quietHours, err := bot.ParseQuietHours(c.quietHours)
+	if err != nil {
+		return fmt.Errorf("-queue-quiet-hours: %w", err)
+	}
+	tz, err := bot.ParseTimezone(c.timezone)
+	if err != nil {
+		return fmt.Errorf("-queue-timezone: %w", err)
+	}
 	// Settings changed at runtime (GET/PATCH /settings) override these flags.
-	if _, err := b.InitSettings(bot.Settings{Rate: c.rate, ChatGap: c.chatGap, MaxWait: c.maxWait, AutoReply: c.autoreply, WebhookFilter: c.webhookFilter, QueueJitter: c.queueJitter}); err != nil {
+	if _, err := b.InitSettings(bot.Settings{Rate: c.rate, ChatGap: c.chatGap, MaxWait: c.maxWait, AutoReply: c.autoreply,
+		WebhookFilter: c.webhookFilter, QueueJitter: c.queueJitter, QuietHours: quietHours, Timezone: tz}); err != nil {
 		return err
 	}
 

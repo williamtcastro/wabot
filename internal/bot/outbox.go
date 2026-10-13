@@ -59,9 +59,77 @@ type QueueStats struct {
 	Paused        bool      `json:"paused"`
 	Running       bool      `json:"running"`
 	JitterMS      int64     `json:"jitter_ms"`
+	QuietHours    string    `json:"quiet_hours,omitempty"`
+	Timezone      string    `json:"timezone"`
+	QuietUntil    time.Time `json:"quiet_until,omitzero"`
 	CooldownUntil time.Time `json:"cooldown_until,omitzero"`
 	LastError     string    `json:"last_error,omitempty"`
 	LastErrorAt   time.Time `json:"last_error_at,omitzero"`
+}
+
+// QuietHours is a daily window, in minutes since midnight, when the queue sends nothing. It may
+// wrap midnight (21:00-08:00). The zero value is off.
+type QuietHours struct{ start, end int }
+
+// ParseQuietHours reads "HH:MM-HH:MM"; "" turns quiet hours off.
+func ParseQuietHours(s string) (QuietHours, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return QuietHours{}, nil
+	}
+	from, to, ok := strings.Cut(s, "-")
+	start, err1 := time.Parse("15:04", strings.TrimSpace(from))
+	end, err2 := time.Parse("15:04", strings.TrimSpace(to))
+	switch {
+	case !ok || err1 != nil || err2 != nil:
+		return QuietHours{}, fmt.Errorf("%q isn't a window like 21:00-08:00 (empty turns it off)", s)
+	case start.Equal(end):
+		return QuietHours{}, errors.New("start and end must differ")
+	}
+	return QuietHours{start.Hour()*60 + start.Minute(), end.Hour()*60 + end.Minute()}, nil
+}
+
+func (q QuietHours) On() bool { return q.start != q.end }
+
+func (q QuietHours) String() string {
+	if !q.On() {
+		return ""
+	}
+	return fmt.Sprintf("%02d:%02d-%02d:%02d", q.start/60, q.start%60, q.end/60, q.end%60)
+}
+
+// Until is when the window that now falls in ends, read on loc's wall clock, or zero outside it.
+func (q QuietHours) Until(now time.Time, loc *time.Location) time.Time {
+	if !q.On() {
+		return time.Time{}
+	}
+	t := now.In(loc)
+	m := t.Hour()*60 + t.Minute()
+	endOn := func(days int) time.Time {
+		return time.Date(t.Year(), t.Month(), t.Day()+days, q.end/60, q.end%60, 0, 0, loc)
+	}
+	switch {
+	case q.start < q.end && m >= q.start && m < q.end:
+		return endOn(0)
+	case q.start > q.end && m >= q.start:
+		return endOn(1)
+	case q.start > q.end && m < q.end:
+		return endOn(0)
+	}
+	return time.Time{}
+}
+
+// ParseTimezone loads an IANA zone name; "" or "Local" is the server's own zone.
+func ParseTimezone(name string) (*time.Location, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "Local" {
+		return time.Local, nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("unknown time zone %q (use an IANA name like America/Sao_Paulo)", name)
+	}
+	return loc, nil
 }
 
 type outbox struct {
@@ -168,6 +236,7 @@ func (b *Bot) QueueStats() QueueStats {
 	b.outbox.mu.Lock()
 	defer b.outbox.mu.Unlock()
 	st := QueueStats{OutboxCounts: c, Paused: s.QueuePaused, Running: b.outbox.running, JitterMS: s.QueueJitter.Milliseconds(),
+		QuietHours: s.QuietHours.String(), Timezone: s.location().String(), QuietUntil: s.QuietHours.Until(time.Now(), s.location()),
 		LastError: b.outbox.lastErr, LastErrorAt: b.outbox.lastErrAt}
 	if time.Now().Before(b.outbox.cooldown) {
 		st.CooldownUntil = b.outbox.cooldown
@@ -186,8 +255,29 @@ func (b *Bot) queueEvent(it store.OutboxItem) {
 	b.publish(QueueEvent{Item: it})
 	if b.Webhook != nil && (it.Status == store.OutboxSent || it.Status == store.OutboxFailed) {
 		if body, err := json.Marshal(it); err == nil {
-			b.Webhook.enqueue(webhookJob{event: "queue", body: body, id: fmt.Sprintf("q%d-%s-%s", it.ID, it.Status, randomHex(4))})
+			b.Webhook.enqueue(webhookJob{event: "queue", body: body, id: fmt.Sprintf("q%d-%s-%s", it.ID, it.Progress(), randomHex(4))})
 		}
+	}
+}
+
+// outboxReceipt records a delivery or read receipt for queued messages. It runs inline in the
+// event handler: one indexed UPDATE is quick, and doing it in order keeps a read from landing
+// before its delivery.
+func (b *Bot) outboxReceipt(ids []types.MessageID, read bool, at time.Time) {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	strs := make([]string, len(ids))
+	for i, id := range ids {
+		strs[i] = string(id)
+	}
+	items, err := b.Store.MarkOutboxReceipt(strs, read, at)
+	if err != nil {
+		b.Log.Error("outbox: receipt", "err", err)
+		return
+	}
+	for _, it := range items {
+		b.queueEvent(it)
 	}
 }
 
@@ -236,9 +326,12 @@ func (b *Bot) pruneOutbox() {
 // outboxStep sends at most one message and returns how long to wait before the next step.
 func (b *Bot) outboxStep(ctx context.Context) time.Duration {
 	s := b.currentSettings()
+	quietUntil := s.QuietHours.Until(time.Now(), s.location())
 	switch {
 	case s.QueuePaused:
 		return outboxIdle
+	case !quietUntil.IsZero():
+		return max(time.Until(quietUntil), outboxMinStep)
 	case !b.Client.IsConnected() || !b.Client.IsLoggedIn():
 		return outboxOffline
 	}
@@ -281,7 +374,16 @@ func (b *Bot) outboxStep(ctx context.Context) time.Duration {
 			b.sendQueued(ctx, it)
 			return jitter(s.QueueJitter)
 		}
-		d, ok := b.outboxSlot(tok, b.PhoneJID(jid).String())
+		chat := b.PhoneJID(jid).String()
+		if err := b.checkOptOut(chat); err != nil {
+			if _, isInput := errors.AsType[InputError](err); !isInput {
+				b.Log.Error("outbox: opt-out check", "err", err)
+				return outboxOffline
+			}
+			b.finishQueued(it, store.OutboxResult{Status: store.OutboxFailed, Chat: chat, Error: err.Error()})
+			continue
+		}
+		d, ok := b.outboxSlot(tok, chat)
 		if !ok {
 			wait = min(wait, d)
 			continue

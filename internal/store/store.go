@@ -40,6 +40,9 @@ func Open(ctx context.Context, db *sql.DB) (*Store, error) {
 	if err := migrateOutbox(ctx, db); err != nil {
 		return nil, fmt.Errorf("create outbox table: %w", err)
 	}
+	if err := migrateOptOuts(ctx, db); err != nil {
+		return nil, fmt.Errorf("create opt-out table: %w", err)
+	}
 	return &Store{db: db}, nil
 }
 

@@ -386,3 +386,45 @@ func TestQueueTab(t *testing.T) {
 		t.Fatalf("filter: %q %d", m.queueStatus, len(m.queue.Items))
 	}
 }
+
+func TestQueueTabReceiptsAndQuietHours(t *testing.T) {
+	b, c := newServer(t)
+	items, err := b.Enqueue("api", "", "promo", "", []bot.QueueRequest{{To: "5511999999999", Text: "Hi Maria"}, {To: "5511988887777", Text: "Hi John"}, {To: "5521987654321", Text: "Hi Ana"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, it := range items {
+		if _, err := b.Store.ClaimOutbox(it.ID, string(rune('A'+i))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.Store.FinishOutbox(it.ID, store.OutboxResult{Status: store.OutboxSent}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := b.Store.MarkOutboxReceipt([]string{"A", "B"}, false, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Store.MarkOutboxReceipt([]string{"A"}, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	sp, _ := time.LoadLocation("America/Sao_Paulo")
+	now := time.Now().In(sp)
+	window := now.Add(-time.Hour).Format("15:04") + "-" + now.Add(time.Hour).Format("15:04")
+	if err := b.UpdateSettings("api", map[string]*string{"queue_quiet_hours": &window, "queue_timezone": new("America/Sao_Paulo")}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	b.Go(b.RunOutbox)
+	for deadline := time.Now().Add(5 * time.Second); !b.QueueStats().Running && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+	}
+
+	m := newTestModel(t, Options{Client: c})
+	press(m, "7")
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"✓✓ read", "✓✓ delivered", "✓ sent", "2 delivered · 1 read of 3 sent",
+		"quiet hours until " + now.Add(time.Hour).Format("15:04") + " America/Sao_Paulo", window} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("missing %q:\n%s", want, view)
+		}
+	}
+}

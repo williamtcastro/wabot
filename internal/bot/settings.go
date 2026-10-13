@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	// The distroless image has no zoneinfo, and queue_timezone needs it.
+	_ "time/tzdata"
 
 	"github.com/williamtcastro/wame/internal/store"
 )
@@ -21,10 +23,13 @@ type Settings struct {
 	WebhookFilter string
 	QueuePaused   bool
 	QueueJitter   time.Duration
+	QuietHours    QuietHours
+	Timezone      *time.Location // nil means time.Local
 }
 
 // SettingKeys are the names used by the API, the table and the audit log, in display order.
-var SettingKeys = []string{"rate", "chat_gap", "max_wait", "auto_reply", "webhook_filter", "queue_paused", "queue_jitter"}
+var SettingKeys = []string{"rate", "chat_gap", "max_wait", "auto_reply", "webhook_filter", "queue_paused", "queue_jitter",
+	"queue_quiet_hours", "queue_timezone"}
 
 const maxSettingDuration = 10 * time.Minute
 
@@ -54,8 +59,19 @@ func (s Settings) get(key string) string {
 		return strconv.FormatBool(s.QueuePaused)
 	case "queue_jitter":
 		return s.QueueJitter.String()
+	case "queue_quiet_hours":
+		return s.QuietHours.String()
+	case "queue_timezone":
+		return s.location().String()
 	}
 	return ""
+}
+
+func (s Settings) location() *time.Location {
+	if s.Timezone == nil {
+		return time.Local
+	}
+	return s.Timezone
 }
 
 func (s *Settings) set(key, value string) error {
@@ -91,6 +107,18 @@ func (s *Settings) set(key, value string) error {
 		}
 	case "queue_jitter":
 		s.QueueJitter, err = duration()
+	case "queue_quiet_hours":
+		q, perr := ParseQuietHours(value)
+		if perr != nil {
+			return BadInput("queue_quiet_hours: %v", perr)
+		}
+		s.QuietHours = q
+	case "queue_timezone":
+		loc, perr := ParseTimezone(value)
+		if perr != nil {
+			return BadInput("queue_timezone: %v", perr)
+		}
+		s.Timezone = loc
 	case "webhook_filter":
 		if _, err := ParseWebhookFilter(value); err != nil {
 			return BadInput("webhook_filter: %v", err)

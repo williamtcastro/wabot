@@ -146,14 +146,19 @@ func textMatches(query, text string) bool {
 	return true
 }
 
-var stripMarks = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
-
-func tokens(s string) []string {
+// Fold lowercases s and strips its accents, the way search compares words.
+func Fold(s string) string {
+	// A Chain keeps buffers between calls, so it can't be shared by goroutines.
+	stripMarks := transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
 	folded, _, err := transform.String(stripMarks, strings.ToLower(s))
 	if err != nil {
-		folded = strings.ToLower(s)
+		return strings.ToLower(s)
 	}
-	return strings.FieldsFunc(folded, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) })
+	return folded
+}
+
+func tokens(s string) []string {
+	return strings.FieldsFunc(Fold(s), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) })
 }
 
 // placeholders returns "?,?,…" with n marks, for an IN list.

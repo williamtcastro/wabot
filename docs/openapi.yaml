@@ -659,6 +659,56 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: "Already sending or finished", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
+  /optouts:
+    get:
+      tags: [Queue]
+      summary: Chats that get no queued messages
+      description: |
+        A person is added when they send a 1:1 message that is only STOP, SAIR, PARAR, CANCELAR, UNSUBSCRIBE
+        or DESCADASTRAR (case and accents ignored); wame doesn't reply. Queued items to a listed chat fail with
+        "recipient opted out" when their turn comes. Direct sends aren't affected. Newest first. Requires admin.
+      responses:
+        "200":
+          description: The list
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/OptOut" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Queue]
+      summary: Add a chat to the opt-out list
+      description: Takes a number or a person's JID (numbers are checked with WhatsApp when logged in). Audited as optout_add. Requires admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chat]
+              properties:
+                chat: { type: string, example: "5511999999999" }
+      responses:
+        "200": { description: Already listed, content: { application/json: { schema: { $ref: "#/components/schemas/OptOutResult" } } } }
+        "201": { description: Added, content: { application/json: { schema: { $ref: "#/components/schemas/OptOutResult" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /optouts/{chat}:
+    parameters:
+      - { name: chat, in: path, required: true, schema: { type: string }, description: "Number or JID" }
+    delete:
+      tags: [Queue]
+      summary: Take a chat off the opt-out list
+      description: Audited as optout_remove. Requires admin.
+      responses:
+        "200": { description: Removed, content: { application/json: { schema: { type: object, properties: { removed: { type: boolean } } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /stats:
     get:
       tags: [Admin]
@@ -707,6 +757,8 @@ paths:
                 webhook_filter: { type: string, nullable: true, description: "Same syntax as -webhook-filter; only has an effect with -webhook" }
                 queue_paused: { nullable: true, description: "true holds the send queue" }
                 queue_jitter: { type: string, nullable: true, description: "Random extra wait between queued sends, up to 10m" }
+                queue_quiet_hours: { type: string, nullable: true, description: "Daily window when the queue sends nothing, like 21:00-08:00 (may cross midnight); empty turns it off" }
+                queue_timezone: { type: string, nullable: true, description: "IANA zone the quiet hours are read in, like America/Sao_Paulo; Local is the server's zone" }
             example: { rate: 10, auto_reply: false, chat_gap: null }
       responses:
         "200":
@@ -1114,6 +1166,9 @@ components:
                 paused: { type: boolean }
                 running: { type: boolean, description: "A worker runs in this process (serve or tui)" }
                 jitter_ms: { type: integer }
+                quiet_hours: { type: string, description: "The queue_quiet_hours window, absent when off", example: "21:00-08:00" }
+                timezone: { type: string, description: "The zone quiet hours are read in", example: "America/Sao_Paulo" }
+                quiet_until: { type: string, format: date-time, description: "Present while quiet hours hold the queue" }
                 cooldown_until: { type: string, format: date-time, description: "Backing off after repeated WhatsApp errors" }
                 last_error: { type: string }
                 last_error_at: { type: string, format: date-time }
@@ -1138,6 +1193,8 @@ components:
         chat: { type: string, description: "The chat it went to, once sent" }
         message_id: { type: string, description: "WhatsApp message id, the same on every attempt" }
         error: { type: string, description: "Last error" }
+        delivered_at: { type: string, format: date-time, description: "When WhatsApp reported it delivered; absent until then" }
+        read_at: { type: string, format: date-time, description: "When WhatsApp reported it read; absent until then (or if the person hides read receipts)" }
     QueueCounts:
       type: object
       properties:
@@ -1146,8 +1203,22 @@ components:
         sent: { type: integer }
         failed: { type: integer }
         canceled: { type: integer }
+        delivered: { type: integer, description: "Sent items WhatsApp reported delivered (read ones included)" }
+        read: { type: integer, description: "Sent items WhatsApp reported read" }
         oldest_queued: { type: string, format: date-time }
         next_due: { type: string, format: date-time }
+    OptOut:
+      type: object
+      properties:
+        chat: { type: string, example: "5511999999999@s.whatsapp.net" }
+        reason: { type: string, description: "The keyword the person sent (STOP, SAIR, PARAR, CANCELAR, UNSUBSCRIBE, DESCADASTRAR), or manual" }
+        at: { type: string, format: date-time }
+        by: { type: string, description: "whatsapp, or the token name that added it" }
+    OptOutResult:
+      type: object
+      properties:
+        chat: { type: string, description: "The chat key it's stored under" }
+        added: { type: boolean }
     CallerStats:
       type: object
       properties:
@@ -1161,7 +1232,7 @@ components:
     SettingView:
       type: object
       properties:
-        key: { type: string, enum: [rate, chat_gap, max_wait, auto_reply, webhook_filter, queue_paused, queue_jitter] }
+        key: { type: string, enum: [rate, chat_gap, max_wait, auto_reply, webhook_filter, queue_paused, queue_jitter, queue_quiet_hours, queue_timezone] }
         value: { type: string, description: "Effective value" }
         default: { type: string, description: "The flag's value, used when not overridden" }
         overridden: { type: boolean }
@@ -1181,7 +1252,7 @@ components:
         id: { type: integer, format: int64 }
         at: { type: string, format: date-time }
         actor: { type: string, description: "Token name for API/MCP calls (api = owner secret or token-less, mcp = stdio without a token), or tui, cli, autoreply, whatsapp", example: "support-bot" }
-        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel] }
+        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel, optout_add, optout_remove] }
         target: { type: string, description: "Chat JID, when there is one" }
         detail: { type: string, example: "text, 6 chars" }
         ok: { type: boolean }

@@ -27,6 +27,8 @@ Base URL: whatever you passed to `-addr` (default `http://127.0.0.1:8080` for `s
 | POST | `/queue` | queue up to 1000 texts for paced sending in the background |
 | GET | `/queue`, `/queue/{id}` | queued, sent and failed items with counts |
 | DELETE | `/queue/{id}`, `/queue?batch=` | cancel queued items |
+| GET, POST | `/optouts` | chats that get no queued messages; add one |
+| DELETE | `/optouts/{chat}` | take a chat off that list |
 | GET | `/messages` | stored messages, filtered; newest first or cursor-paged |
 | GET | `/messages/wait` | long-poll until new matching messages arrive |
 | GET | `/events` | live SSE stream with resume |
@@ -125,6 +127,7 @@ the token name is what the [audit log](#get-audit) records as the actor.
 | `GET /contacts`, `GET /groups` | read | 403 |
 | `POST /check` | send | 403 |
 | `GET /audit`, `GET /stats`, `GET /settings`, `PATCH /settings`, `POST /webhook/test`, `POST /webhook/replay` | admin | n/a |
+| `GET /optouts`, `POST /optouts`, `DELETE /optouts/{chat}` | admin | n/a |
 | `GET /tokens`, `POST /tokens`, `DELETE /tokens/{name}` | admin | n/a |
 | `GET /docs`, `GET /openapi.yaml` | none | public |
 | `/mcp` | per tool (see [MCP.md](MCP.md)) | same rules per tool call |
@@ -475,8 +478,35 @@ curl -H "$H" -X DELETE "localhost:8080/queue?batch=promo-october"     # cancel w
 `GET /queue` lists items newest first (`status`, `batch`, `actor`, `before`, `limit` ≤ 500) with
 `counts` by state; `GET /queue/{id}` shows one; `DELETE /queue/{id}` cancels one (409 once it's
 sending or finished). Without `admin`, a token sees and cancels only its own items.
-[QUEUE.md](QUEUE.md) has the details: states, retries, pacing, pausing, and the webhook `queue`
-event.
+Sent items gain `delivered_at` and `read_at` as WhatsApp's receipts come in, and `counts` has
+`delivered` and `read` among the sent ones.
+[QUEUE.md](QUEUE.md) has the details: states, receipts, retries, pacing, pausing, quiet hours, and
+the webhook `queue` event.
+
+## `GET /optouts`, `POST /optouts`, `DELETE /optouts/{chat}`
+
+Chats that don't get [queued](#post-queue) messages. Requires `admin`. A person is added when they
+send a 1:1 message that is only `STOP`, `SAIR`, `PARAR`, `CANCELAR`, `UNSUBSCRIBE` or
+`DESCADASTRAR` (case and accents ignored, so `Sáir` counts); wame doesn't reply. Queued items to a
+listed chat are still accepted, then fail with `recipient opted out` when their turn comes (the
+check runs on the resolved chat, so either form of a Brazilian number matches). `/send`, the TUI
+and the CLI aren't affected.
+
+```sh
+curl -H "$H" localhost:8080/optouts
+curl -H "$H" -X POST localhost:8080/optouts -d '{"chat": "5511999999999"}'
+curl -H "$H" -X DELETE localhost:8080/optouts/5511999999999
+```
+
+```json
+[ { "chat": "5511999999999@s.whatsapp.net", "reason": "STOP", "at": "2026-10-12T21:40:02-03:00", "by": "whatsapp" } ]
+```
+
+- `reason` is the keyword they sent, or `manual`; `by` is `whatsapp` or the token that added it.
+- `POST` takes a number or JID (numbers are checked with WhatsApp when logged in) and answers
+  201 `{"chat": "…", "added": true}`, or 200 with `"added": false` when it was already listed. A
+  group is a 400. `DELETE` answers 404 when the chat isn't listed.
+- Audited as `optout_add` (actor `whatsapp` for keywords) and `optout_remove`.
 
 ## `GET /messages`
 
@@ -552,7 +582,7 @@ data: {"connected":true,"logged_in":true,"state":"connected", …}
 | `message` | a new message is stored (incoming, sent from your phone, or sent through wame) | carries `id: <seq>`; filtered |
 | `update` | a stored message is edited or deleted, by you or by someone else | the whole updated Message; filtered (except `since`); no `id`, not replayed |
 | `status` | connection or login state changes | a Status object; not filtered |
-| `queue` | a [queued](#post-queue) item changes state (sending, sent, failed, canceled, retry) | only with `events=queue`; the item without its text; your own items unless the token has `admin` |
+| `queue` | a [queued](#post-queue) item changes state (sending, sent, failed, canceled, retry) or a sent one is delivered or read | only with `events=queue`; the item without its text; your own items unless the token has `admin` |
 
 | Query | |
 |---|---|
@@ -765,9 +795,10 @@ when wame restarts. The webhook URL, its secret and message content are never in
     ]
   },
   "queue": {
-    "queued": 120, "sending": 1, "sent": 880, "failed": 3, "canceled": 0,
+    "queued": 120, "sending": 1, "sent": 880, "failed": 3, "canceled": 0, "delivered": 871, "read": 640,
     "oldest_queued": "2026-10-12T21:00:00-03:00", "next_due": "2026-10-12T21:41:03-03:00",
-    "paused": false, "running": true, "jitter_ms": 2000
+    "paused": false, "running": true, "jitter_ms": 2000,
+    "quiet_hours": "21:00-08:00", "timezone": "America/Sao_Paulo", "quiet_until": "2026-10-13T08:00:00-03:00"
   }
 }
 ```
@@ -783,12 +814,14 @@ when wame restarts. The webhook URL, its secret and message content are never in
   first, including ones that were retried later.
 - `queue` counts [send queue](#post-queue) items by state (finished ones are kept 7 days) and says
   whether it's `paused`, whether a worker is `running` in this process, and `cooldown_until` /
-  `last_error` while it backs off after WhatsApp errors.
+  `last_error` while it backs off after WhatsApp errors. `delivered` and `read` count sent items
+  with those receipts; `quiet_until` appears while [quiet hours](QUEUE.md#quiet-hours) hold it.
 
 ## `GET /settings`, `PATCH /settings`
 
 Some flags can be changed while wame runs, without a restart: `rate`, `chat_gap`, `max_wait`,
-`auto_reply`, `webhook_filter`, `queue_paused` and `queue_jitter`. Requires `admin`.
+`auto_reply`, `webhook_filter`, `queue_paused`, `queue_jitter`, `queue_quiet_hours` and
+`queue_timezone`. Requires `admin`.
 
 ```sh
 curl -H "$H" localhost:8080/settings
@@ -804,7 +837,9 @@ curl -H "$H" -X PATCH localhost:8080/settings -d '{"rate": null}'     # back to 
   { "key": "auto_reply", "value": "false", "default": "true", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" },
   { "key": "webhook_filter", "value": "", "default": "", "overridden": false },
   { "key": "queue_paused", "value": "false", "default": "false", "overridden": false },
-  { "key": "queue_jitter", "value": "2s", "default": "2s", "overridden": false }
+  { "key": "queue_jitter", "value": "2s", "default": "2s", "overridden": false },
+  { "key": "queue_quiet_hours", "value": "21:00-08:00", "default": "", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" },
+  { "key": "queue_timezone", "value": "America/Sao_Paulo", "default": "Local", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" }
 ]
 ```
 
@@ -812,7 +847,10 @@ curl -H "$H" -X PATCH localhost:8080/settings -d '{"rate": null}'     # back to 
   1000, and number lookups follow at 3×; `chat_gap`, `max_wait` and `queue_jitter` are durations up to `10m`;
   `webhook_filter` uses the [filter syntax](#filters) and only matters with `-webhook` (a `chat=`
   number is taken as typed; use the JID if WhatsApp knows it differently). `queue_paused` holds the
-  [send queue](#post-queue); it has no flag.
+  [send queue](#post-queue); it has no flag. `queue_quiet_hours` is a daily window like
+  `21:00-08:00` (it may cross midnight; `""` turns it off) when the queue sends nothing, read on the
+  clock of `queue_timezone`, an IANA name like `America/Sao_Paulo` (`Local`, the default, is the
+  server's zone). See [QUEUE.md](QUEUE.md#quiet-hours).
 - Every value is checked before any is applied, so a bad one changes nothing (400).
 - Changes apply at once and are stored in the `wame_settings` table, so they **win over the flags
   on the next start too**, until reset with `null`. `default` shows the flag's value.
@@ -929,7 +967,7 @@ wame spaces out everything it sends: texts, files, reactions, edits, deletes and
 
 For bulk sends, use the [send queue](#post-queue) instead of many `/send` calls: it takes only free
 slots (so interactive sends go first), adds a random gap (`-queue-jitter`), and backs off on its
-own when WhatsApp starts returning errors.
+own when WhatsApp starts returning errors. It also keeps quiet during `-queue-quiet-hours`.
 
 `-rate`, `-chat-gap`, `-max-wait` and `-autoreply` can also be changed while wame runs with
 [`PATCH /settings`](#get-settings-patch-settings) (or the admin panel); a change applies to the
@@ -964,8 +1002,8 @@ What gets delivered:
 - **not** messages sent through wame itself (API, TUI, CLI, auto-replies)
 - **not** duplicates WhatsApp sends again, protocol messages, or history-sync imports
 - edits and deletes, as `X-Wame-Event: update` with the updated Message
-- [queued](#post-queue) items when they're sent or fail, as `X-Wame-Event: queue` with the item
-  (without its text). The filter doesn't apply to these
+- [queued](#post-queue) items when they're sent or fail, and when a sent one is delivered or read,
+  as `X-Wame-Event: queue` with the item (without its text). The filter doesn't apply to these
 
 Headers on every request:
 

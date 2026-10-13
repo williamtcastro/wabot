@@ -119,6 +119,36 @@ func (a *server) cancelQueued(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]int{"canceled": 1}, err)
 }
 
+func (a *server) listOptOuts(w http.ResponseWriter, r *http.Request) {
+	list, err := a.b.OptOuts()
+	respond(w, list, err)
+}
+
+// addOptOut takes {"chat": number or JID}; 201 when added, 200 when it was already listed.
+func (a *server) addOptOut(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Chat string `json:"chat"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	o, added, err := a.b.AddOptOut(r.Context(), principal(r).Name, req.Chat)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	code := http.StatusOK
+	if added {
+		code = http.StatusCreated
+	}
+	writeJSON(w, code, map[string]any{"chat": o.Chat, "added": added})
+}
+
+func (a *server) removeOptOut(w http.ResponseWriter, r *http.Request) {
+	err := a.b.RemoveOptOut(r.Context(), principal(r).Name, r.PathValue("chat"))
+	respond(w, map[string]bool{"removed": true}, err)
+}
+
 // cancelBatch cancels every queued item of ?batch= (the caller's own unless admin).
 func (a *server) cancelBatch(w http.ResponseWriter, r *http.Request) {
 	f := queueFilter(r)

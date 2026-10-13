@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+
 	"github.com/williamtcastro/wame/internal/auth"
 	"github.com/williamtcastro/wame/internal/store"
 )
@@ -162,5 +165,140 @@ func TestQueueSettings(t *testing.T) {
 	}
 	if d := b.outboxStep(context.Background()); d != outboxIdle {
 		t.Fatalf("paused step waited %v", d)
+	}
+}
+
+func TestQuietHoursWindow(t *testing.T) {
+	sp, err := ParseTimezone("America/Sao_Paulo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(hm string) time.Time {
+		d, _ := time.Parse("15:04", hm)
+		return time.Date(2026, 10, 13, d.Hour(), d.Minute(), 0, 0, sp)
+	}
+	night, _ := ParseQuietHours("21:00-08:00")
+	lunch, _ := ParseQuietHours(" 12:00 - 13:30 ")
+	for _, c := range []struct {
+		q    QuietHours
+		now  string
+		want time.Time
+	}{
+		{night, "20:59", time.Time{}},
+		{night, "21:00", at("08:00").AddDate(0, 0, 1)},
+		{night, "23:59", at("08:00").AddDate(0, 0, 1)},
+		{night, "00:00", at("08:00")},
+		{night, "07:59", at("08:00")},
+		{night, "08:00", time.Time{}},
+		{lunch, "12:00", at("13:30")},
+		{lunch, "13:30", time.Time{}},
+		{lunch, "11:00", time.Time{}},
+		{QuietHours{}, "12:00", time.Time{}},
+	} {
+		if got := c.q.Until(at(c.now), sp); !got.Equal(c.want) {
+			t.Errorf("%s at %s: until %v, want %v", c.q, c.now, got, c.want)
+		}
+	}
+	if lunch.String() != "12:00-13:30" || (QuietHours{}).String() != "" {
+		t.Fatalf("String: %q", lunch.String())
+	}
+	if got := night.Until(at("22:00").UTC(), sp); !got.Equal(at("08:00").AddDate(0, 0, 1)) {
+		t.Fatalf("the window is read on the zone's clock, not the server's: %v", got)
+	}
+	for _, bad := range []string{"21:00", "21:00-21:00", "25:00-08:00", "9pm-8am", "21:00-"} {
+		if _, err := ParseQuietHours(bad); err == nil {
+			t.Errorf("ParseQuietHours(%q) accepted", bad)
+		}
+	}
+	if loc, err := ParseTimezone(""); err != nil || loc != time.Local {
+		t.Fatal("empty is the server's zone")
+	}
+	if _, err := ParseTimezone("Mars/Olympus"); err == nil {
+		t.Fatal("unknown zone accepted")
+	}
+}
+
+func TestQuietHoursHoldTheQueue(t *testing.T) {
+	b := newTestBot(t)
+	if _, err := b.InitSettings(Settings{Rate: 20}); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []map[string]*string{{"queue_quiet_hours": new("soon")}, {"queue_timezone": new("Nowhere/Town")}} {
+		if err := b.UpdateSettings("ops", bad); !isInputError(err) {
+			t.Fatalf("%v accepted: %v", bad, err)
+		}
+	}
+	sp, _ := time.LoadLocation("America/Sao_Paulo")
+	now := time.Now().In(sp)
+	window := now.Add(-time.Hour).Format("15:04") + "-" + now.Add(time.Hour).Format("15:04")
+	if err := b.UpdateSettings("ops", map[string]*string{"queue_quiet_hours": &window, "queue_timezone": new("America/Sao_Paulo")}); err != nil {
+		t.Fatal(err)
+	}
+	s := b.QueueStats()
+	if s.QuietHours != window || s.Timezone != "America/Sao_Paulo" || time.Until(s.QuietUntil) < 50*time.Minute {
+		t.Fatalf("%+v", s)
+	}
+	if d := b.outboxStep(context.Background()); d < 50*time.Minute || d > 61*time.Minute {
+		t.Fatalf("a quiet step must sleep until the window ends, waited %v", d)
+	}
+	view, _ := b.SettingsView()
+	for _, v := range view {
+		if v.Key == "queue_timezone" && (v.Value != "America/Sao_Paulo" || v.Default != "Local") {
+			t.Fatalf("%+v", v)
+		}
+	}
+	if err := b.UpdateSettings("ops", map[string]*string{"queue_quiet_hours": new("")}); err != nil {
+		t.Fatal(err)
+	}
+	if s := b.QueueStats(); !s.QuietUntil.IsZero() || s.QuietHours != "" {
+		t.Fatalf("turned off: %+v", s)
+	}
+	if d := b.outboxStep(context.Background()); d != outboxOffline {
+		t.Fatalf("outside quiet hours the offline check applies again, waited %v", d)
+	}
+}
+
+func TestOutboxReceiptEvents(t *testing.T) {
+	b := newTestBot(t)
+	items, _ := b.Enqueue("ops", "", "promo", "", []QueueRequest{{To: "5511999999999", Text: "Hi Maria"}})
+	if _, err := b.Store.ClaimOutbox(items[0].ID, "MSG1"); err != nil {
+		t.Fatal(err)
+	}
+	b.finishQueued(items[0], store.OutboxResult{Status: store.OutboxSent, Chat: maria})
+	ch, unsub := b.Subscribe()
+	defer unsub()
+	chat, _ := types.ParseJID(maria)
+	receipt := func(typ types.ReceiptType, fromMe bool, ids ...types.MessageID) {
+		b.handle(&events.Receipt{MessageSource: types.MessageSource{Chat: chat, Sender: chat, IsFromMe: fromMe}, MessageIDs: ids, Type: typ, Timestamp: time.Now()})
+	}
+	next := func() string {
+		select {
+		case v := <-ch:
+			e, ok := v.(QueueEvent)
+			if !ok || e.Item.Text != "" {
+				t.Fatalf("event %#v", v)
+			}
+			return e.Item.Progress()
+		default:
+			return ""
+		}
+	}
+
+	receipt(types.ReceiptTypeDelivered, false, "MSG1", "UNRELATED")
+	if got := next(); got != store.OutboxDelivered {
+		t.Fatalf("delivered event = %q", got)
+	}
+	receipt(types.ReceiptTypeDelivered, false, "MSG1")
+	receipt(types.ReceiptTypeReadSelf, true, "MSG1")
+	receipt(types.ReceiptTypeRead, true, "MSG1")
+	if got := next(); got != "" {
+		t.Fatalf("repeats and our own read receipts must not publish: %q", got)
+	}
+	receipt(types.ReceiptTypeRead, false, "MSG1")
+	if got := next(); got != store.OutboxRead {
+		t.Fatalf("read event = %q", got)
+	}
+	if s := b.QueueStats(); s.Sent != 1 || s.Delivered != 1 || s.Read != 1 {
+		t.Fatalf("%+v", s.OutboxCounts)
 	}
 }

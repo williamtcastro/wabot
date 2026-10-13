@@ -86,6 +86,9 @@ func NewHandler(b *bot.Bot, authn *auth.Authenticator, version string) *Handler 
 	mux.HandleFunc("DELETE /queue", need(send, a.cancelBatch))
 	mux.HandleFunc("GET /queue/{id}", need(send, a.getQueued))
 	mux.HandleFunc("DELETE /queue/{id}", need(send, a.cancelQueued))
+	mux.HandleFunc("GET /optouts", need(admin, unrestricted(a.listOptOuts)))
+	mux.HandleFunc("POST /optouts", need(admin, unrestricted(a.addOptOut)))
+	mux.HandleFunc("DELETE /optouts/{chat}", need(admin, unrestricted(a.removeOptOut)))
 
 	mux.HandleFunc("GET /messages", need(read, a.messages))
 	mux.HandleFunc("GET /messages/wait", need(read, a.wait))

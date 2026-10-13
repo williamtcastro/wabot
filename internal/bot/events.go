@@ -26,6 +26,8 @@ func (b *Bot) handle(evt any) {
 			if seq := b.Store.MaxSeqOf(chat, v.MessageIDs); seq > 0 && b.Store.MarkReadUpTo(chat, seq) {
 				b.publish(store.ChatRead{Chat: chat, Seq: seq})
 			}
+		} else if !v.IsFromMe && (v.Type == types.ReceiptTypeDelivered || v.Type == types.ReceiptTypeRead) {
+			b.outboxReceipt(v.MessageIDs, v.Type == types.ReceiptTypeRead, v.Timestamp)
 		}
 	case *events.PushNameSetting, *events.AppStateSyncComplete:
 		b.announcePresence()
@@ -54,6 +56,7 @@ func (b *Bot) handle(evt any) {
 		if b.Webhook != nil {
 			b.Webhook.Deliver("message", m)
 		}
+		b.noteOptOut(m)
 		if b.replies.Load() && (!m.FromMe || b.isSelfChat(m.Chat)) {
 			b.autoReply(m)
 		}
