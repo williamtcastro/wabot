@@ -46,6 +46,7 @@ type Bot struct {
 	Limiter   *Limiter
 	Lookups   *Limiter
 	Webhook   *Webhook
+	Started   time.Time
 
 	autoLimit  *Limiter
 	mu         sync.RWMutex
@@ -92,6 +93,7 @@ func New(ctx context.Context, dbPath string, waLogger waLog.Logger, log *slog.Lo
 		// Auto-replies answer strangers, so they get their own small budget and are dropped, not queued.
 		autoLimit: NewLimiter(6, 10*time.Second, time.Millisecond),
 		state:     "starting",
+		Started:   time.Now(),
 		subs:      map[chan any]struct{}{},
 		jids:      map[string]types.JID{},
 	}

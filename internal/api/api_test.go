@@ -482,3 +482,17 @@ func TestMCPOverHTTPUsesTokenScopes(t *testing.T) {
 		}
 	}
 }
+
+func TestStatsNeedsAdmin(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "s3cret-owner-secret")
+	reader := issue(t, b, "reader", []auth.Scope{auth.Read}, nil, 0)
+	if w := do(h, "GET", "/stats", map[string]string{"Authorization": "Bearer " + reader}); w.Code != 403 {
+		t.Fatalf("read token: %d", w.Code)
+	}
+	w := do(h, "GET", "/stats", map[string]string{"Authorization": "Bearer s3cret-owner-secret"})
+	var s Stats
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &s) != nil || s.Version != "test" || s.Started.IsZero() || s.Webhook != nil || s.Limits.AutoReply.PerMinute != 6 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+}

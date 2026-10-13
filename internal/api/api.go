@@ -43,13 +43,14 @@ const docsPage = `<!doctype html>
 
 type server struct {
 	b       *bot.Bot
+	version string
 	idem    idempotency
 	streams streams
 }
 
 // NewHandler serves the API. Every route requires a scope; see docs/API.md for the table.
 func NewHandler(b *bot.Bot, authn *auth.Authenticator, version string) http.Handler {
-	a := &server{b: b, idem: idempotency{entries: map[string]*idemEntry{}}}
+	a := &server{b: b, version: version, idem: idempotency{entries: map[string]*idemEntry{}}}
 	mux := http.NewServeMux()
 	read, send, admin := auth.Read, auth.Send, auth.Admin
 
@@ -79,6 +80,7 @@ func NewHandler(b *bot.Bot, authn *auth.Authenticator, version string) http.Hand
 	mux.HandleFunc("POST /check", need(send, unrestricted(a.check)))
 
 	mux.HandleFunc("GET /audit", need(admin, a.audit))
+	mux.HandleFunc("GET /stats", need(admin, a.stats))
 	mux.HandleFunc("GET /tokens", need(admin, a.listTokens))
 	mux.HandleFunc("POST /tokens", need(admin, a.createToken))
 	mux.HandleFunc("DELETE /tokens/{name}", need(admin, a.revokeToken))
@@ -530,4 +532,31 @@ func (a *server) audit(w http.ResponseWriter, r *http.Request) {
 	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
 	entries, err := a.b.Store.AuditLog(intParam(r, "limit", 100, maxPageSize), before)
 	respond(w, entries, err)
+}
+
+// Stats is the body of GET /stats: what the admin panel's Health tab shows.
+type Stats struct {
+	Version   string            `json:"version"`
+	Started   time.Time         `json:"started"`
+	AutoReply bool              `json:"auto_reply"`
+	Limits    StatsLimits       `json:"limits"`
+	Webhook   *bot.WebhookStats `json:"webhook"`
+}
+
+type StatsLimits struct {
+	Send      bot.LimiterStats `json:"send"`
+	Lookups   bot.LimiterStats `json:"lookups"`
+	AutoReply bot.LimiterStats `json:"auto_reply"`
+}
+
+func (a *server) stats(w http.ResponseWriter, r *http.Request) {
+	out := Stats{
+		Version: a.version, Started: a.b.Started, AutoReply: a.b.AutoReply,
+		Limits: StatsLimits{Send: a.b.Limiter.Stats(), Lookups: a.b.Lookups.Stats(), AutoReply: a.b.AutoReplyStats()},
+	}
+	if a.b.Webhook != nil {
+		s := a.b.Webhook.Stats()
+		out.Webhook = &s
+	}
+	writeJSON(w, 200, out)
 }

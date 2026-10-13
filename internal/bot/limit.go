@@ -22,9 +22,47 @@ type Limiter struct {
 	ChatGap   time.Duration
 	MaxWait   time.Duration
 
-	mu     sync.Mutex
-	slots  []time.Time
-	byChat map[string]time.Time
+	mu           sync.Mutex
+	slots        []time.Time
+	byChat       map[string]time.Time
+	rejected     int64
+	lastRejected time.Time
+}
+
+// LimiterStats is a snapshot of a Limiter for the admin panel.
+type LimiterStats struct {
+	PerMinute    int       `json:"per_minute"`
+	ChatGapMS    int64     `json:"chat_gap_ms"`
+	MaxWaitMS    int64     `json:"max_wait_ms"`
+	LastMinute   int       `json:"last_minute"`
+	NextFree     time.Time `json:"next_free,omitzero"`
+	Rejected     int64     `json:"rejected"`
+	LastRejected time.Time `json:"last_rejected,omitzero"`
+}
+
+// Stats counts slots reserved in the last minute (including ones still waiting to go out) and
+// rejections since startup. NextFree is set when the per-minute budget is used up.
+func (l *Limiter) Stats() LimiterStats {
+	if l == nil {
+		return LimiterStats{}
+	}
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s := LimiterStats{PerMinute: l.PerMinute, ChatGapMS: l.ChatGap.Milliseconds(), MaxWaitMS: l.MaxWait.Milliseconds(),
+		Rejected: l.rejected, LastRejected: l.lastRejected}
+	cutoff := now.Add(-time.Minute)
+	for _, t := range l.slots {
+		if !t.Before(cutoff) {
+			s.LastMinute++
+		}
+	}
+	if l.PerMinute > 0 && len(l.slots) >= l.PerMinute {
+		if next := l.slots[len(l.slots)-l.PerMinute].Add(time.Minute); next.After(now) {
+			s.NextFree = next
+		}
+	}
+	return s
 }
 
 func NewLimiter(perMinute int, chatGap, maxWait time.Duration) *Limiter {
@@ -67,6 +105,8 @@ func (l *Limiter) ReserveN(chat string, n int) (time.Time, error) {
 		}
 	}
 	if wait := at.Sub(now); l.MaxWait > 0 && wait > l.MaxWait {
+		l.rejected++
+		l.lastRejected = now
 		return time.Time{}, RateLimitError{RetryAfter: wait}
 	}
 
@@ -88,6 +128,9 @@ func later(a, b time.Time) time.Time {
 	}
 	return a
 }
+
+// AutoReplyStats is the auto-reply limiter's snapshot; rejected replies were dropped.
+func (b *Bot) AutoReplyStats() LimiterStats { return b.autoLimit.Stats() }
 
 // ThrottleToken applies a token's own send rate (per minute) on top of the global limiter. It is shared
 // by the HTTP API and the MCP server, so a token gets one budget however it connects.

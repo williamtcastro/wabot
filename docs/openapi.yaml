@@ -547,6 +547,20 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /stats:
+    get:
+      tags: [Admin]
+      summary: Limiter and webhook health
+      description: Version and start time, a snapshot of the send, lookup and auto-reply limiters (use in the last minute, rejections since startup), and webhook delivery counters with the latest failures. Counters live in memory and reset on restart. Never includes the webhook URL, its secret or message content. Requires admin.
+      responses:
+        "200":
+          description: Stats
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stats" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   /tokens:
     get:
       tags: [Tokens]
@@ -844,6 +858,55 @@ components:
         last_used: { type: string, format: date-time }
         revoked: { type: boolean }
         created_by: { type: string, description: "Name of the token that created this one over the API; omitted for the CLI or owner" }
+    LimiterStats:
+      type: object
+      properties:
+        per_minute: { type: integer, description: "0 = unlimited" }
+        chat_gap_ms: { type: integer }
+        max_wait_ms: { type: integer }
+        last_minute: { type: integer, description: "Slots reserved in the last minute, including sends still waiting to go out" }
+        next_free: { type: string, format: date-time, description: "When the per-minute budget frees up; absent when it isn't used up" }
+        rejected: { type: integer, description: "429s (or dropped auto-replies) since startup" }
+        last_rejected: { type: string, format: date-time }
+    WebhookFailure:
+      type: object
+      properties:
+        at: { type: string, format: date-time }
+        delivery: { type: string, description: "Same as the X-Wame-Delivery header" }
+        event: { type: string, enum: [message, update] }
+        attempt: { type: integer }
+        status: { type: integer, description: "HTTP status, absent when the request itself failed" }
+        error: { type: string }
+        gave_up: { type: boolean, description: "No more retries for this delivery" }
+    Stats:
+      type: object
+      properties:
+        version: { type: string }
+        started: { type: string, format: date-time }
+        auto_reply: { type: boolean }
+        limits:
+          type: object
+          properties:
+            send: { $ref: "#/components/schemas/LimiterStats" }
+            lookups: { $ref: "#/components/schemas/LimiterStats" }
+            auto_reply: { $ref: "#/components/schemas/LimiterStats" }
+        webhook:
+          nullable: true
+          description: null when no webhook is configured
+          type: object
+          properties:
+            queued: { type: integer }
+            capacity: { type: integer }
+            delivered: { type: integer }
+            retried: { type: integer, description: "Delivered after more than one attempt" }
+            failed: { type: integer, description: "Given up after retries or a non-retryable answer" }
+            dropped: { type: integer, description: "Queue was full" }
+            last_success: { type: string, format: date-time }
+            last_failure: { type: string, format: date-time }
+            recent_failures:
+              type: array
+              description: Up to 20, newest first
+              items: { $ref: "#/components/schemas/WebhookFailure" }
     AuditEntry:
       type: object
       properties:

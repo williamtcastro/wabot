@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -287,4 +288,55 @@ func TestWebhookSignsAndFilters(t *testing.T) {
 		t.Fatal("the from_me message should have been filtered out")
 	case <-time.After(200 * time.Millisecond):
 	}
+}
+
+func TestWebhookStats(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(data), `"id":"BAD"`) {
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := NewWebhook(ctx, srv.URL, "", store.Filter{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w.Deliver("message", store.Message{Seq: 1, ID: "OK", Chat: maria, Type: "text", Text: "private words"})
+	w.Deliver("message", store.Message{Seq: 2, ID: "BAD", Chat: maria, Type: "text", Text: "private words"})
+	deadline := time.Now().Add(5 * time.Second)
+	var s WebhookStats
+	for time.Now().Before(deadline) {
+		if s = w.Stats(); s.Delivered == 1 && s.Failed == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s.Delivered != 1 || s.Failed != 1 || s.Capacity != webhookQueueSize || len(s.Recent) != 1 || s.LastSuccess.IsZero() {
+		t.Fatalf("stats = %+v", s)
+	}
+	f := s.Recent[0]
+	if f.Status != 400 || !f.GaveUp || f.Attempt != 1 || f.Event != "message" {
+		t.Fatalf("failure = %+v", f)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", s), "private") || strings.Contains(fmt.Sprintf("%+v", s), srv.URL) {
+		t.Fatal("stats leak message text or the URL")
+	}
+}
+
+func TestLimiterStats(t *testing.T) {
+	l := NewLimiter(2, 0, time.Second)
+	for range 2 {
+		if _, err := l.Reserve(maria); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := l.Reserve(john); err == nil {
+		t.Fatal("third send in a minute was allowed")
+	}
+	s := l.Stats()
+	if s.LastMinute != 2 || s.Rejected != 1 || s.NextFree.IsZero() || s.PerMinute != 2 || s.MaxWaitMS != 1000 {
+		t.Fatalf("stats = %+v", s)
+	}
+	var nilLimiter *Limiter
+	_ = nilLimiter.Stats()
 }

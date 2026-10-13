@@ -117,7 +117,7 @@ the token name is what the [audit log](#get-audit) records as the actor.
 | `GET /chats` | read | only allowed chats are listed |
 | `GET /contacts`, `GET /groups` | read | 403 |
 | `POST /check` | send | 403 |
-| `GET /audit` | admin | n/a |
+| `GET /audit`, `GET /stats` | admin | n/a |
 | `GET /tokens`, `POST /tokens`, `DELETE /tokens/{name}` | admin | n/a |
 | `GET /docs`, `GET /openapi.yaml` | none | public |
 | `/mcp` | per tool (see [MCP.md](MCP.md)) | same rules per tool call |
@@ -699,6 +699,41 @@ mode, `mcp` for `wame mcp` without a token), or `tui`, `cli`, `autoreply` or `wh
 `logged_out`, `token_create` or `token_revoke` (for the token ones, `target` is the token name and
 `detail` the requested scopes). See
 [proposed-features/ADMIN-PANEL.md](proposed-features/ADMIN-PANEL.md#logging-today) for what each one records.
+
+## `GET /stats`
+
+Health of the parts that can quietly fall behind: the limiters and the webhook. Requires `admin`;
+it's what the [admin panel](ADMIN.md)'s Health tab shows. Counters are kept in memory and reset
+when wame restarts. The webhook URL, its secret and message content are never included.
+
+```json
+{
+  "version": "0.3.0",
+  "started": "2026-10-12T09:00:00-03:00",
+  "auto_reply": true,
+  "limits": {
+    "send": { "per_minute": 20, "chat_gap_ms": 1000, "max_wait_ms": 30000, "last_minute": 4, "rejected": 1, "last_rejected": "2026-10-12T21:40:02-03:00" },
+    "lookups": { "per_minute": 60, "chat_gap_ms": 0, "max_wait_ms": 30000, "last_minute": 0, "rejected": 0 },
+    "auto_reply": { "per_minute": 6, "chat_gap_ms": 10000, "max_wait_ms": 1, "last_minute": 0, "rejected": 0 }
+  },
+  "webhook": {
+    "queued": 0, "capacity": 1000,
+    "delivered": 812, "retried": 3, "failed": 1, "dropped": 0,
+    "last_success": "2026-10-12T21:41:00-03:00",
+    "last_failure": "2026-10-12T20:02:11-03:00",
+    "recent_failures": [
+      { "at": "2026-10-12T20:02:11-03:00", "delivery": "4711-message-a1b2c3d4", "event": "message", "attempt": 1, "status": 400, "gave_up": true }
+    ]
+  }
+}
+```
+
+- `limits.*.last_minute` counts slots reserved in the last minute, including sends still waiting
+  their turn; `next_free` appears when the per-minute budget is used up.
+- `rejected` counts 429s for `send` and `lookups`, and dropped replies for `auto_reply`.
+- `webhook` is `null` without `-webhook`. `failed` counts deliveries given up on (after 6 attempts,
+  or at once on a 4xx other than 429); `recent_failures` keeps the last 20 failed attempts, newest
+  first, including ones that were retried later.
 
 ## `GET /tokens`
 

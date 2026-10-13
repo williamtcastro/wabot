@@ -43,6 +43,65 @@ type Webhook struct {
 	client *http.Client
 	queue  chan webhookJob
 	mu     sync.RWMutex
+
+	statsMu sync.Mutex
+	stats   WebhookStats
+}
+
+// WebhookStats counts deliveries since startup and keeps the most recent failures, for the admin
+// panel. Nothing here includes the URL, the secret or message content.
+type WebhookStats struct {
+	Queued      int              `json:"queued"`
+	Capacity    int              `json:"capacity"`
+	Delivered   int64            `json:"delivered"`
+	Retried     int64            `json:"retried"`
+	Failed      int64            `json:"failed"`
+	Dropped     int64            `json:"dropped"`
+	LastSuccess time.Time        `json:"last_success,omitzero"`
+	LastFailure time.Time        `json:"last_failure,omitzero"`
+	Recent      []WebhookFailure `json:"recent_failures"`
+}
+
+// WebhookFailure is one failed attempt.
+type WebhookFailure struct {
+	At       time.Time `json:"at"`
+	Delivery string    `json:"delivery"`
+	Event    string    `json:"event"`
+	Attempt  int       `json:"attempt"`
+	Status   int       `json:"status,omitempty"`
+	Error    string    `json:"error,omitempty"`
+	GaveUp   bool      `json:"gave_up"`
+}
+
+const webhookRecentFailures = 20
+
+// Stats returns a copy of the counters, with the queue length and the newest failures first.
+func (w *Webhook) Stats() WebhookStats {
+	w.statsMu.Lock()
+	defer w.statsMu.Unlock()
+	s := w.stats
+	s.Queued, s.Capacity = len(w.queue), cap(w.queue)
+	s.Recent = make([]WebhookFailure, len(w.stats.Recent))
+	for i, f := range w.stats.Recent {
+		s.Recent[len(s.Recent)-1-i] = f
+	}
+	return s
+}
+
+func (w *Webhook) record(f func(s *WebhookStats)) {
+	w.statsMu.Lock()
+	f(&w.stats)
+	w.statsMu.Unlock()
+}
+
+func (w *Webhook) recordFailure(f WebhookFailure) {
+	w.record(func(s *WebhookStats) {
+		s.LastFailure = f.At
+		s.Recent = append(s.Recent, f)
+		if len(s.Recent) > webhookRecentFailures {
+			s.Recent = s.Recent[len(s.Recent)-webhookRecentFailures:]
+		}
+	})
 }
 
 // SetChat replaces the filter's chat, e.g. once a phone number has been resolved to WhatsApp's JID.
@@ -86,6 +145,7 @@ func (w *Webhook) Deliver(event string, m store.Message) {
 	case w.queue <- job:
 	default:
 		w.log.Error("queue full, dropping delivery", "delivery", job.id)
+		w.record(func(s *WebhookStats) { s.Dropped++ })
 	}
 }
 
@@ -108,10 +168,25 @@ func (w *Webhook) send(ctx context.Context, job webhookJob) {
 			if attempt > 1 {
 				w.log.Info("delivered after retry", "delivery", job.id, "attempt", attempt)
 			}
+			w.record(func(s *WebhookStats) {
+				s.Delivered++
+				s.LastSuccess = time.Now()
+				if attempt > 1 {
+					s.Retried++
+				}
+			})
 			return
 		}
 		retryable := err != nil || status == http.StatusTooManyRequests || status >= 500
 		w.log.Warn("delivery failed", "delivery", job.id, "attempt", attempt, "status", status, "err", err, "will_retry", retryable && attempt < webhookAttempts)
+		fail := WebhookFailure{At: time.Now(), Delivery: job.id, Event: job.event, Attempt: attempt, Status: status, GaveUp: !retryable || attempt == webhookAttempts}
+		if err != nil {
+			fail.Error = err.Error()
+		}
+		w.recordFailure(fail)
+		if fail.GaveUp {
+			w.record(func(s *WebhookStats) { s.Failed++ })
+		}
 		if !retryable {
 			return
 		}
