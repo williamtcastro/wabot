@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -116,8 +117,9 @@ type ContactChange struct {
 	Changed       []string
 }
 
-// ImportResult counts what an import did (or would do, in a dry run). A row cleared completely
-// counts as updated.
+// ImportResult counts what an import did (or would do, in a dry run), once per person: several lines
+// for the same person count as one, by how their row ended up. A row cleared completely counts as
+// updated.
 type ImportResult struct {
 	Added     int `json:"added"`
 	Updated   int `json:"updated"`
@@ -220,6 +222,11 @@ func contactUnder(q querier, keys []string) (OwnContact, error) {
 	return OwnContact{}, ErrNotFound
 }
 
+// ContactsGen changes whenever wame_contacts does: once per successful write (SetContact,
+// ImportContacts but not a dry run, DeleteContact, DeleteAllContacts) and when relinkLIDs moves rows
+// from an @lid. A copy of the rows kept in memory is current while it hasn't changed.
+func (s *Store) ContactsGen() uint64 { return s.contactsGen.Load() }
+
 // Contact returns the row stored under the first of keys that has one, or ErrNotFound.
 func (s *Store) Contact(keys ...string) (OwnContact, error) {
 	s.relinkLIDs()
@@ -243,11 +250,21 @@ func (s *Store) ImportContacts(edits []ContactEdit, dryRun bool) (ImportResult, 
 	if err != nil {
 		return res, nil, err
 	}
+	first, last := map[string]OwnContact{}, map[string]OwnContact{}
+	var order []string
 	for _, c := range changes {
+		if _, ok := first[c.Before.JID]; !ok {
+			first[c.Before.JID] = c.Before
+			order = append(order, c.Before.JID)
+		}
+		last[c.Before.JID] = c.After
+	}
+	for _, jid := range order {
+		before, after := first[jid], last[jid]
 		switch {
-		case len(c.Changed) == 0:
+		case !slices.ContainsFunc(ContactFields, func(f string) bool { return before.field(f) != after.field(f) }):
 			res.Unchanged++
-		case c.Before.Empty():
+		case before.Empty():
 			res.Added++
 		default:
 			res.Updated++
@@ -319,12 +336,7 @@ func (s *Store) editContacts(edits []ContactEdit, dryRun bool) ([]ContactChange,
 			}
 			after.UpdatedAt, after.UpdatedBy = now, e.Actor
 			ch.After = after
-			if _, err := tx.Exec(`INSERT INTO wame_contacts (`+contactCols+`) VALUES (?,?,?,?,?,?,?,?,?,?)
-				ON CONFLICT (jid) DO UPDATE SET name = excluded.name, tags = excluded.tags, notes = excluded.notes,
-					language = excluded.language, time_zone = excluded.time_zone,
-					updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
-				after.JID, after.Name, encodeTags(after.Tags), after.Notes, after.Language, after.TimeZone,
-				after.CreatedAt.UnixMilli(), after.CreatedBy, after.UpdatedAt.UnixMilli(), after.UpdatedBy); err != nil {
+			if err := putContact(tx, after); err != nil {
 				return nil, err
 			}
 			s.relinkLater(Message{Chat: after.JID})
@@ -334,7 +346,101 @@ func (s *Store) editContacts(edits []ContactEdit, dryRun bool) ([]ContactChange,
 	if dryRun {
 		return out, nil
 	}
-	return out, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	s.contactsGen.Add(1)
+	return out, nil
+}
+
+// putContact stores c, replacing the row under its JID.
+func putContact(tx *sql.Tx, c OwnContact) error {
+	_, err := tx.Exec(`INSERT INTO wame_contacts (`+contactCols+`) VALUES (?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT (jid) DO UPDATE SET name = excluded.name, tags = excluded.tags, notes = excluded.notes,
+			language = excluded.language, time_zone = excluded.time_zone, created_at = excluded.created_at,
+			created_by = excluded.created_by, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+		c.JID, c.Name, encodeTags(c.Tags), c.Notes, c.Language, c.TimeZone,
+		c.CreatedAt.UnixMilli(), c.CreatedBy, c.UpdatedAt.UnixMilli(), c.UpdatedBy)
+	return err
+}
+
+// relinkActor is the updated_by of a row merged from an @lid into its phone row.
+const relinkActor = "relink"
+
+// relinkContacts moves every own row under a mapped @lid to the phone JID, merging it into the row
+// already there, and returns how many it moved. See mergeContacts.
+func relinkContacts(tx *sql.Tx) (int, error) {
+	rows, err := tx.Query(`SELECT ` + contactCols + `, (SELECT pn FROM whatsmeow_lid_map WHERE lid = replace(jid, '@lid', ''))
+		FROM wame_contacts WHERE jid LIKE '%@lid' AND replace(jid, '@lid', '') IN (SELECT lid FROM whatsmeow_lid_map)`)
+	if err != nil {
+		return 0, err
+	}
+	var lids []OwnContact
+	var pns []string
+	for rows.Next() {
+		var pn string
+		c, err := scanContact(withPN{rows, &pn})
+		if err != nil {
+			rows.Close()
+			return 0, err
+		}
+		lids, pns = append(lids, c), append(pns, pn+"@s.whatsapp.net")
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	now := time.Now()
+	for i, lid := range lids {
+		c, err := contactUnder(tx, pns[i:i+1])
+		switch {
+		case errors.Is(err, ErrNotFound):
+			c, c.JID = lid, pns[i]
+		case err != nil:
+			return 0, err
+		default:
+			c = mergeContacts(c, lid, now)
+		}
+		if _, err := tx.Exec(`DELETE FROM wame_contacts WHERE jid = ?`, lid.JID); err != nil {
+			return 0, err
+		}
+		if err := putContact(tx, c); err != nil {
+			return 0, err
+		}
+	}
+	return len(lids), nil
+}
+
+type withPN struct {
+	scanner
+	pn *string
+}
+
+func (w withPN) Scan(dest ...any) error { return w.scanner.Scan(append(dest, w.pn)...) }
+
+// mergeContacts merges the row found under an @lid into the phone row: the phone row's name,
+// language and time zone win when set; notes are both kept (the phone row's first) when they differ;
+// tags are united, the phone row's first, capped at MaxContactTags so the next write isn't refused.
+func mergeContacts(phone, lid OwnContact, now time.Time) OwnContact {
+	c := phone
+	c.Name, c.Language, c.TimeZone = cmp.Or(c.Name, lid.Name), cmp.Or(c.Language, lid.Language), cmp.Or(c.TimeZone, lid.TimeZone)
+	if lid.Notes != "" && lid.Notes != c.Notes {
+		c.Notes = strings.TrimPrefix(c.Notes+"\n"+lid.Notes, "\n")
+	}
+	tags := slices.Clone(c.Tags)
+	for _, t := range lid.Tags {
+		if !slices.Contains(tags, t) {
+			tags = append(tags, t)
+		}
+	}
+	c.Tags = NormalizeTags(tags[:min(len(tags), MaxContactTags)])
+	if lid.CreatedAt.Before(c.CreatedAt) {
+		c.CreatedAt, c.CreatedBy = lid.CreatedAt, lid.CreatedBy
+	}
+	c.UpdatedAt, c.UpdatedBy = now, relinkActor
+	return c
 }
 
 // DeleteContact removes the rows under every given key of a person, or returns ErrNotFound when
@@ -351,6 +457,9 @@ func (s *Store) DeleteContact(keys ...string) error {
 	if err == nil && n == 0 {
 		err = ErrNotFound
 	}
+	if err == nil {
+		s.contactsGen.Add(1)
+	}
 	return err
 }
 
@@ -360,6 +469,7 @@ func (s *Store) DeleteAllContacts() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	s.contactsGen.Add(1)
 	return res.RowsAffected()
 }
 

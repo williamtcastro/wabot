@@ -79,8 +79,12 @@ type ContactInput struct {
 	RemoveTags []string  `json:"remove_tags,omitempty"`
 }
 
-// UnmarshalJSON tells a null field (clear it) from an absent one (leave it) and refuses unknown fields.
+// UnmarshalJSON tells a null field (clear it) from an absent one (leave it) and refuses unknown fields
+// and a body that isn't an object (a null body would otherwise clear everything in a PUT).
 func (in *ContactInput) UnmarshalJSON(data []byte) error {
+	if d := bytes.TrimSpace(data); len(d) == 0 || d[0] != '{' {
+		return BadInput("body must be a JSON object")
+	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -236,14 +240,11 @@ func splitTags(s string) []string {
 // personJID parses a number or JID into the phone JID a person's row is kept under, without
 // asking WhatsApp. Groups are refused.
 func (b *Bot) personJID(to string) (types.JID, error) {
-	jid, err := ParseRecipient(to)
-	if err != nil {
-		return jid, err
+	jid, err := b.localJID(to)
+	if err == nil && !isPersonChat(jid) {
+		err = BadInput("contacts are people, not groups")
 	}
-	if !isPersonChat(jid) {
-		return jid, BadInput("contacts are people, not groups")
-	}
-	return b.PhoneJID(jid), nil
+	return jid, err
 }
 
 // contactKeys lists every key a person's own row may be under: the phone JID, its @lid and its
@@ -384,6 +385,9 @@ func (b *Bot) ContactOf(ctx context.Context, to string) (ContactView, error) {
 func (b *Bot) contactView(ctx context.Context, jid types.JID, o store.OwnContact) ContactView {
 	v := ContactView{Contact: Contact{JID: jid.String(), Phone: phoneOf(jid), Tags: tagsOf(o)}}
 	v.Names = namesFrom(jid, o.Name, b.bookEntry(ctx, jid), "")
+	if self := b.Client.Store.ID; self != nil && self.User == jid.User {
+		v.Display, v.Source = "Me", SourceMe
+	}
 	if !o.Empty() {
 		v.Own = &o
 	}
@@ -415,10 +419,8 @@ func (b *Bot) writeContact(ctx context.Context, actor, to string, in ContactInpu
 	}
 	keys := b.contactKeys(jid)
 	if put && b.Client.IsLoggedIn() && !strings.Contains(to, "@") {
+		// A number WhatsApp doesn't know is kept as typed, as PATCH and import do.
 		canon, cerr := b.CanonicalChat(ctx, to)
-		if _, isInput := errors.AsType[InputError](cerr); isInput {
-			return v, cerr
-		}
 		if cerr == nil && canon != jid.String() {
 			cj, _ := types.ParseJID(canon)
 			jid, keys = cj, append(b.contactKeys(cj), keys...)
@@ -427,10 +429,9 @@ func (b *Bot) writeContact(ctx context.Context, actor, to string, in ContactInpu
 	target = jid.String()
 	e.Keys, e.Actor = keys, actor
 	b.contactsMu.Lock()
+	gen := b.Store.ContactsGen()
 	ch, err := b.Store.SetContact(e)
-	if err == nil {
-		b.applyOwn([]store.ContactChange{ch})
-	}
+	b.syncOwn(gen, err == nil, func() { b.applyOwnLocked([]store.ContactChange{ch}) })
 	b.contactsMu.Unlock()
 	if err != nil {
 		return v, storeContactError(err)
@@ -465,17 +466,13 @@ func (b *Bot) DeleteContact(ctx context.Context, actor, to string) (err error) {
 	target = jid.String()
 	keys := b.contactKeys(jid)
 	b.contactsMu.Lock()
+	gen := b.Store.ContactsGen()
 	err = b.Store.DeleteContact(keys...)
-	if err == nil {
-		b.mu.Lock()
-		if b.own != nil {
-			for _, k := range keys {
-				b.dropOwnLocked(k)
-			}
-			b.forgetLIDsLocked()
+	b.syncOwn(gen, err == nil, func() {
+		for _, k := range keys {
+			b.dropOwnLocked(k)
 		}
-		b.mu.Unlock()
-	}
+	})
 	b.contactsMu.Unlock()
 	if err == nil {
 		b.namesChanged()
@@ -488,19 +485,21 @@ func (b *Bot) DeleteContact(ctx context.Context, actor, to string) (err error) {
 func (b *Bot) DeleteAllContacts(ctx context.Context, actor string) (n int64, err error) {
 	defer func() { b.Audit(actor, "contact_delete_all", "", fmt.Sprintf("%d contacts", n), err) }()
 	b.contactsMu.Lock()
+	gen := b.Store.ContactsGen()
 	n, err = b.Store.DeleteAllContacts()
-	if err == nil {
-		b.mu.Lock()
-		if b.own != nil {
-			b.own, b.ownLIDs = map[string]ownContact{}, 0
-		}
-		b.mu.Unlock()
-	}
+	b.syncOwn(gen, err == nil, func() { b.own, b.ownLIDs = map[string]ownContact{}, 0 })
 	b.contactsMu.Unlock()
 	if err == nil && n > 0 {
 		b.namesChanged()
 	}
 	return n, err
+}
+
+// ExportContacts returns your own list for GET /contacts/export, audited as contact_export (notes
+// leave the server with it).
+func (b *Bot) ExportContacts(ctx context.Context, actor string) (list []store.OwnContact, err error) {
+	defer func() { b.Audit(actor, "contact_export", "csv", fmt.Sprintf("%d contacts", len(list)), err) }()
+	return b.Store.Contacts(store.ContactFilter{})
 }
 
 // ContactImportOptions are an import's request options: tags added to every row, and a dry run
@@ -548,10 +547,9 @@ func (b *Bot) ImportContacts(ctx context.Context, actor string, r io.Reader, opt
 		}
 	}
 	b.contactsMu.Lock()
+	gen := b.Store.ContactsGen()
 	res, changes, err := b.Store.ImportContacts(edits, opt.DryRun)
-	if err == nil && !opt.DryRun {
-		b.applyOwn(changes)
-	}
+	b.syncOwn(gen, err == nil && !opt.DryRun, func() { b.applyOwnLocked(changes) })
 	b.contactsMu.Unlock()
 	if ee, ok := errors.AsType[*store.EditError](err); ok && ee.Index < len(table) {
 		return res, BadInput("line %d: %v", table[ee.Index].line, storeContactError(ee.Err))

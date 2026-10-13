@@ -48,8 +48,7 @@ func (b *Bot) NamesOf(ctx context.Context, chat, pushName string) Names {
 		return Names{Display: "Me", Source: SourceMe}
 	}
 	pn := b.PhoneJID(jid)
-	own, _ := b.ownEntry(append([]string{chat}, b.nameKeys(pn)...)...)
-	return namesFrom(pn, own.name, b.bookEntry(ctx, pn), pushName)
+	return namesFrom(pn, b.ownName(chat, pn), b.bookEntry(ctx, pn), pushName)
 }
 
 // ChatName is NamesOf's display name.
@@ -102,8 +101,9 @@ func (b *Bot) bookEntry(ctx context.Context, jid types.JID) types.ContactInfo {
 }
 
 // phoneVariants lists the other form of a Brazilian mobile number: 55 + area + 9 + 8 digits also
-// as 55 + area + 8 digits, and the reverse for a number starting with 6 to 9. Only the forms are
-// computed; nothing is asked of WhatsApp.
+// as 55 + area + 8 digits, and the reverse; either way the 8 digits start with 6 to 9, so a mobile
+// number is never taken for a landline (2 to 5). Only the forms are computed; nothing is asked of
+// WhatsApp.
 func phoneVariants(jid string) []string {
 	user, ok := strings.CutSuffix(jid, "@"+types.DefaultUserServer)
 	if !ok || !strings.HasPrefix(user, "55") || digits(user) != user {
@@ -114,7 +114,7 @@ func phoneVariants(jid string) []string {
 		return nil
 	}
 	switch {
-	case len(local) == 9 && local[0] == '9':
+	case len(local) == 9 && local[0] == '9' && local[1] >= '6':
 		return []string{"55" + area + local[1:] + "@" + types.DefaultUserServer}
 	case len(local) == 8 && local[0] >= '6':
 		return []string{"55" + area + "9" + local + "@" + types.DefaultUserServer}
@@ -143,41 +143,56 @@ type ownContact struct{ name, timeZone string }
 
 func ownOf(c store.OwnContact) ownContact { return ownContact{c.Name, c.TimeZone} }
 
-// ownEntry is the own row under the first of keys that has one, from memory.
-func (b *Bot) ownEntry(keys ...string) (ownContact, bool) {
-	if err := b.loadOwn(); err != nil {
+// ownName is your name for a person: the first named own row under chat or one of pn's keys, from
+// memory.
+func (b *Bot) ownName(chat string, pn types.JID) string {
+	own, err := b.loadOwn()
+	if err != nil {
 		b.Log.Warn("load contacts", "err", err)
-		return ownContact{}, false
+		return ""
 	}
+	keys := append([]string{chat}, b.nameKeys(pn)...)
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	for _, k := range keys {
-		if c, ok := b.own[k]; ok {
-			return c, true
+		if c := own[k]; c.name != "" {
+			return c.name
 		}
 	}
-	return ownContact{}, false
+	return ""
 }
 
-// loadOwn reads every own row into memory when it isn't there: the first time, and after a write
-// while some row was under an @lid. Writes go through Bot, which keeps the map in step (applyOwn).
-func (b *Bot) loadOwn() error {
-	loaded := func() bool {
+// loadOwn returns the own rows in memory, reading them all when they aren't there or the store
+// changed them behind Bot's back (store.ContactsGen: relinkLIDs moved a row from an @lid). Bot's own
+// writes keep the map in step (syncOwn). The map is read under b.mu.
+func (b *Bot) loadOwn() (map[string]ownContact, error) {
+	current := func() map[string]ownContact {
 		b.mu.RLock()
 		defer b.mu.RUnlock()
-		return b.own != nil
-	}
-	if loaded() {
+		if b.own != nil && b.ownGen == b.Store.ContactsGen() {
+			return b.own
+		}
 		return nil
+	}
+	if own := current(); own != nil {
+		return own, nil
 	}
 	b.contactsMu.Lock()
 	defer b.contactsMu.Unlock()
-	if loaded() {
-		return nil
+	if own := current(); own != nil {
+		return own, nil
 	}
-	rows, err := b.Store.Contacts(store.ContactFilter{})
-	if err != nil {
-		return err
+	var rows []store.OwnContact
+	var gen uint64
+	for range 2 {
+		gen = b.Store.ContactsGen()
+		var err error
+		if rows, err = b.Store.Contacts(store.ContactFilter{}); err != nil {
+			return nil, err
+		}
+		if b.Store.ContactsGen() == gen {
+			break
+		}
 	}
 	own := make(map[string]ownContact, len(rows))
 	lids := 0
@@ -188,18 +203,37 @@ func (b *Bot) loadOwn() error {
 		}
 	}
 	b.mu.Lock()
-	b.own, b.ownLIDs = own, lids
+	b.own, b.ownLIDs, b.ownGen = own, lids, gen
 	b.mu.Unlock()
-	return nil
+	return own, nil
 }
 
-// applyOwn brings the in-memory rows in step with changes just stored. contactsMu is held.
-func (b *Bot) applyOwn(changes []store.ContactChange) {
+// syncOwn brings the in-memory rows in step after a store write that began at store generation gen:
+// apply runs (under b.mu) when the write succeeded and was the store's only change since the map was
+// read; otherwise the map is dropped and read again when next needed. contactsMu is held.
+func (b *Bot) syncOwn(gen uint64, wrote bool, apply func()) {
+	now := b.Store.ContactsGen()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.own == nil {
 		return
 	}
+	want := gen
+	if wrote {
+		want++
+	}
+	if b.ownGen != gen || now != want {
+		b.own, b.ownLIDs = nil, 0
+		return
+	}
+	if wrote {
+		apply()
+		b.ownGen = now
+	}
+}
+
+// applyOwnLocked applies stored changes to the in-memory rows. b.mu is held.
+func (b *Bot) applyOwnLocked(changes []store.ContactChange) {
 	for _, ch := range changes {
 		if len(ch.Changed) == 0 {
 			continue
@@ -212,15 +246,6 @@ func (b *Bot) applyOwn(changes []store.ContactChange) {
 			}
 		}
 	}
-	b.forgetLIDsLocked()
-}
-
-// forgetLIDsLocked drops the map while any row is under an @lid: the store may have moved it to the
-// phone JID since (relinkLIDs), and the next read loads it again from there.
-func (b *Bot) forgetLIDsLocked() {
-	if b.ownLIDs > 0 {
-		b.own, b.ownLIDs = nil, 0
-	}
 }
 
 func (b *Bot) dropOwnLocked(jid string) {
@@ -232,15 +257,14 @@ func (b *Bot) dropOwnLocked(jid string) {
 	}
 }
 
-// cleanName makes a name one plain line: invisible runes (control, format such as bidi and
-// zero-width, variation selectors, tags) removed, line breaks and tabs folded to spaces, spaces
-// collapsed. It doesn't cap the length; callers check it.
+// cleanName makes a name one plain line: invisible runes removed (InvisibleRune), line breaks and
+// tabs folded to spaces, spaces collapsed. It doesn't cap the length; callers check it.
 func cleanName(s string) string {
 	s = strings.Map(func(r rune) rune {
 		switch {
 		case r == '\n' || r == '\r' || r == '\t':
 			return ' '
-		case invisibleRune(r):
+		case InvisibleRune(r):
 			return -1
 		}
 		return r
@@ -250,18 +274,23 @@ func cleanName(s string) string {
 
 // cleanNotes keeps line breaks and tabs but drops other invisible runes.
 func cleanNotes(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	return strings.TrimSpace(strings.Map(func(r rune) rune {
-		if r != '\n' && r != '\t' && invisibleRune(r) {
+	return strings.TrimSpace(StripInvisible(strings.ReplaceAll(s, "\r\n", "\n")))
+}
+
+// InvisibleRune reports control, format (zero-width, bidi, soft hyphen, tag) and variation-selector
+// runes, which can hide or reorder text.
+func InvisibleRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Variation_Selector, r) || (r >= 0xe0000 && r <= 0xe007f)
+}
+
+// StripInvisible drops every InvisibleRune except line breaks and tabs.
+func StripInvisible(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r != '\n' && r != '\t' && InvisibleRune(r) {
 			return -1
 		}
 		return r
-	}, s))
-}
-
-// invisibleRune is mcpserver.invisible's rule: runes that can hide or reorder text.
-func invisibleRune(r rune) bool {
-	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Variation_Selector, r) || (r >= 0xe0000 && r <= 0xe007f)
+	}, s)
 }
 
 // namesChangedEvery is the most often NamesChanged goes out: a history sync brings many push names.

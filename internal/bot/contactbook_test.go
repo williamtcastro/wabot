@@ -42,7 +42,7 @@ func TestContactInputJSON(t *testing.T) {
 		!slices.Equal(in.AddTags, []string{"vip"}) {
 		t.Fatalf("null clears, absent is nil: %+v", in)
 	}
-	for _, bad := range []string{`{"nick":"x"}`, `{"name":1}`, `{"tags":"vip"}`, `[]`} {
+	for _, bad := range []string{`{"nick":"x"}`, `{"name":1}`, `{"tags":"vip"}`, `[]`, `null`, ` null`, `"x"`, `1`} {
 		if err := json.Unmarshal([]byte(bad), &in); err == nil {
 			t.Errorf("%s accepted", bad)
 		}
@@ -354,5 +354,32 @@ func TestContactAuditCarriesNoValues(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("audit:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestContactKeysDropTheDevice(t *testing.T) {
+	b := newTestBot(t)
+	v := patch(t, b, "5511999999999:3@s.whatsapp.net", ContactInput{Name: ptr("Maria")})
+	if v.JID != maria || v.Own == nil || v.Own.JID != maria {
+		t.Fatalf("stored under %+v", v.Own)
+	}
+	if got := b.ChatName(t.Context(), maria, ""); got != "Maria" {
+		t.Fatalf("name = %q", got)
+	}
+	if chat, err := b.LocalChat("5511999999999.0:3@s.whatsapp.net"); err != nil || chat != maria {
+		t.Fatalf("LocalChat = %q %v", chat, err)
+	}
+}
+
+func TestExportContactsIsAudited(t *testing.T) {
+	b := newTestBot(t)
+	patch(t, b, maria, ContactInput{Name: ptr("Maria"), Notes: ptr("prefers mornings")})
+	list, err := b.ExportContacts(t.Context(), "ops")
+	if err != nil || len(list) != 1 {
+		t.Fatal(list, err)
+	}
+	entries, _ := b.Store.AuditLog(1, 0)
+	if len(entries) != 1 || entries[0].Action != "contact_export" || entries[0].Actor != "ops" || entries[0].Detail != "1 contacts" {
+		t.Fatalf("audit = %+v", entries)
 	}
 }

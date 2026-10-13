@@ -10,7 +10,6 @@ import (
 
 	"github.com/williamtcastro/wame/internal/auth"
 	"github.com/williamtcastro/wame/internal/bot"
-	"github.com/williamtcastro/wame/internal/store"
 )
 
 const (
@@ -133,7 +132,7 @@ func (a *server) importContacts(w http.ResponseWriter, r *http.Request) {
 
 // exportContacts writes your own list as a CSV that POST /contacts/import reads back unchanged.
 func (a *server) exportContacts(w http.ResponseWriter, r *http.Request) {
-	list, err := a.b.Store.Contacts(store.ContactFilter{})
+	list, err := a.b.ExportContacts(r.Context(), principal(r).Name)
 	if err != nil {
 		writeError(w, err)
 		return

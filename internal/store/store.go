@@ -8,13 +8,15 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type Store struct {
-	db     *sql.DB
-	mu     sync.Mutex
-	lidKey string
+	db          *sql.DB
+	mu          sync.Mutex
+	lidKey      string
+	contactsGen atomic.Uint64
 }
 
 // Open creates or upgrades wame's tables in db.
@@ -357,26 +359,20 @@ func (s *Store) relinkLIDs() {
 		`DELETE FROM wame_chat_state WHERE chat` + mapped,
 		`UPDATE OR IGNORE wame_optouts SET chat = ` + pn + ` WHERE chat` + mapped,
 		`DELETE FROM wame_optouts WHERE chat` + mapped,
-		// A row under @lid merges into the phone row: the phone row's own fields win, tags are united
-		// (decodeTags drops the doubled commas and repeats).
-		strings.ReplaceAll(`INSERT INTO wame_contacts (`+contactCols+`)
-			SELECT `+pn+`, name, tags, notes, language, time_zone, created_at, created_by, updated_at, updated_by
-			FROM wame_contacts WHERE chat`+mapped+`
-			ON CONFLICT (chat) DO UPDATE SET
-				name = CASE WHEN wame_contacts.name = '' THEN excluded.name ELSE wame_contacts.name END,
-				notes = CASE WHEN wame_contacts.notes = '' THEN excluded.notes ELSE wame_contacts.notes END,
-				language = CASE WHEN wame_contacts.language = '' THEN excluded.language ELSE wame_contacts.language END,
-				time_zone = CASE WHEN wame_contacts.time_zone = '' THEN excluded.time_zone ELSE wame_contacts.time_zone END,
-				tags = wame_contacts.tags || excluded.tags,
-				updated_at = MAX(wame_contacts.updated_at, excluded.updated_at)`, "chat", "jid"),
-		strings.ReplaceAll(`DELETE FROM wame_contacts WHERE chat`+mapped, "chat", "jid"),
 	} {
 		if _, err := tx.Exec(stmt); err != nil {
 			return
 		}
 	}
+	moved, err := relinkContacts(tx)
+	if err != nil {
+		return
+	}
 	if tx.Commit() == nil {
 		s.lidKey = key
+		if moved > 0 {
+			s.contactsGen.Add(1)
+		}
 	}
 }
 

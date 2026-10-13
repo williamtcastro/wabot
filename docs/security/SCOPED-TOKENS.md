@@ -571,12 +571,18 @@ chats.
 - **Writes are admin only.** A name feeds every token's display and a tag will decide who a
   `tag:` batch reaches, so a `send` or `read` token can't change them.
 - **Notes** are only in `own`, which is returned to admin callers only, and in the admin-only CSV
-  export. MCP's `find_contact` never returns them, even to an admin connection. Audit details carry
-  field names and counts, never values.
+  export (audited as `contact_export`). MCP's `find_contact` never returns them, even to an admin
+  connection. Audit details carry field names and counts, never values; the `error` of a rejected
+  write may quote the refused tag, language, time zone or field name (cut to at most 64
+  characters), and the audit log is admin-only.
+- **9th digit, mobiles only.** The variant with or without Brazil's 9th digit is only computed when
+  the 8 digits after it start with 6 to 9, so `5521923456789` is never read as the landline
+  `552123456789`: a token allowed only the mobile can't see the landline's name or tags, and an
+  admin write or delete on one never touches the other's row.
 - **Sizes.** Bodies are capped at 64 KB (`PUT`/`PATCH`) and 4 MB / 5000 rows (import), 413 above;
   at most 100,000 people in the list.
 
-Regression tests: `TestRestrictedContacts` (list filtered, `/contacts/tags` 403, `{number}`
+Regression tests: `TestContactMobileNeverHitsLandline`, `TestRestrictedContacts` (list filtered, `/contacts/tags` 403, `{number}`
 outside the list 403 with the fixed text and no lookups), `TestContactReads` (a `read` token
 never sees `own`), `TestContactWrites` (admin only, unknown fields, 413, audit without values),
 MCP `TestFindContact`.

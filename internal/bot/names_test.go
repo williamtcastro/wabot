@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+
+	wstore "github.com/williamtcastro/wame/internal/store"
 )
 
 const anaWith9 = "5521987654321@s.whatsapp.net"
@@ -69,6 +72,8 @@ func TestPhoneVariants(t *testing.T) {
 		ana:                            {anaWith9},
 		maria:                          {"551199999999@s.whatsapp.net"},
 		"552100000000@s.whatsapp.net":  nil, // only mobile numbers (6 to 9) gained the 9
+		"5521923456789@s.whatsapp.net": nil, // never the landline 552123456789
+		"552123456789@s.whatsapp.net":  nil,
 		"5521800000000@s.whatsapp.net": nil,
 		"14155550100@s.whatsapp.net":   nil,
 		"5500987654321@s.whatsapp.net": nil,
@@ -228,5 +233,59 @@ func TestNamesChangedIsDebounced(t *testing.T) {
 	b.handle(&events.BusinessName{JID: jidOf(john)})
 	if n := count(1500 * time.Millisecond); n < 1 || n > 2 {
 		t.Fatalf("address-book and business name changes: %d events", n)
+	}
+}
+
+func TestOwnNameAfterRelinkMerge(t *testing.T) {
+	b := newTestBot(t)
+	withLIDs(t, b)
+	const anaLID = "100000000000003@lid"
+	patch(t, b, ana, ContactInput{Tags: &[]string{"vip"}})
+	patch(t, b, anaLID, ContactInput{Name: ptr("Ana")})
+	if got := b.ChatName(t.Context(), ana, ""); got != "+552187654321" {
+		t.Fatalf("before the mapping: %q", got)
+	}
+	if err := b.Client.Store.LIDs.PutLIDMapping(t.Context(), jidOf(anaLID), jidOf(ana)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Store.Contacts(wstore.ContactFilter{}); err != nil { // relinks
+		t.Fatal(err)
+	}
+	if got := b.ChatName(t.Context(), ana, ""); got != "Ana" {
+		t.Fatalf("after the @lid row merged into the tagged phone row: %q", got)
+	}
+	b.mu.RLock()
+	_, stale := b.own[anaLID]
+	lids := b.ownLIDs
+	b.mu.RUnlock()
+	if stale || lids != 0 {
+		t.Fatalf("the in-memory rows still hold the @lid row: %v, %d", stale, lids)
+	}
+}
+
+func TestOwnNameDuringConcurrentWrites(t *testing.T) {
+	b := newTestBot(t)
+	withLIDs(t, b)
+	patch(t, b, maria, ContactInput{Name: ptr("Maria")})
+	ctx := t.Context()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 100 {
+			if _, err := b.PatchContact(ctx, "ops", "100000000000004@lid", ContactInput{Name: ptr(fmt.Sprint("John ", i))}); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		if got := b.ChatName(ctx, maria, ""); got != "Maria" {
+			t.Fatalf("a write to someone else hid Maria's name: %q", got)
+		}
 	}
 }

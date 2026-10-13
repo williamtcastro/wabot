@@ -249,3 +249,73 @@ func TestContactUnderLIDIsRelinked(t *testing.T) {
 		t.Fatal(raw, err)
 	}
 }
+
+func TestRelinkMergeKeepsBothRows(t *testing.T) {
+	s := openStore(t)
+	if _, err := s.db.Exec(`CREATE TABLE whatsmeow_lid_map (lid TEXT PRIMARY KEY, pn TEXT UNIQUE NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	const mariaLID, johnLID = "100000000000001@lid", "100000000000002@lid"
+	var phoneTags, lidTags []string
+	for i := range MaxContactTags {
+		phoneTags, lidTags = append(phoneTags, fmt.Sprintf("p%02d", i)), append(lidTags, fmt.Sprintf("a%02d", i))
+	}
+	setContact(t, s, ContactEdit{Keys: []string{maria}, Set: OwnContact{Name: "Maria", Notes: "phone notes", Tags: phoneTags[:MaxContactTags-2]},
+		Fields: ContactFields, Actor: "ops"})
+	setContact(t, s, ContactEdit{Keys: []string{mariaLID}, Set: OwnContact{Name: "Other", Notes: "lid notes", TimeZone: "America/Sao_Paulo", Tags: lidTags},
+		Fields: ContactFields, Actor: "ops"})
+	setContact(t, s, ContactEdit{Keys: []string{john}, Set: OwnContact{Notes: "same"}, Fields: ContactFields, Actor: "ops"})
+	setContact(t, s, ContactEdit{Keys: []string{johnLID}, Set: OwnContact{Name: "John", Notes: "same"}, Fields: ContactFields, Actor: "ops"})
+	gen := s.ContactsGen()
+	if _, err := s.db.Exec(`INSERT INTO whatsmeow_lid_map VALUES ('100000000000001', '5511999999999'), ('100000000000002', '5511988887777')`); err != nil {
+		t.Fatal(err)
+	}
+	list := must[[]OwnContact](t)(s.Contacts(ContactFilter{}))
+	if len(list) != 2 {
+		t.Fatalf("%+v", list)
+	}
+	j, m := list[0], list[1]
+	if j.JID != john || j.Name != "John" || j.Notes != "same" || j.UpdatedBy != relinkActor {
+		t.Fatalf("john = %+v", j)
+	}
+	if m.JID != maria || m.Name != "Maria" || m.Notes != "phone notes\nlid notes" || m.TimeZone != "America/Sao_Paulo" || m.UpdatedBy != relinkActor {
+		t.Fatalf("maria = %+v", m)
+	}
+	if len(m.Tags) != MaxContactTags || !slices.Contains(m.Tags, "p17") || !slices.Contains(m.Tags, "a01") || slices.Contains(m.Tags, "a02") {
+		t.Fatalf("tags are united with the phone row's first, capped: %v", m.Tags)
+	}
+	if s.ContactsGen() == gen {
+		t.Fatal("a relink that moved rows must change ContactsGen")
+	}
+	gen = s.ContactsGen()
+	_ = must[[]OwnContact](t)(s.Contacts(ContactFilter{}))
+	if s.ContactsGen() != gen {
+		t.Fatal("a read without anything to relink changed ContactsGen")
+	}
+	if _, err := s.SetContact(ContactEdit{Keys: []string{maria}, Set: OwnContact{Language: "pt-BR"}, Fields: []string{FieldLanguage}}); err != nil {
+		t.Fatalf("a PATCH without tags after a merge: %v", err)
+	}
+}
+
+func TestImportCountsEachPersonOnce(t *testing.T) {
+	s := openStore(t)
+	setContact(t, s, ContactEdit{Keys: []string{john}, Set: OwnContact{Name: "John"}, Fields: []string{FieldName}})
+	edits := []ContactEdit{
+		{Keys: []string{maria}, Set: OwnContact{Name: "Maria"}, Fields: []string{FieldName}},
+		{Keys: []string{maria}, Set: OwnContact{Notes: "x"}, Fields: []string{FieldNotes}},
+		{Keys: []string{john}, Set: OwnContact{Name: "Johnny"}, Fields: []string{FieldName}},
+		{Keys: []string{john}, Set: OwnContact{Name: "John"}, Fields: []string{FieldName}},
+		{Keys: []string{ana}, Set: OwnContact{Name: "Ana"}, Fields: []string{FieldName}},
+		{Keys: []string{ana}, Set: OwnContact{Name: ""}, Fields: []string{FieldName}},
+	}
+	for _, dry := range []bool{true, false} {
+		gen := s.ContactsGen()
+		res, _, err := s.ImportContacts(edits, dry)
+		if err != nil || res != (ImportResult{Added: 1, Unchanged: 2}) {
+			t.Fatalf("dry run %v: %+v %v", dry, res, err)
+		}
+		if changed := s.ContactsGen() != gen; changed == dry {
+			t.Fatalf("dry run %v changed ContactsGen: %v", dry, changed)
+		}
+	}
+}

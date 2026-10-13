@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
 const (
@@ -80,9 +82,19 @@ func (b *Bot) CanonicalChat(ctx context.Context, to string) (string, error) {
 
 // LocalChat turns a phone number or JID into a chat key without contacting WhatsApp.
 func (b *Bot) LocalChat(to string) (string, error) {
-	jid, err := ParseRecipient(to)
+	jid, err := b.localJID(to)
 	if err != nil {
 		return "", err
 	}
-	return b.PhoneJID(jid).String(), nil
+	return jid.String(), nil
+}
+
+// localJID parses a number or JID into the JID chats are stored under: an @lid mapped to its phone
+// JID and without a device suffix. Nothing is asked of WhatsApp.
+func (b *Bot) localJID(to string) (types.JID, error) {
+	jid, err := ParseRecipient(to)
+	if err != nil {
+		return jid, err
+	}
+	return b.PhoneJID(jid).ToNonAD(), nil
 }

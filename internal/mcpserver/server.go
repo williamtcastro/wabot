@@ -12,7 +12,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -422,20 +421,9 @@ func friendly(err error) error {
 	return err
 }
 
-// invisible reports control, format (zero-width, bidi, soft hyphen, tag) and variation-selector runes,
-// which can hide or reorder text a model reads.
-func invisible(r rune) bool {
-	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Variation_Selector, r) || (r >= 0xe0000 && r <= 0xe007f)
-}
-
 // clean drops invisible runes (keeping newlines and tabs) and caps the length of text written by others.
 func clean(s string) string {
-	s = strings.Map(func(r rune) rune {
-		if r != '\n' && r != '\t' && invisible(r) {
-			return -1
-		}
-		return r
-	}, s)
+	s = bot.StripInvisible(s)
 	if runes := []rune(s); len(runes) > maxTextLen {
 		s = string(runes[:maxTextLen]) + "…"
 	}
@@ -445,7 +433,7 @@ func clean(s string) string {
 // cleanID drops every invisible rune from a message id, which the sender chose, and caps it at maxIDLen bytes.
 func cleanID(s string) string {
 	s = strings.Map(func(r rune) rune {
-		if invisible(r) {
+		if bot.InvisibleRune(r) {
 			return -1
 		}
 		return r

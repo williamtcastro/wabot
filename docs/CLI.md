@@ -78,7 +78,7 @@ Creates an API token for an agent, bot or script and prints it **once**:
 | `-expires` | never | lifetime as a Go duration, e.g. `720h` |
 
 Names are 1–40 of `a-z 0-9 . _ -`, unique forever (revoked names stay taken). `api`, `owner`,
-`local`, `mcp`, `tui`, `cli`, `autoreply` and `whatsapp` are reserved. Queued messages belong to
+`local`, `mcp`, `tui`, `cli`, `autoreply`, `whatsapp` and `relink` are reserved. Queued messages belong to
 the actor name, so a token named `mcp` from before that name was reserved could see and cancel what
 token-less `wame mcp` queued: revoke it and create one under another name. This is the only way to create an
 `admin` token besides the owner secret: tokens can't create admin tokens over the API.

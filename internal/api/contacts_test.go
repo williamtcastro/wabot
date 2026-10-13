@@ -273,3 +273,71 @@ func TestContactImportExport(t *testing.T) {
 		t.Fatalf("%d contact_import entries", imports)
 	}
 }
+
+func TestContactMobileNeverHitsLandline(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "")
+	admin := bearer(issue(t, b, "boss", []auth.Scope{auth.Admin}, nil, 0))
+	const mobile, landline = "5521923456789", "552123456789"
+	only := bearer(issue(t, b, "mobile-only", []auth.Scope{auth.Read}, []string{mobile + "@s.whatsapp.net"}, 0))
+	if w := doJSON(h, "PUT", "/contacts/"+landline, `{"name":"Maria","tags":["office"]}`, admin); w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	landlineRow := func() store.OwnContact {
+		t.Helper()
+		c, err := b.Store.Contact(landline + "@s.whatsapp.net")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	if v := contactView(t, do(h, "GET", "/contacts/"+mobile, only)); v.Display == "Maria" || len(v.Tags) != 0 {
+		t.Fatalf("a token allowed only the mobile sees the landline's row: %+v", v)
+	}
+	if w := do(h, "DELETE", "/contacts/"+mobile, admin); w.Code != 404 {
+		t.Fatalf("DELETE of the mobile = %d %s", w.Code, w.Body)
+	}
+	if v := contactView(t, doJSON(h, "PATCH", "/contacts/"+mobile, `{"name":"Ana"}`, admin)); v.JID != mobile+"@s.whatsapp.net" {
+		t.Fatalf("PATCH of the mobile went to %s", v.JID)
+	}
+	if c := landlineRow(); c.Name != "Maria" || !slices.Equal(c.Tags, []string{"office"}) {
+		t.Fatalf("the landline's row changed: %+v", c)
+	}
+}
+
+func TestContactBodyMustBeAnObject(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "")
+	admin := bearer(issue(t, b, "boss", []auth.Scope{auth.Admin}, nil, 0))
+	if w := doJSON(h, "PUT", "/contacts/5511999999999", `{"name":"Maria"}`, admin); w.Code != 200 {
+		t.Fatal(w.Body)
+	}
+	for _, method := range []string{"PUT", "PATCH"} {
+		for _, body := range []string{`null`, `"Maria"`, `[]`, `1`} {
+			if w := doJSON(h, method, "/contacts/5511999999999", body, admin); w.Code != 400 || !strings.Contains(errorOf(w), "JSON object") {
+				t.Errorf("%s %s = %d %s", method, body, w.Code, w.Body)
+			}
+		}
+	}
+	if c, err := b.Store.Contact(maria); err != nil || c.Name != "Maria" {
+		t.Fatalf("a refused body changed the row: %+v %v", c, err)
+	}
+}
+
+func TestContactExportIsAudited(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "")
+	admin := bearer(issue(t, b, "boss", []auth.Scope{auth.Admin}, nil, 0))
+	for _, to := range []string{"5511999999999", "5511988887777"} {
+		if w := doJSON(h, "PUT", "/contacts/"+to, `{"name":"John","notes":"prefers mornings"}`, admin); w.Code != 200 {
+			t.Fatal(w.Body)
+		}
+	}
+	if w := do(h, "GET", "/contacts/export", admin); w.Code != 200 {
+		t.Fatal(w.Body)
+	}
+	entries, _ := b.Store.AuditLog(1, 0)
+	if len(entries) != 1 || entries[0].Action != "contact_export" || entries[0].Actor != "boss" || entries[0].Detail != "2 contacts" || !entries[0].OK {
+		t.Fatalf("audit = %+v", entries)
+	}
+}

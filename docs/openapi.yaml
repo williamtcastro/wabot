@@ -522,8 +522,9 @@ paths:
       tags: [Contacts]
       summary: Replace your own fields for a person
       description: |
-        Fields left out are cleared; all empty removes the person from your list. While logged in, a number is
-        resolved once on WhatsApp. Audited as contact_set. Requires admin.
+        Fields left out are cleared; all empty removes the person from your list. The body must be a JSON object
+        (null is a 400). While logged in, a number is resolved once on WhatsApp; one WhatsApp doesn't know is
+        stored as typed, like PATCH. Audited as contact_set. Requires admin.
       requestBody:
         required: true
         content:
@@ -594,7 +595,7 @@ paths:
     get:
       tags: [Contacts]
       summary: Your own contact list as a CSV
-      description: The import's columns (number, name, tags, notes, language, time_zone), so a round trip is lossless. Holds your notes. Requires admin.
+      description: The import's columns (number, name, tags, notes, language, time_zone), so a round trip is lossless. Holds your notes. Audited as contact_export. Requires admin.
       responses:
         "200": { description: The CSV, content: { text/csv: { schema: { type: string } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -1058,7 +1059,7 @@ paths:
               type: object
               required: [name, scopes]
               properties:
-                name: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,39}$", example: "support-bot", description: "Unique forever; api, owner, local, mcp, tui, cli, autoreply, whatsapp are reserved" }
+                name: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,39}$", example: "support-bot", description: "Unique forever; api, owner, local, mcp, tui, cli, autoreply, whatsapp, relink are reserved" }
                 scopes:
                   type: array
                   items: { type: string, enum: [read, send, admin] }
@@ -1545,7 +1546,7 @@ components:
         id: { type: integer, format: int64 }
         at: { type: string, format: date-time }
         actor: { type: string, description: "Token name for API/MCP calls (api = owner secret or token-less, mcp = stdio without a token), or tui, cli, autoreply, whatsapp", example: "support-bot" }
-        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel, optout_add, optout_remove, alert_test, contact_set, contact_delete, contact_import, contact_delete_all] }
+        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel, optout_add, optout_remove, alert_test, contact_set, contact_delete, contact_import, contact_delete_all, contact_export] }
         target: { type: string, description: "Chat JID, when there is one" }
         detail: { type: string, example: "text, 6 chars" }
         ok: { type: boolean }

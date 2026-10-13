@@ -69,6 +69,7 @@ type Bot struct {
 	allowlists   map[string]expandedAllowlist
 	own          map[string]ownContact
 	ownLIDs      int
+	ownGen       uint64
 	namesAt      time.Time
 	namesPending bool
 	contactsMu   sync.Mutex

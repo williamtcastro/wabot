@@ -112,7 +112,7 @@ token is created; it can't be recovered. The `wame_` prefix makes leaked tokens 
 (`wame_[a-z2-7]{8}_[A-Za-z0-9_-]{43}`).
 
 Names are 1–40 characters (`a-z`, `0-9`, `.`, `_`, `-`), unique, and never reused, even after
-revocation. `api`, `owner`, `local`, `mcp`, `tui`, `cli`, `autoreply` and `whatsapp` are reserved,
+revocation. `api`, `owner`, `local`, `mcp`, `tui`, `cli`, `autoreply`, `whatsapp` and `relink` are reserved,
 because the token name is what the [audit log](#get-audit) records as the actor and what owns
 [queued messages](#post-queue). An existing token named `mcp` (from before it was reserved) shares
 its queue items with token-less `wame mcp`: revoke it and issue one under another name.
@@ -796,8 +796,18 @@ Admin only. The body (at most 64 KB) has any of:
 | `add_tags`, `remove_tags` | `PATCH` only: tags to add or take away, without overwriting the others |
 
 `PUT` replaces all your fields: one left out is cleared. `PATCH` changes only the fields given:
-`null` or `""` clears one. Unknown fields are a 400. When every field ends up empty, the person
-is removed from your list. Both answer with the person as in `GET`, `own` included.
+`null` or `""` clears one. Unknown fields are a 400, and so is a body that isn't a JSON object
+(`null` included). When every field ends up empty, the person is removed from your list. Both
+answer with the person as in `GET`, `own` included.
+
+While wame is logged in, `PUT` with a number (not a JID) looks it up once on WhatsApp, so the row
+lands under the JID messages use (for example the form with or without Brazil's 9th digit). A number
+WhatsApp doesn't know is stored as typed, as `PATCH` and the import do; the lookup isn't cached, so
+each such `PUT` spends one. `PATCH` never looks anything up. A row found under an `@lid` is moved to
+the phone number once WhatsApp tells wame which number it is; when both rows exist they are merged:
+the phone row's name, language and time zone win, both notes are kept (the phone row's first,
+joined by a line break; the result may be over 2000 characters, and a `PUT` then has to shorten
+it), tags are united, the phone row's first, up to 20, and `updated_by` is `relink`.
 
 ```sh
 curl -H "Authorization: Bearer $T" -X PATCH localhost:8080/contacts/5511999999999 \
@@ -829,6 +839,8 @@ number,name,tags,notes
 - A column present overwrites that field (an empty cell clears it); absent columns are left alone.
 - Numbers are never looked up: a row updates the person stored under that number or its variant
   with or without Brazil's 9th digit, otherwise it's stored as typed.
+- The answer counts people, not lines: two lines for the same person count once, by how their row
+  ended up (`added` when it was new, `unchanged` when the lines cancel out).
 - One transaction: any bad line is a 400 naming it (`line 3: …`), and nothing is stored.
 - `?add_tags=imported` adds tags to every row; `?dry_run=1` checks and counts without storing.
 
@@ -846,8 +858,10 @@ so importing it gives back the same list. It holds your notes: keep the file pri
 written as stored; a spreadsheet may treat one starting with `=`, `+`, `-` or `@` as a formula.
 
 Writes are audited as `contact_set` (the changed field names), `contact_delete`,
-`contact_import` (`N rows: A added, U updated`) and `contact_delete_all` (`N contacts`); names,
-notes and tags are never in the audit log.
+`contact_import` (`N rows: A added, U updated`) and `contact_delete_all` (`N contacts`), and the
+export as `contact_export` (`N contacts`). Names, notes and tags are never in the audit `detail`;
+the `error` of a rejected write may quote the value that was refused (a tag, language, time zone or
+unknown field name, cut to at most 64 characters), and `/audit` is admin-only.
 
 ## `GET /groups`
 
@@ -878,7 +892,8 @@ Control actions taken through wame, newest first: sends, files, reactions, edits
 read receipts, pairing and logout, serving the login QR (`qr`), number checks (`check`, with the
 count but not the numbers), queuing and canceling (`queue`, `queue_cancel`), the opt-out list (`optout_add`, `optout_remove`;
 a chat that opted out by keyword is recorded with actor `whatsapp` and detail `keyword STOP`),
-changes to your own contact list (`contact_set`, `contact_delete`, `contact_import`, `contact_delete_all`),
+changes to and exports of your own contact list (`contact_set`, `contact_delete`, `contact_import`,
+`contact_delete_all`, `contact_export`),
 settings, tokens and webhook tests, plus WhatsApp logging the device out. Every send, file,
 reaction, edit and delete attempt is recorded exactly once, including ones rejected for bad
 input (`ok: false` with the error). Message text is never stored here.
@@ -923,8 +938,8 @@ messages`), `queue_cancel` (`target` is the batch or `#id`, `detail` `N canceled
 (`target` is the chat; `detail` is `added`, `already listed`, or `keyword STOP` with actor
 `whatsapp` when the chat sent the keyword), `optout_remove`, `contact_set` (`target` is the chat,
 `detail` the changed fields like `name, tags`, or `no change`), `contact_delete`, `contact_import`
-(`target` `csv`, `detail` `N rows: A added, U updated`, plus ` (dry run)`) or `contact_delete_all`
-(`detail` `N contacts`). See
+(`target` `csv`, `detail` `N rows: A added, U updated`, plus ` (dry run)`), `contact_delete_all`
+or `contact_export` (`target` `csv`, `detail` `N contacts`). See
 [proposed-features/ADMIN-PANEL.md](proposed-features/ADMIN-PANEL.md#logging-today) for what each one records.
 
 ## `GET /stats`

@@ -94,6 +94,7 @@ func TestExpiryOwnerAndValidation(t *testing.T) {
 		{Name: "Has Spaces", Scopes: []Scope{Read}},
 		{Name: "api", Scopes: []Scope{Read}},
 		{Name: "mcp", Scopes: []Scope{Read, Send}},
+		{Name: "relink", Scopes: []Scope{Read}},
 		{Name: "ok", Scopes: nil},
 		{Name: "admin-chats", Scopes: []Scope{Admin}, Chats: []string{"5511999999999@s.whatsapp.net"}},
 		{Name: "neg", Scopes: []Scope{Read}, Rate: -1},

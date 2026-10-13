@@ -105,11 +105,19 @@ CREATE INDEX IF NOT EXISTS wame_contact_cache_updated ON wame_contact_cache (upd
   known by `…@lid` (a chat that came in that way) is stored under it and relinked.
 - **Brazil's 9th digit.** A number typed with the 9 may be registered without it. Reads look up both
   variants locally (`phoneVariants(jid) []string` in `internal/bot/names.go`: for `55` + 2-digit
-  area + `9` + 8 digits, also the form without the 9, and the reverse). `PUT` by an admin while
-  logged in resolves the number once through `CanonicalChat` (one lookup, like `optOutChat`); a CSV
+  area + `9` + 8 digits starting with 6 to 9, also the form without the 9, and the reverse; a
+  landline's 8 digits start with 2 to 5, so a mobile never maps onto one). `PUT` by an admin while
+  logged in resolves the number once through `CanonicalChat` (one lookup, not cached when the number
+  isn't on WhatsApp, which is then stored as typed like `PATCH`); a CSV
   import never does (1000 lookups would be a ban risk): it updates an existing row under either
   variant, otherwise stores the number as typed.
-- **Relink.** Add to the statement list in `relinkLIDs` (same transaction):
+- **Relink (built).** `relinkContacts` in `internal/store/contacts.go`, called by `relinkLIDs` in
+  the same transaction, merges in Go: the phone row's name, language and time zone win when set;
+  notes are both kept (phone row's first, joined by `\n`) when they differ, which may go past 2000
+  characters; tags are united, phone row's first, capped at `MaxContactTags` at merge time so a
+  later `PATCH` isn't refused; `updated_by` = `relink`, `created_*` the older row's. When it moved
+  rows it bumps `Store.ContactsGen`, as every successful contacts write does. The sketch below was
+  the first plan:
 
 ```sql
 -- merge a @lid row into the phone row: phone row's non-empty fields win, tags are united
@@ -351,6 +359,7 @@ on a refresh over the lookup budget (with `Retry-After`); 502 on a refresh while
 | `contact_set` | chat | changed field names: `name, tags` |
 | `contact_delete` | chat | |
 | `contact_import` | `csv` | `N rows: A added, U updated` |
+| `contact_export` | `csv` | `N contacts` |
 | `contact_refresh` | chat | `N lookups` or the error |
 
 Docs: `docs/API.md` (route table, scopes table, the 403 note, a `## /contacts` section), and
@@ -566,8 +575,13 @@ writes, tests cover each path); the restricted `/contacts` change (security revi
   absent and refuses unknown fields), `ContactView` (list entry + own fields) from `ContactOf` and
   the writes, `DeleteAllContacts` audited as `contact_delete_all` (`N contacts`). `contact_set`
   says `no change` when nothing changed; `contact_import` adds ` (dry run)`.
-- The own-name map keeps only name and time zone (never notes). After a write while some row is
-  under an `@lid`, it's dropped and loaded again, since the store may have relinked that row.
+- The own-name map keeps only name and time zone (never notes). It remembers `Store.ContactsGen`
+  when loaded and reloads when that changed behind it (a relink); Bot's own writes update it in
+  place (`syncOwn`) when they were the store's only change. Names skip rows without a name, so a
+  tags-only phone row doesn't hide the name under its `@lid`.
+- `GET /contacts/export` goes through `Bot.ExportContacts`, audited as `contact_export`
+  (`N contacts`).
+- Keys come from `Bot.localJID` (shared with `LocalChat`): the phone JID without a device suffix.
 - `known=1` keeps anyone with an own row, even without a name.
 - `readCSVTable(r, csvTable{columns, aliases, required, limit, noun})`; a contacts CSV also splits
   tags on commas. The 4 MB cap is the caller's (`bot.MaxContactImportBytes`), like the queue.
