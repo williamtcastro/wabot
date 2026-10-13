@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	chatListWidth = 34
+	chatListWidth = 37
 	chatsDebounce = 200 * time.Millisecond
 )
 
@@ -150,8 +150,8 @@ func (m *model) viewChats() string {
 		if c.Unread > 0 {
 			badge = styleAccent.Render(fmt.Sprintf("%2d ", min(c.Unread, 99)))
 		}
-		name := fit(safe(cmp.Or(c.Name, displayJID(c.JID))), listW-11)
-		line := badge + pad(name, listW-11) + " " + styleDim.Render(pad(when(c.LastAt), 6))
+		nameW := listW - 5 - whenWidth
+		line := badge + pad(fit(safe(cmp.Or(c.Name, displayJID(c.JID))), nameW), nameW) + " " + styleDim.Render(when(c.LastAt))
 		if i == m.chatSel {
 			line = lipgloss.NewStyle().Background(colSel).Width(listW).Render(styleAccent.Render("▌") + line)
 		} else {
@@ -173,7 +173,7 @@ func (m *model) viewChats() string {
 
 func (m *model) viewMessages(w, h int) string {
 	chat := m.selectedChat()
-	title := styleBold.Render(m.chatName(chat)) + "  " + styleDim.Render(chat)
+	title := fit(styleBold.Render(m.chatName(chat))+"  "+styleDim.Render(chat), w)
 	if m.msgsErr != nil {
 		return title + "\n\n" + errText(m.msgsErr)
 	}
@@ -231,7 +231,7 @@ func messageText(msg store.Message) string {
 }
 
 func (m *model) viewSearch(w, h int) string {
-	title := styleBold.Render("Search: "+safe(m.search)) + "  " + styleDim.Render(plural(len(m.searchHits), "match")+" · esc clears")
+	title := fit(styleBold.Render("Search: "+safe(m.search))+"  "+styleDim.Render(plural(len(m.searchHits), "match")+" · esc clears"), w)
 	if m.msgsErr != nil {
 		return title + "\n\n" + errText(m.msgsErr)
 	}

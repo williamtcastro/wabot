@@ -3,10 +3,12 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/williamtcastro/wame/internal/api"
 	"github.com/williamtcastro/wame/internal/auth"
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/store"
@@ -426,5 +429,181 @@ func TestQueueTabReceiptsAndQuietHours(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("missing %q:\n%s", want, view)
 		}
+	}
+}
+
+// spread is one time for each of when's layouts: today, yesterday, earlier this year, a previous year.
+func spread() []time.Time {
+	now := time.Now()
+	thisYear := time.Date(now.Year(), 1, 1, 12, 0, 0, 0, time.Local)
+	if now.Sub(thisYear) < 8*24*time.Hour {
+		thisYear = now.AddDate(0, 0, -20)
+	}
+	return []time.Time{now, now.AddDate(0, 0, -1), thisYear, now.AddDate(-1, 0, -3)}
+}
+
+func TestWhenFillsItsColumn(t *testing.T) {
+	date := func(t time.Time) string {
+		if t.Year() == time.Now().Year() {
+			return t.Format("Jan 02")
+		}
+		return t.Format("Jan 2006")
+	}
+	ats, future := spread(), time.Now().AddDate(0, 0, 3)
+	cases := map[time.Time]string{
+		ats[0]: ats[0].Format("15:04"), ats[1]: ats[1].Format("Mon 15:04"), ats[2]: date(ats[2]),
+		ats[3]: ats[3].Format("Jan 2006"), future: date(future), {}: "",
+	}
+	for at, want := range cases {
+		if got := when(at); got != pad(want, whenWidth) || ansi.StringWidth(got) != whenWidth {
+			t.Errorf("when(%v) = %q, want %q padded to %d", at, got, want, whenWidth)
+		}
+	}
+}
+
+// leftCol is where want starts in line, in columns, or -1.
+func leftCol(line, want string) int {
+	at := strings.Index(line, want)
+	if at < 0 {
+		return -1
+	}
+	return ansi.StringWidth(line[:at])
+}
+
+func TestChatRowsStayOnOneLine(t *testing.T) {
+	b, c := newServer(t)
+	people := []struct{ jid, name, label string }{
+		{maria, "Maria John Ana Maria John Ana Maria", "~Maria"},
+		{john, "John", "~John"},
+		{"552187654321@s.whatsapp.net", "Ana", "~Ana"},
+		{"5521987654321@s.whatsapp.net", "", "+5521987654321"},
+	}
+	ats := spread()
+	for i, p := range people {
+		if _, ok, err := b.Store.Save(store.Message{ID: fmt.Sprint("C", i), Chat: p.jid, Sender: p.jid, PushName: p.name, Type: "text", Text: "oi", Timestamp: ats[i]}); !ok || err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, width := range []int{100, 120, 180} {
+		m := newTestModel(t, Options{Client: c})
+		m.Update(tea.WindowSizeMsg{Width: width, Height: 30})
+		press(m, "2")
+		view := ansi.Strip(m.View())
+		lines := strings.Split(view, "\n")
+		left := func(i int) string { return ansi.Truncate(lines[i], chatListWidth+1, "") }
+		first, col := -1, -1
+		for i, p := range people {
+			row := slices.IndexFunc(lines, func(l string) bool { return strings.Contains(ansi.Truncate(l, chatListWidth+1, ""), p.label) })
+			if first < 0 {
+				first = row
+			}
+			if row != first+i {
+				t.Fatalf("width %d: %s is on line %d, want %d:\n%s", width, p.label, row, first+i, view)
+			}
+			at := leftCol(left(row), when(ats[i]))
+			switch {
+			case at < 0:
+				t.Fatalf("width %d: %s's row lacks %q: %q\n%s", width, p.label, when(ats[i]), left(row), view)
+			case col < 0:
+				col = at
+			case at != col:
+				t.Fatalf("width %d: %s's time starts at column %d, the first row's at %d:\n%s", width, p.label, at, col, view)
+			}
+		}
+		if after := left(first + len(people)); strings.TrimSpace(after) != "" {
+			t.Fatalf("width %d: a chat row spilled onto the next line: %q\n%s", width, after, view)
+		}
+		for _, l := range lines {
+			if ansi.StringWidth(l) > width {
+				t.Fatalf("width %d: line too wide: %q", width, l)
+			}
+		}
+		if strings.Contains(view, "─…") {
+			t.Fatalf("width %d: the message pane is wider than its room:\n%s", width, view)
+		}
+	}
+}
+
+func TestTimeColumnsLineUp(t *testing.T) {
+	_, c := newServer(t)
+	ats := spread()
+	long := strings.Repeat("a detail long enough to run past the right edge ", 4)
+	var audit []store.AuditEntry
+	var failures []bot.WebhookFailure
+	var tokens []store.Token
+	var items []store.OutboxItem
+	for i, at := range ats {
+		audit = append(audit, store.AuditEntry{ID: int64(10 - i), At: at, Actor: "api", Action: "send", Target: maria, Detail: long, OK: true})
+		failures = append(failures, bot.WebhookFailure{At: at, Delivery: fmt.Sprint("d", i), Event: "message", Attempt: 2, Error: "the receiver timed out " + long, GaveUp: i%2 == 0})
+		tokens = append(tokens, store.Token{ID: fmt.Sprint("t", i), Name: fmt.Sprint("support-bot-", i), Scopes: []string{"read", "send"}, Created: at, LastUsed: at, Expires: at.AddDate(2, 0, 0), CreatedBy: "a-parent-token-name"})
+		items = append(items, store.OutboxItem{ID: int64(i + 1), Batch: "b1", Actor: "api", To: "5511988887777", Status: store.OutboxFailed, Attempts: 3, Due: at, Created: at, Updated: at, Error: long})
+	}
+	stats := api.Stats{Version: "test", Started: ats[3], Webhook: &bot.WebhookStats{Recent: failures}}
+
+	// check fails on a line wider than the screen, and on rows (the lines with marker) where after
+	// doesn't start in the same column. It returns the rows' line numbers.
+	check := func(t *testing.T, width int, view, marker, after string) []int {
+		t.Helper()
+		var rows []int
+		col := -1
+		for i, l := range strings.Split(view, "\n") {
+			if ansi.StringWidth(l) > width {
+				t.Fatalf("width %d: line too wide (%d): %q\n%s", width, ansi.StringWidth(l), l, view)
+			}
+			if marker == "" || !strings.Contains(l, marker) {
+				continue
+			}
+			rows = append(rows, i)
+			at := leftCol(l, after)
+			switch {
+			case at < 0:
+				t.Fatalf("width %d: %q lacks %q\n%s", width, l, after, view)
+			case col < 0:
+				col = at
+			case at != col:
+				t.Fatalf("width %d: %q starts at %d, want %d:\n%s", width, after, at, col, view)
+			}
+		}
+		return rows
+	}
+	for _, width := range []int{100, 120, 180} {
+		m := newTestModel(t, Options{Client: c})
+		m.Update(tea.WindowSizeMsg{Width: width, Height: 40})
+		m.Update(statsMsg{seq: m.statsReq.start(), s: stats})
+		check(t, width, ansi.Strip(m.View()), "", "")
+
+		press(m, "3")
+		m.Update(tokensMsg{tokens: tokens})
+		check(t, width, ansi.Strip(m.View()), "", "")
+
+		press(m, "4")
+		m.Update(auditMsg{entries: audit})
+		check(t, width, ansi.Strip(m.View()), "✓  ", " api ")
+
+		press(m, "5")
+		m.Update(statsMsg{seq: m.statsReq.start(), s: stats})
+		view := ansi.Strip(m.View())
+		rows := check(t, width, view, "try 2", "try 2")
+		if len(rows) != len(failures) || rows[len(rows)-1]-rows[0] != len(failures)-1 || !strings.Contains(strings.Split(view, "\n")[rows[len(rows)-1]+1], "R replays") {
+			t.Fatalf("width %d: webhook failures aren't one line each:\n%s", width, view)
+		}
+		more := stats
+		more.Webhook = &bot.WebhookStats{Recent: slices.Concat(failures, failures)}
+		m.Update(statsMsg{seq: m.statsReq.start(), s: more})
+		view = ansi.Strip(m.View())
+		lines := strings.Split(view, "\n")
+		rows = check(t, width, view, "try 2", "try 2")
+		if len(rows) != 6 {
+			t.Fatalf("width %d: %d failures listed, want 6:\n%s", width, len(rows), view)
+		}
+		foot := rows[5] + 1
+		next := strings.Split(lines[foot+1], "│")
+		if !strings.Contains(lines[foot], "j/k to move") || len(next) > 1 && strings.TrimSpace(next[len(next)-2]) != "" {
+			t.Fatalf("width %d: the failures' footer isn't one line:\n%s", width, view)
+		}
+
+		press(m, "7")
+		m.Update(queueMsg{page: QueuePage{Items: items}})
+		check(t, width, ansi.Strip(m.View()), "", "")
 	}
 }

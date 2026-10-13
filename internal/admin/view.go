@@ -889,19 +889,25 @@ func nonEmpty(parts ...string) []string {
 	return out
 }
 
-// when is a compact timestamp: the time today, the weekday this week, the date otherwise.
+const whenWidth = len("Mon 15:04")
+
+// when is a compact timestamp padded to whenWidth, so it fills a column of its own: the time today,
+// the weekday and time this week, the date this year, the month and year before.
 func when(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	t, now := t.Local(), time.Now()
-	switch {
+	var s string
+	now := time.Now()
+	switch t = t.Local(); {
+	case t.IsZero():
 	case t.YearDay() == now.YearDay() && t.Year() == now.Year():
-		return t.Format("15:04")
-	case now.Sub(t) < 6*24*time.Hour:
-		return t.Format("Mon 15:04")
+		s = t.Format("15:04")
+	case now.Sub(t) >= 0 && now.Sub(t) < 6*24*time.Hour:
+		s = t.Format("Mon 15:04")
+	case t.Year() == now.Year():
+		s = t.Format("Jan 02")
+	default:
+		s = t.Format("Jan 2006")
 	}
-	return t.Format("Jan 02")
+	return pad(s, whenWidth)
 }
 
 // stamp formats a time from the server in the local zone; JSON keeps the server's (often UTC).

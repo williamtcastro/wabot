@@ -168,7 +168,7 @@ func TestTimesShowInTheLocalZone(t *testing.T) {
 	if got, want := stamp(at, "15:04"), at.Local().Format("15:04"); got != want {
 		t.Fatalf("stamp = %s, want %s", got, want)
 	}
-	if got := when(at); got != at.Local().Format("15:04") && got != at.Local().Format("Mon 15:04") {
+	if got := strings.TrimSpace(when(at)); got != at.Local().Format("15:04") && got != at.Local().Format("Mon 15:04") {
 		t.Fatalf("when = %s, want local %s", got, at.Local().Format("15:04"))
 	}
 }

@@ -97,11 +97,12 @@ func (m *model) viewHealth() string {
 		{"Number lookups", limiterBody(s.Limits.Lookups, "429s")},
 		{"Auto-replies", limiterBody(s.Limits.AutoReply, "Dropped")},
 		{"Webhook", m.webhookBody()},
-		{"Recent webhook failures", m.webhookFailures()},
+		{"Recent webhook failures", m.webhookFailures(m.gridWidth() - 4)},
 	})
 }
 
-func (m *model) webhookFailures() string {
+// webhookFailures lists the recent failures, one line each in width columns.
+func (m *model) webhookFailures(width int) string {
 	w := m.stats.Webhook
 	switch {
 	case w == nil:
@@ -125,26 +126,32 @@ func (m *model) webhookFailures() string {
 		if i == m.healthSel {
 			mark = styleAccent.Render("▌ ")
 		}
-		lines = append(lines, mark+styleDim.Render(when(f.At))+"  "+state+"  "+styleDim.Render(fmt.Sprintf("try %d", f.Attempt))+"  "+fit(what, 34))
+		lines = append(lines, fit(mark+styleDim.Render(when(f.At))+"  "+state+"  "+styleDim.Render(fmt.Sprintf("try %d", f.Attempt))+"  "+what, width))
 	}
+	foot := "  R replays the marked one · t sends a test"
 	if len(w.Recent) > end-start {
-		lines = append(lines, styleDim.Render(fmt.Sprintf("  %d of %d · j/k to move · R replays the marked one", m.healthSel+1, len(w.Recent))))
-	} else {
-		lines = append(lines, styleDim.Render("  R replays the marked one · t sends a test"))
+		foot = fmt.Sprintf("  %d of %d · j/k to move · R replays the marked one", m.healthSel+1, len(w.Recent))
 	}
+	lines = append(lines, styleDim.Render(fit(foot, width)))
 	return strings.Join(lines, "\n")
 }
+
+func (m *model) gridCols() int {
+	if m.width >= 150 {
+		return 3
+	}
+	return 2
+}
+
+// gridWidth is the width of each card in a grid.
+func (m *model) gridWidth() int { return (m.width - 1 - (m.gridCols() - 1)) / m.gridCols() }
 
 // panel is a card's title and body before it's laid out.
 type panel struct{ title, body string }
 
 // grid lays panels out in rows of equal height: two columns, or three on wide terminals.
 func (m *model) grid(ps []panel) string {
-	cols := 2
-	if m.width >= 150 {
-		cols = 3
-	}
-	w := (m.width - 1 - (cols - 1)) / cols
+	cols, w := m.gridCols(), m.gridWidth()
 	var rows []string
 	for i := 0; i < len(ps); i += cols {
 		row := ps[i:min(i+cols, len(ps))]
