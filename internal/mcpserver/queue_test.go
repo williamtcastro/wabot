@@ -112,6 +112,32 @@ func TestScheduleOwnItemsOnly(t *testing.T) {
 	}
 }
 
+func TestListScheduledReceipts(t *testing.T) {
+	b := newBot(t)
+	cs := connect(t, b, tokenPrincipal(t, b, "maria-bot", []auth.Scope{auth.Send}, 0))
+	out, _, _ := call(t, cs, "schedule_message", map[string]any{"to": maria, "text": "oi Maria"})
+	id := int64(out["id"].(float64))
+	if _, err := b.Store.ClaimOutbox(id, "3EB0AAAA"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Store.FinishOutbox(id, store.OutboxResult{Status: store.OutboxSent}); err != nil {
+		t.Fatal(err)
+	}
+	item := func() map[string]any {
+		out, _, _ := call(t, cs, "list_scheduled", nil)
+		return out["items"].([]any)[0].(map[string]any)
+	}
+	if it := item(); it["delivered_at"] != nil || it["read_at"] != nil {
+		t.Fatalf("before any receipt: %v", it)
+	}
+	if _, err := b.Store.MarkOutboxReceipt([]string{"3EB0AAAA"}, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if it := item(); it["delivered_at"] == nil || it["read_at"] == nil {
+		t.Fatalf("after a read receipt: %v", it)
+	}
+}
+
 func TestScheduleTimes(t *testing.T) {
 	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
 	for in, want := range map[string]time.Time{
@@ -125,7 +151,7 @@ func TestScheduleTimes(t *testing.T) {
 			t.Errorf("parseSendAt(%q) = %v, %v; want %v", in, got, err, want)
 		}
 	}
-	for _, in := range []string{"-1h", "0s", "d", "1.5d", "9999999d", "tomorrow", "2026-10-14 09:00", "2026-10-13T09:00:00Z"} {
+	for _, in := range []string{"-1h", "0s", "d", "1.5d", "-3d", "tomorrow", "2026-10-14 09:00", "2026-10-13T09:00:00Z"} {
 		if _, err := parseSendAt(in, now); err == nil {
 			t.Errorf("parseSendAt(%q) accepted", in)
 		}
@@ -141,8 +167,10 @@ func TestScheduleTimes(t *testing.T) {
 	if d := time.Until(due); d < 119*time.Minute || d > 2*time.Hour {
 		t.Fatalf("due in %v, want 2h", d)
 	}
-	if _, text, isErr := call(t, cs, "schedule_message", map[string]any{"to": maria, "text": "oi", "send_at": "40d"}); !isErr || !strings.Contains(text, "days ahead") {
-		t.Fatalf("40d = %q, want the queue's limit", text)
+	for _, far := range []string{"40d", "9999999d", "800000h"} {
+		if _, text, isErr := call(t, cs, "schedule_message", map[string]any{"to": maria, "text": "oi", "send_at": far}); !isErr || !strings.Contains(text, "days ahead") {
+			t.Fatalf("%s = %q, want the queue's limit", far, text)
+		}
 	}
 }
 

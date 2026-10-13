@@ -66,13 +66,15 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
-// writeError maps errors to status codes: bad input 400, missing 404, key reuse 409, rate limit 429,
+// writeError maps errors to status codes: bad input 400, missing 404, key reuse or a
+// cancel of an item no longer queued 409, rate limit 429,
 // database errors and panics 500 (logged, never shown), anything else (WhatsApp) 502.
 func writeError(w http.ResponseWriter, err error) {
 	code, msg := http.StatusBadGateway, err.Error()
 	_, db := errors.AsType[*sqlite.Error](err)
 	_, input := errors.AsType[bot.InputError](err)
 	rl, limited := errors.AsType[bot.RateLimitError](err)
+	_, notQueued := errors.AsType[bot.NotQueuedError](err)
 	switch {
 	case db || errors.Is(err, errInternal):
 		code, msg = http.StatusInternalServerError, errInternal.Error()
@@ -81,6 +83,8 @@ func writeError(w http.ResponseWriter, err error) {
 		}
 	case input:
 		code = http.StatusBadRequest
+	case notQueued:
+		code = http.StatusConflict
 	case errors.Is(err, store.ErrNotFound):
 		code = http.StatusNotFound
 	case errors.Is(err, errConflict):

@@ -64,7 +64,7 @@ wame mcp -mcp-token wame_…  # act as that API token (its scopes and chat allow
 | `react` | send | `chat`, `message_id`, `emoji` (empty removes) | `seq`, `id`, `chat` |
 | `mark_read` | send | `chat`, `message_ids` (optional; omit for the whole chat) | `marked` |
 | `schedule_message` | send | `to`, `text`, `send_at` (optional: RFC 3339 with offset, or a delay like `90m`, `2h`, `3d`), `batch` (optional) | `id`, `batch`, `to`, `status`, `due`, `note` (when the queue is paused or no worker runs) |
-| `list_scheduled` | send | `status`, `batch`, `before` (id, to page), `limit` (default 50, max 200) | `items[]` newest first: `id`, `batch`, `actor`, `to`, `chat`, `status`, `attempts`, `due`, `created_at`, `updated_at`, `message_id`, `error`, `untrusted.text` (own items only); `counts` by status; `note` |
+| `list_scheduled` | send | `status`, `batch`, `before` (id, to page), `limit` (default 50, max 200) | `items[]` newest first: `id`, `batch`, `actor`, `to`, `chat`, `status`, `attempts`, `due`, `created_at`, `updated_at`, `message_id`, `error`, `delivered_at` and `read_at` (once WhatsApp reports them), `untrusted.text` (own items only); `counts` by status (plus `delivered` and `read` among the sent); `note` |
 | `cancel_scheduled` | send | `id` **or** `batch` | `canceled` (ids) |
 
 Each message in `messages[]` has `seq`, `id`, `chat`, `from` (`me`/`them`), `sender`, `type`,
@@ -76,7 +76,7 @@ message and returns at once; the worker sends it when it's due, within the globa
 token's own rate (charged at send time, not when scheduling). Without `send_at` it goes out as soon as
 the limits allow; `send_at` may be at most 30 days ahead, and a time more than a minute in the past is
 refused. Without the `admin` scope, `list_scheduled` and `cancel_scheduled` only see the items the
-same token (or, over stdio without a token, `mcp`) queued; with it, every item, but the text of other
+same token (or, over stdio without a token, `mcp`, a name no token can take) queued; with it, every item, but the text of other
 callers' items is never returned. A finished item can't be canceled ("only queued messages can be
 canceled").
 

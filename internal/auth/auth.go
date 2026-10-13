@@ -38,7 +38,7 @@ var (
 	ErrRevoked      = store.ErrTokenRevoked
 
 	namePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,39}$`)
-	reservedNames = []string{"api", "owner", "local", "tui", "cli", "autoreply", "whatsapp"}
+	reservedNames = []string{"api", "owner", "local", "mcp", "tui", "cli", "autoreply", "whatsapp"}
 	idEncoding    = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 )
 

@@ -78,7 +78,7 @@ Flags (right after the command, before other arguments):
                          (env WAME_QUEUE_TIMEZONE, default Local: the server's zone)
   -alert-gotify URL      push alerts (disconnected, logged out, queue and webhook trouble) to this Gotify server (env WAME_ALERT_GOTIFY)
   -alert-gotify-token T  the Gotify app token, sent as X-Gotify-Key (env WAME_ALERT_GOTIFY_TOKEN)
-  -alert-delay D         alert when WhatsApp stays disconnected this long (env WAME_ALERT_DELAY, default 2m)
+  -alert-delay D         alert when WhatsApp stays disconnected this long (env WAME_ALERT_DELAY, default 2m, min 30s)
   -log-format F          text or json (env WAME_LOG_FORMAT, default text)
   -log-file PATH         write app logs to PATH instead of stderr (env WAME_LOG_FILE)
   -debug                 verbose logs, including whatsmeow's
@@ -110,15 +110,11 @@ func main() {
 	case "version", "--version":
 		fmt.Println("wame", version)
 		return
-	case "admin", "backup":
-		command := adminCommand
-		if cmd == "backup" {
-			command = backupCommand
-		}
-		if err := command(args); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
-		}
+	case "admin":
+		exitOn(adminCommand(args))
+		return
+	case "backup":
+		exitOn(backupCommand(args))
 		return
 	}
 
@@ -171,13 +167,30 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err = run(ctx, cmd, fs.Args(), c)
 	stop()
+	exitOn(err)
+}
+
+func exitOn(err error) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
+// secrets are replaced wherever they appear in the logs kept for GET /logs.
+func (c config) secrets() []string {
+	return []string{c.token, c.webhook, c.webhookSecret, c.alertGotify, c.alertGotifyToken}
+}
+
 func run(ctx context.Context, cmd string, args []string, c config) error {
+	for _, f := range []struct {
+		name string
+		d    time.Duration
+	}{{"-chat-gap", c.chatGap}, {"-max-wait", c.maxWait}, {"-queue-jitter", c.queueJitter}, {"-alert-delay", c.alertDelay}} {
+		if f.d < 0 {
+			return fmt.Errorf("%s must be 0 or more", f.name)
+		}
+	}
 	level := "INFO"
 	if c.debug {
 		level = "DEBUG"
@@ -189,7 +202,7 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 		waLogger = waLog.Noop
 	}
 	logs := bot.NewLogBuffer(logBufferSize)
-	logs.Scrub(c.token, c.webhook, c.webhookSecret)
+	logs.Scrub(c.secrets()...)
 	log, closeLog, err := newLogger(c.logFormat, c.logFile, level, quiet, logs)
 	if err != nil {
 		return err

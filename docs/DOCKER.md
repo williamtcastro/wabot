@@ -115,9 +115,10 @@ docker compose run --rm wame login
 docker compose up -d
 ```
 
-[`.env.example`](../.env.example) lists the keys: `WAME_TOKEN` (required), and the optional
-webhook, rate, queue jitter and log settings, which Compose passes to the container. `WAME_SERVER` is the URL
-`wame admin` connects to; the server ignores it. Run `wame admin` from the folder with the `.env`
+[`.env.example`](../.env.example) lists the main keys: `WAME_TOKEN` (required), and the optional
+webhook, rate and log settings. Compose passes those to the container, and also the queue's
+(`WAME_QUEUE_JITTER`, `WAME_QUEUE_QUIET_HOURS`, `WAME_QUEUE_TIMEZONE`, `TZ`) and the alerts' if
+set. `WAME_SERVER` is the URL `wame admin` connects to; the server ignores it. Run `wame admin` from the folder with the `.env`
 and it reads `WAME_SERVER` and `WAME_TOKEN` from it; or save them in `~/.config/wame/admin.env` to
 use from anywhere ([details](ADMIN.md#saving-the-server-and-token)).
 
@@ -151,6 +152,12 @@ container, from the [admin panel](ADMIN.md#changing-settings)'s Settings tab or
 `PATCH /settings`. Those changes are stored in `/data` and **win over the container's environment
 variables** on every restart until they're reset there, so check the Settings tab if a changed
 `WAME_RATE` seems to be ignored.
+
+The container's clock is UTC unless you set `TZ` (like `TZ=America/Sao_Paulo`; the time zone data
+is built into wame, so this works in the distroless image). That matters for the send queue's quiet
+hours: `WAME_QUEUE_QUIET_HOURS=21:00-08:00` is read on the clock of `WAME_QUEUE_TIMEZONE`, or of
+`TZ` when that's unset, so without either a window meant for São Paulo starts three hours early.
+Compose passes all three through from `.env`; see [QUEUE.md](QUEUE.md).
 
 `docker stop` shuts wame down cleanly: it stops taking requests, ends open event streams, gives
 in-flight requests up to 5 seconds and queued webhook deliveries one last attempt, then closes the

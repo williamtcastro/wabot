@@ -187,6 +187,7 @@ func TestWriteErrorCodes(t *testing.T) {
 		{bot.BadInput("nope"), 400},
 		{fmt.Errorf("wrapped: %w", store.ErrNotFound), 404},
 		{errConflict, 409},
+		{bot.NotQueuedError{ID: 7, Status: "sent"}, 409},
 		{bot.RateLimitError{RetryAfter: 2 * time.Second}, 429},
 		{context.DeadlineExceeded, 504},
 		{errors.New("whatsapp said no"), 502},
@@ -653,8 +654,16 @@ func TestQueueEndpoints(t *testing.T) {
 	if w := do(h, "DELETE", fmt.Sprintf("/queue/%d", res.Items[0].ID), sender); w.Code != 200 {
 		t.Fatalf("cancel: %d %s", w.Code, w.Body)
 	}
-	if w := do(h, "DELETE", fmt.Sprintf("/queue/%d", res.Items[0].ID), sender); w.Code != 409 {
+	if w := do(h, "DELETE", fmt.Sprintf("/queue/%d", res.Items[0].ID), sender); w.Code != 409 || !strings.Contains(w.Body.String(), "is canceled") {
 		t.Fatalf("cancel again: %d %s", w.Code, w.Body)
+	}
+	if w := do(h, "DELETE", fmt.Sprintf("/queue/%d", res.Items[0].ID), scoped); w.Code != 404 {
+		t.Fatalf("someone else's finished item: %d %s", w.Code, w.Body)
+	}
+	for _, bad := range []string{"0", "-1", "abc"} {
+		if w := do(h, "DELETE", "/queue/"+bad, sender); w.Code != 404 {
+			t.Fatalf("DELETE /queue/%s: %d %s", bad, w.Code, w.Body)
+		}
 	}
 	if w := do(h, "DELETE", "/queue?batch=promo", scoped); !strings.Contains(w.Body.String(), `"canceled":0`) {
 		t.Fatalf("a token can only cancel its own batch: %s", w.Body)

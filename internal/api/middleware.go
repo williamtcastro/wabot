@@ -45,6 +45,13 @@ func (s *statusRecorder) WriteHeader(code int) {
 
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
+// quietPaths are polled (long-polls, streams, the admin panel's refreshes, Prometheus scrapes), so a
+// successful GET of one logs at debug and doesn't push everything else out of the /logs buffer.
+var quietPaths = map[string]bool{
+	"/status": true, "/messages/wait": true, "/events": true, "/logs": true, "/stats": true, "/metrics": true,
+	"/queue": true, "/tokens": true, "/settings": true, "/audit": true,
+}
+
 // withRequestLog logs one line per request. The query string is left out because it may hold the token.
 func withRequestLog(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +64,7 @@ func withRequestLog(log *slog.Logger, next http.Handler) http.Handler {
 			level = slog.LevelError
 		case rec.status >= 400:
 			level = slog.LevelWarn
-		case r.URL.Path == "/status" || r.URL.Path == "/messages/wait" || r.URL.Path == "/events" || r.URL.Path == "/logs":
+		case r.Method == http.MethodGet && quietPaths[r.URL.Path]:
 			level = slog.LevelDebug
 		}
 		log.Log(r.Context(), level, "http", "method", r.Method, "path", r.URL.Path, "status", rec.status,

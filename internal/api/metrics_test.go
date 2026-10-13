@@ -11,6 +11,7 @@ import (
 
 	"github.com/williamtcastro/wame/internal/auth"
 	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 var promLine = regexp.MustCompile(`^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\]|\\.)*"(?:,[a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\]|\\.)*")*\})? (\S+)$`)
@@ -83,7 +84,7 @@ func TestMetrics(t *testing.T) {
 		"wame_limiter_rejected_total": "counter", "wame_webhook_delivered_total": "counter",
 		"wame_webhook_failed_total": "counter", "wame_webhook_dropped_total": "counter",
 		"wame_webhook_retried_total": "counter", "wame_webhook_queue_depth": "gauge", "wame_queue_items": "gauge",
-		"wame_open_streams": "gauge", "wame_alerts_sent_total": "counter",
+		"wame_queue_sent_receipts": "gauge", "wame_open_streams": "gauge", "wame_alerts_sent_total": "counter",
 	} {
 		if types[name] != typ {
 			t.Errorf("%s: type %q, want %q", name, types[name], typ)
@@ -92,11 +93,15 @@ func TestMetrics(t *testing.T) {
 	for _, want := range []string{
 		"wame_up 1", "wame_connected 0", `wame_build_info{version="test",`, `wame_sends_total{result="ok"} 0`,
 		`wame_limiter_rejected_total{limiter="auto_reply"} 0`, `wame_queue_items{state="queued"} 1`,
-		`wame_queue_items{state="failed"} 0`, "wame_open_streams 0", "wame_alerts_configured 0",
+		`wame_queue_items{state="failed"} 0`, `wame_queue_sent_receipts{receipt="read"} 0`,
+		"wame_open_streams 0", "wame_alerts_configured 0",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q", want)
 		}
+	}
+	if got := samples["wame_queue_items"]; len(got) != len(store.OutboxStates) || strings.Contains(strings.Join(got, "\n"), `"delivered"`) {
+		t.Errorf("queue states must be exactly store.OutboxStates, so they add up: %v", got)
 	}
 	if len(samples["wame_limiter_last_minute"]) != 3 {
 		t.Errorf("limiters: %v", samples["wame_limiter_last_minute"])

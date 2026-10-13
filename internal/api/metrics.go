@@ -1,17 +1,16 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 // promWriter writes the Prometheus text exposition format 0.0.4.
@@ -99,7 +98,13 @@ func (a *server) metrics(w http.ResponseWriter, r *http.Request) {
 	p.gauge("wame_webhook_queue_depth", "Webhook deliveries waiting.", float64(hook.Queued))
 
 	q := a.b.QueueStats()
-	p.family("wame_queue_items", "gauge", "Send queue items by state (finished ones are pruned after 7 days).", queueStates(q)...)
+	var states []sample
+	for _, st := range store.OutboxStates {
+		states = append(states, one(float64(q.Of(st)), "state", st))
+	}
+	p.family("wame_queue_items", "gauge", "Send queue items by state (finished ones are pruned after 7 days).", states...)
+	p.family("wame_queue_sent_receipts", "gauge", "Sent queue items with a delivered or read receipt from WhatsApp; not a state, so not part of wame_queue_items.",
+		one(float64(q.Delivered), "receipt", store.OutboxDelivered), one(float64(q.Read), "receipt", store.OutboxRead))
 	p.gauge("wame_queue_paused", "1 while the send queue is paused.", boolValue(q.Paused))
 	p.gauge("wame_queue_cooldown", "1 while the send queue backs off after repeated WhatsApp errors.", boolValue(!q.CooldownUntil.IsZero()))
 
@@ -112,21 +117,6 @@ func (a *server) metrics(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = io.WriteString(w, p.b.String())
-}
-
-// queueStates reads every numeric count from the queue's JSON, so states added later show up too.
-func queueStates(q bot.QueueStats) []sample {
-	raw, _ := json.Marshal(q.OutboxCounts)
-	var fields map[string]any
-	_ = json.Unmarshal(raw, &fields)
-	var out []sample
-	for k, v := range fields {
-		if n, ok := v.(float64); ok {
-			out = append(out, one(n, "state", k))
-		}
-	}
-	slices.SortFunc(out, func(x, y sample) int { return strings.Compare(x.labels[1], y.labels[1]) })
-	return out
 }
 
 func (s *streams) total() int {

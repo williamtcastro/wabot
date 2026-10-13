@@ -107,8 +107,10 @@ token is created; it can't be recovered. The `wame_` prefix makes leaked tokens 
 (`wame_[a-z2-7]{8}_[A-Za-z0-9_-]{43}`).
 
 Names are 1–40 characters (`a-z`, `0-9`, `.`, `_`, `-`), unique, and never reused, even after
-revocation. `api`, `owner`, `local`, `tui`, `cli`, `autoreply` and `whatsapp` are reserved, because
-the token name is what the [audit log](#get-audit) records as the actor.
+revocation. `api`, `owner`, `local`, `mcp`, `tui`, `cli`, `autoreply` and `whatsapp` are reserved,
+because the token name is what the [audit log](#get-audit) records as the actor and what owns
+[queued messages](#post-queue). An existing token named `mcp` (from before it was reserved) shares
+its queue items with token-less `wame mcp`: revoke it and issue one under another name.
 
 ### Scopes
 
@@ -730,8 +732,9 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/check \
 
 Control actions taken through wame, newest first: sends, files, reactions, edits, deletes,
 read receipts, pairing and logout, serving the login QR (`qr`), number checks (`check`, with the
-count but not the numbers), queuing and canceling (`queue`, `queue_cancel`), settings, tokens and
-webhook tests, plus WhatsApp logging the device out. Every send, file,
+count but not the numbers), queuing and canceling (`queue`, `queue_cancel`), the opt-out list (`optout_add`, `optout_remove`;
+a chat that opted out by keyword is recorded with actor `whatsapp` and detail `keyword STOP`),
+settings, tokens and webhook tests, plus WhatsApp logging the device out. Every send, file,
 reaction, edit and delete attempt is recorded exactly once, including ones rejected for bad
 input (`ok: false` with the error). Message text is never stored here.
 
@@ -769,8 +772,11 @@ mode, `mcp` for `wame mcp` without a token), or `tui`, `cli`, `autoreply` or `wh
 `action` is `send`, `send_file`, `react`, `edit`, `delete`, `read`, `pair`, `logout`,
 `logged_out`, `token_create`, `token_revoke` (for the token ones, `target` is the token name and
 `detail` the requested scopes), `settings` (`detail` lists the changes, e.g. `rate=10, chat_gap
-reset`), `webhook_test` or `webhook_replay` (`detail` is the delivery id), or `alert_test`
-(`detail` is the backend, `gotify`). See
+reset`), `webhook_test` or `webhook_replay` (`detail` is the delivery id), `alert_test`
+(`detail` is the backend, `gotify`), `qr`, `check`, `queue` (`target` is the batch, `detail` `N
+messages`), `queue_cancel` (`target` is the batch or `#id`, `detail` `N canceled`), `optout_add`
+(`target` is the chat; `detail` is `added`, `already listed`, or `keyword STOP` with actor
+`whatsapp` when the chat sent the keyword) or `optout_remove`. See
 [proposed-features/ADMIN-PANEL.md](proposed-features/ADMIN-PANEL.md#logging-today) for what each one records.
 
 ## `GET /stats`
@@ -865,8 +871,10 @@ here is more than what the log output already has, minus secrets: message text i
 attributes whose key contains `token`, `secret`, `password`, `authorization`, `cookie`, `key`,
 `url` or `webhook` are replaced with `[redacted]`, and the owner secret, webhook URL and webhook
 secret are replaced wherever they appear (an error message, for example). Values over 1 KiB are cut.
-Successful requests to `/logs` are logged at debug level, so polling it doesn't fill the buffer
-(unless the server runs with `-debug`).
+Successful `GET`s of the routes that get polled (`/status`, `/messages/wait`, `/events`, `/logs`,
+and the admin panel's and Prometheus' `/stats`, `/metrics`, `/queue`, `/tokens`, `/settings`,
+`/audit`) are logged at debug level, so polling doesn't fill the buffer (unless the server runs with
+`-debug`).
 
 ## `GET /settings`, `PATCH /settings`
 
@@ -890,7 +898,7 @@ curl -H "$H" -X PATCH localhost:8080/settings -d '{"rate": null}'     # back to 
   { "key": "queue_paused", "value": "false", "default": "false", "overridden": false },
   { "key": "queue_jitter", "value": "2s", "default": "2s", "overridden": false },
   { "key": "queue_quiet_hours", "value": "21:00-08:00", "default": "", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" },
-  { "key": "queue_timezone", "value": "America/Sao_Paulo", "default": "Local", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" }
+  { "key": "queue_timezone", "value": "America/Sao_Paulo", "default": "Local (UTC)", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" }
 ]
 ```
 
@@ -992,7 +1000,8 @@ curl -H "$H" localhost:8080/metrics
 | `wame_webhook_configured` | gauge | | 1 with `-webhook` |
 | `wame_webhook_delivered_total`, `_retried_total`, `_failed_total`, `_dropped_total` | counter | | webhook deliveries, as in `/stats` |
 | `wame_webhook_queue_depth` | gauge | | deliveries waiting |
-| `wame_queue_items` | gauge | `state` | send queue items by state (finished ones are pruned after 7 days) |
+| `wame_queue_items` | gauge | `state` | send queue items by state: `queued`, `sending`, `sent`, `failed`, `canceled` (they add up to the total; finished ones are pruned after 7 days) |
+| `wame_queue_sent_receipts` | gauge | `receipt` | sent queue items with a `delivered` or `read` receipt (a subset of `state="sent"`, kept apart so the states add up) |
 | `wame_queue_paused`, `wame_queue_cooldown` | gauge | | 1 while paused / backing off |
 | `wame_alerts_configured` | gauge | | 1 with `-alert-gotify` |
 | `wame_alerts_sent_total`, `wame_alerts_failed_total` | counter | | alerts delivered / not delivered |

@@ -129,7 +129,7 @@ whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 |---|---|
 | `id` | autoincrement; cursor for `before` |
 | `at` | Unix milliseconds |
-| `actor` | who: the token name for API/MCP calls (`api` = owner secret or token-less, `mcp` = stdio without a token), `tui`, `cli`, `autoreply`, `whatsapp` |
+| `actor` | who: the token name for API/MCP calls (`api` = owner secret or token-less, `mcp` = stdio without a token; both reserved, so no token can take them), `tui`, `cli`, `autoreply`, `whatsapp` |
 | `action` | what (below) |
 | `target` | chat JID, when there is one. For failed attempts, the recipient or chat as given (`5511999999999`) |
 | `detail` | short, non-sensitive description |
@@ -153,6 +153,10 @@ whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 | `webhook_test` | `POST /webhook/test` | `HTTP <status> in N ms` |
 | `webhook_replay` | `POST /webhook/replay` | delivery id (target = the message's chat) |
 | `alert_test` | `POST /alerts/test` | the backend (`gotify`) |
+| `queue` | `Bot.Enqueue`: `POST /queue`, MCP `schedule_message` | `N messages` (target = batch) |
+| `queue_cancel` | `Bot.CancelQueued`: `DELETE /queue`, `DELETE /queue/{id}`, MCP `cancel_scheduled` | `N canceled` (target = batch or `#id`) |
+| `optout_add` | `POST /optouts`; an incoming opt-out keyword (actor `whatsapp`) | `added` / `already listed`, or `keyword STOP` (target = chat) |
+| `optout_remove` | `DELETE /optouts/{chat}` | (target = chat) |
 
 `send`, `send_file`, `react`, `edit` and `delete` run through `Bot.audited`, which records every
 attempt exactly once, whatever the outcome. Failures (`ok` = 0) include input errors such as empty

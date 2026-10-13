@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -55,10 +54,9 @@ func parseSendAt(v string, now time.Time) (time.Time, error) {
 	var err error
 	if days, ok := strings.CutSuffix(v, "d"); ok {
 		var n int
-		if n, err = strconv.Atoi(days); err == nil && n > 366 {
-			err = errors.New("too far ahead")
-		}
-		d = time.Duration(n) * 24 * time.Hour
+		n, err = strconv.Atoi(days)
+		// Capped only so it can't overflow; Bot.Enqueue refuses anything past its own limit.
+		d = time.Duration(min(n, 1000)) * 24 * time.Hour
 	} else {
 		d, err = time.ParseDuration(v)
 	}
@@ -70,10 +68,7 @@ func parseSendAt(v string, now time.Time) (time.Time, error) {
 
 // ownFilter limits callers without the admin scope to the items they queued.
 func ownFilter(p auth.Principal, f store.OutboxFilter) store.OutboxFilter {
-	if !p.Has(auth.Admin) {
-		f.Actor = p.Name
-	}
-	return f
+	return f.For(p.Name, p.Has(auth.Admin))
 }
 
 type scheduleIn struct {
@@ -140,6 +135,8 @@ type queueItemOut struct {
 	Updated   time.Time `json:"updated_at"`
 	MessageID string    `json:"message_id,omitempty"`
 	Error     string    `json:"error,omitempty"`
+	Delivered time.Time `json:"delivered_at,omitzero"`
+	Read      time.Time `json:"read_at,omitzero"`
 	Untrusted struct {
 		Text string `json:"text,omitempty"`
 	} `json:"untrusted"`
@@ -156,8 +153,8 @@ func (s *server) listScheduled(ctx context.Context, req *mcp.CallToolRequest, in
 	if err != nil {
 		return nil, listScheduledOut{}, err
 	}
-	if in.Status != "" && !slices.Contains(store.OutboxStates, in.Status) {
-		return nil, listScheduledOut{}, fmt.Errorf("status must be one of %s", strings.Join(store.OutboxStates, ", "))
+	if err := store.ValidOutboxStatus(in.Status); err != nil {
+		return nil, listScheduledOut{}, err
 	}
 	f := ownFilter(p, store.OutboxFilter{Status: in.Status, Batch: in.Batch, Before: in.Before})
 	items, err := s.b.Store.ListOutbox(f, clamp(in.Limit, 50, 200))
@@ -171,7 +168,8 @@ func (s *server) listScheduled(ctx context.Context, req *mcp.CallToolRequest, in
 	out := listScheduledOut{Items: []queueItemOut{}, Counts: counts, Note: untrustedNote}
 	for _, it := range items {
 		o := queueItemOut{ID: it.ID, Batch: it.Batch, Actor: it.Actor, To: cleanID(it.To), Chat: it.Chat, Status: it.Status,
-			Attempts: it.Attempts, Due: it.Due, Created: it.Created, Updated: it.Updated, MessageID: it.MessageID, Error: clean(it.Error)}
+			Attempts: it.Attempts, Due: it.Due, Created: it.Created, Updated: it.Updated, MessageID: it.MessageID, Error: clean(it.Error),
+			Delivered: it.Delivered, Read: it.Read}
 		if it.Actor == p.Name {
 			o.Untrusted.Text = clean(it.Text)
 		}
@@ -197,18 +195,9 @@ func (s *server) cancelScheduled(ctx context.Context, req *mcp.CallToolRequest, 
 	if (in.ID > 0) == (in.Batch != "") {
 		return nil, cancelScheduledOut{}, errors.New("give either id or batch")
 	}
-	f := ownFilter(p, store.OutboxFilter{Batch: in.Batch})
-	if in.ID > 0 {
-		it, err := s.b.Store.OutboxItem(in.ID)
-		if err != nil || (f.Actor != "" && it.Actor != f.Actor) {
-			return nil, cancelScheduledOut{}, fmt.Errorf("no queued message #%d from this connection", in.ID)
-		}
-	}
-	items, err := s.b.CancelQueued(p.Name, in.ID, f)
-	if errors.Is(err, store.ErrNotFound) {
-		if it, err := s.b.Store.OutboxItem(in.ID); err == nil {
-			return nil, cancelScheduledOut{}, fmt.Errorf("only queued messages can be canceled; #%d is %s", in.ID, it.Status)
-		}
+	items, err := s.b.CancelQueued(p.Name, in.ID, ownFilter(p, store.OutboxFilter{Batch: in.Batch}))
+	if _, notQueued := errors.AsType[bot.NotQueuedError](err); !notQueued && errors.Is(err, store.ErrNotFound) {
+		return nil, cancelScheduledOut{}, fmt.Errorf("no queued message #%d from this connection", in.ID)
 	}
 	if err != nil {
 		return nil, cancelScheduledOut{}, err

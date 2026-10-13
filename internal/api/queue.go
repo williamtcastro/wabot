@@ -2,12 +2,9 @@ package api
 
 import (
 	"cmp"
-	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/williamtcastro/wame/internal/auth"
@@ -59,21 +56,23 @@ func (a *server) enqueue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"batch": items[0].Batch, "queued": len(items), "items": items})
 }
 
-// queueFilter limits callers without the admin scope to their own items.
+// own limits f to the caller's own items unless it has the admin scope.
+func own(r *http.Request, f store.OutboxFilter) store.OutboxFilter {
+	p := principal(r)
+	return f.For(p.Name, p.Has(auth.Admin))
+}
+
 func queueFilter(r *http.Request) store.OutboxFilter {
 	q := r.URL.Query()
 	f := store.OutboxFilter{Batch: q.Get("batch"), Status: q.Get("status"), Actor: q.Get("actor")}
 	f.Before, _ = strconv.ParseInt(q.Get("before"), 10, 64)
-	if p := principal(r); !p.Has(auth.Admin) {
-		f.Actor = p.Name
-	}
-	return f
+	return own(r, f)
 }
 
 func (a *server) listQueue(w http.ResponseWriter, r *http.Request) {
 	f := queueFilter(r)
-	if f.Status != "" && !slices.Contains(store.OutboxStates, f.Status) {
-		writeError(w, bot.BadInput("status must be one of %s", strings.Join(store.OutboxStates, ", ")))
+	if err := store.ValidOutboxStatus(f.Status); err != nil {
+		writeError(w, bot.BadInput("%v", err))
 		return
 	}
 	items, err := a.b.Store.ListOutbox(f, intParam(r, "limit", 100, 500))
@@ -85,37 +84,34 @@ func (a *server) listQueue(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"items": items, "counts": counts}, err)
 }
 
-func (a *server) queueItem(w http.ResponseWriter, r *http.Request) (store.OutboxItem, bool) {
-	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	it, err := a.b.Store.OutboxItem(id)
-	if err == nil && !principal(r).Has(auth.Admin) && it.Actor != principal(r).Name {
-		err = store.ErrNotFound
+// queueID is the {id} of a /queue/{id} route; anything but a positive number is a 404.
+func queueID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, store.ErrNotFound)
+		return 0, false
 	}
-	if err != nil {
-		writeError(w, err)
-		return it, false
-	}
-	return it, true
+	return id, true
 }
 
 func (a *server) getQueued(w http.ResponseWriter, r *http.Request) {
-	if it, ok := a.queueItem(w, r); ok {
-		writeJSON(w, 200, it)
-	}
-}
-
-func (a *server) cancelQueued(w http.ResponseWriter, r *http.Request) {
-	it, ok := a.queueItem(w, r)
+	id, ok := queueID(w, r)
 	if !ok {
 		return
 	}
-	_, err := a.b.CancelQueued(principal(r).Name, it.ID, store.OutboxFilter{Actor: queueFilter(r).Actor})
-	if errors.Is(err, store.ErrNotFound) {
-		if it, err = a.b.Store.OutboxItem(it.ID); err == nil {
-			writeErr(w, http.StatusConflict, "only queued messages can be canceled; this one is "+it.Status)
-			return
-		}
+	it, err := a.b.Store.OutboxItem(id)
+	if f := own(r, store.OutboxFilter{}); err == nil && f.Actor != "" && it.Actor != f.Actor {
+		err = store.ErrNotFound
 	}
+	respond(w, it, err)
+}
+
+func (a *server) cancelQueued(w http.ResponseWriter, r *http.Request) {
+	id, ok := queueID(w, r)
+	if !ok {
+		return
+	}
+	_, err := a.b.CancelQueued(principal(r).Name, id, own(r, store.OutboxFilter{}))
 	respond(w, map[string]int{"canceled": 1}, err)
 }
 

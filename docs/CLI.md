@@ -78,7 +78,9 @@ Creates an API token for an agent, bot or script and prints it **once**:
 | `-expires` | never | lifetime as a Go duration, e.g. `720h` |
 
 Names are 1–40 of `a-z 0-9 . _ -`, unique forever (revoked names stay taken). `api`, `owner`,
-`local`, `tui`, `cli`, `autoreply` and `whatsapp` are reserved. This is the only way to create an
+`local`, `mcp`, `tui`, `cli`, `autoreply` and `whatsapp` are reserved. Queued messages belong to
+the actor name, so a token named `mcp` from before that name was reserved could see and cancel what
+token-less `wame mcp` queued: revoke it and create one under another name. This is the only way to create an
 `admin` token besides the owner secret: tokens can't create admin tokens over the API.
 
 **From the first token on, the API requires a token on every request, from localhost too, forever**
@@ -200,14 +202,14 @@ wame was called `wabot`. After switching binaries nothing has to change:
 | `-queue-timezone TZ` | `WAME_QUEUE_TIMEZONE` | `Local` | IANA time zone the quiet hours are read in, e.g. `America/Sao_Paulo`; `Local` is the server's zone (UTC in Docker unless `TZ` is set) |
 | `-alert-gotify URL` | `WAME_ALERT_GOTIFY` | none | `serve` and `tui`: push [alerts](API.md#alerts) (disconnected, logged out, queue and webhook trouble, recovered) to this Gotify server, e.g. `http://10.0.0.5:8070`. No query string: the token goes in the next flag |
 | `-alert-gotify-token T` | `WAME_ALERT_GOTIFY_TOKEN` | none | the Gotify app token, sent as `X-Gotify-Key`; required with `-alert-gotify`, never logged or shown |
-| `-alert-delay D` | `WAME_ALERT_DELAY` | `2m` | alert when WhatsApp stays disconnected this long; a logout alerts at once |
+| `-alert-delay D` | `WAME_ALERT_DELAY` | `2m` | alert when WhatsApp stays disconnected this long (at least `30s`: shorter values, `0` included, count as `30s`); a logout alerts at once |
 | `-log-format F` | `WAME_LOG_FORMAT` | `text` | app log format: `text` or `json` |
 | `-log-file PATH` | `WAME_LOG_FILE` | stderr | write app logs to PATH (appended, mode 0600) |
 | `-debug` | | `false` | debug-level logs, including whatsmeow's |
 | `-phone NUMBER` | | | `login` only: use a pairing code instead of a QR |
 
 All flags are accepted by every command, so `-rate`, `-chat-gap` and `-typing` also apply to
-`wame send`.
+`wame send`. A negative `-chat-gap`, `-max-wait`, `-queue-jitter` or `-alert-delay` is refused.
 
 `-rate`, `-chat-gap`, `-max-wait`, `-autoreply`, `-webhook-filter`, `-queue-jitter`,
 `-queue-quiet-hours` and `-queue-timezone` can also be changed while wame runs, with [`PATCH /settings`](API.md#get-settings-patch-settings) or the admin panel's
@@ -228,7 +230,9 @@ set `-log-file`, so they don't break the screen or a script's output.
 
 Each HTTP request produces one line with `method`, `path`, `status`, `duration_ms` and
 `remote`. The query string is left out on purpose because it may contain the token.
-Requests to `/status`, `/messages/wait`, `/events` and `/logs` log at debug level unless they fail.
+`GET` requests to the polled routes (`/status`, `/messages/wait`, `/events`, `/logs`, `/stats`,
+`/metrics`, `/queue`, `/tokens`, `/settings`, `/audit`) log at debug level unless they fail; writes
+to them, like `POST /queue` or `PATCH /settings`, stay at info.
 
 ```
 time=2026-10-10T22:41:03.120-03:00 level=INFO msg=http method=POST path=/send status=200 duration_ms=812 remote=127.0.0.1:52144

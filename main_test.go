@@ -83,6 +83,41 @@ func TestAlertFlagsChecked(t *testing.T) {
 	}
 }
 
+func TestNegativeDurationsRefused(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "wame.db")
+	for flag, c := range map[string]config{
+		"-alert-delay":  {db: db, alertDelay: -time.Minute},
+		"-queue-jitter": {db: db, queueJitter: -time.Second},
+		"-chat-gap":     {db: db, chatGap: -time.Second},
+		"-max-wait":     {db: db, maxWait: -time.Second},
+	} {
+		if err := run(t.Context(), "token", []string{"list"}, c); err == nil || !strings.Contains(err.Error(), flag) {
+			t.Errorf("a negative %s: %v", flag, err)
+		}
+	}
+	if _, err := os.Stat(db); !os.IsNotExist(err) {
+		t.Fatalf("checked after opening the database: %v", err)
+	}
+}
+
+func TestSecretsScrubbed(t *testing.T) {
+	c := config{token: "s3cret-owner-secret", webhook: "https://hooks.example.com/x", webhookSecret: "hush",
+		alertGotify: "https://gotify.example.com", alertGotifyToken: "A1b2C3d4"}
+	logs := bot.NewLogBuffer(10)
+	logs.Scrub(c.secrets()...)
+	log := slog.New(logs.Wrap(slog.NewTextHandler(io.Discard, nil)))
+	log.Error("alert failed", "err", "Post https://gotify.example.com/message: refused, key A1b2C3d4, owner s3cret-owner-secret")
+	e := logs.Entries(bot.LogQuery{})
+	if len(e) != 1 {
+		t.Fatalf("entries = %+v", e)
+	}
+	for _, leak := range []string{"gotify.example.com", "A1b2C3d4", "s3cret-owner-secret"} {
+		if strings.Contains(e[0].Attrs["err"], leak) {
+			t.Errorf("%q reached the log buffer: %s", leak, e[0].Attrs["err"])
+		}
+	}
+}
+
 func TestBackupCommandWhileServing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wame.db")

@@ -911,7 +911,7 @@ paths:
               type: object
               required: [name, scopes]
               properties:
-                name: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,39}$", example: "support-bot", description: "Unique forever; api, owner, local, tui, cli, autoreply, whatsapp are reserved" }
+                name: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,39}$", example: "support-bot", description: "Unique forever; api, owner, local, mcp, tui, cli, autoreply, whatsapp are reserved" }
                 scopes:
                   type: array
                   items: { type: string, enum: [read, send, admin] }
