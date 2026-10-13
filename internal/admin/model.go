@@ -258,7 +258,10 @@ func (m *model) loadAll() tea.Cmd {
 	if m.c == nil {
 		return nil
 	}
-	cmds := []tea.Cmd{m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadStats(), m.loadChats(), m.loadSettings(), m.loadQueue(), m.loadOptOuts()}
+	cmds := []tea.Cmd{m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadStats(), m.loadChats(), m.loadSettings(), m.loadQueue()}
+	if m.tab == tabQueue {
+		cmds = append(cmds, m.loadOptOuts())
+	}
 	if m.tab == tabLogs {
 		cmds = append(cmds, m.loadLogs(0), m.followLogs())
 	}
@@ -416,10 +419,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.loadChats())
 		}
 		if m.tab == tabQueue {
-			cmds = append(cmds, m.loadQueue())
-			if !m.optOutsReq.busy() {
-				cmds = append(cmds, m.loadOptOuts())
-			}
+			cmds = append(cmds, m.loadQueue(), m.pollOptOuts(true))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -532,7 +532,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setNotice(msg.notice, false)
 		}
-		return m, tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadQueue(), m.loadStats(), m.loadOptOuts())
+		return m, tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadQueue(), m.loadStats(), m.pollOptOuts(false))
 
 	case noticeMsg:
 		m.setNotice(msg.text, msg.err)

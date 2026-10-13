@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -60,6 +61,11 @@ func TestNewClientGuardsTheToken(t *testing.T) {
 		if (err == nil) != c.ok {
 			t.Errorf("NewClient(%q, insecure=%v): err = %v, want ok=%v", c.server, c.insecure, err, c.ok)
 		}
+	}
+	// wame queue uses this client with a send-scoped token, so the hint can't ask for an admin one.
+	_, err := NewClient("https://wame.example.com", "", false)
+	if msg := fmt.Sprint(err); !strings.Contains(msg, "-token") || !strings.Contains(msg, "WAME_TOKEN") || strings.Contains(msg, "admin token") || strings.Contains(msg, "owner secret") {
+		t.Fatalf("token hint: %q", msg)
 	}
 }
 

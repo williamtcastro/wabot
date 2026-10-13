@@ -652,7 +652,7 @@ func TestQueueStateFromANewerServer(t *testing.T) {
 	if !strings.Contains(ansi.Strip(got), "held") || strings.Contains(got, "]52;") {
 		t.Fatalf("unknown status: %q", got)
 	}
-	body := queueBody(bot.QueueStats{Running: true, QuietHours: "21:00\x1b[2J-08:00"}, -1)
+	body := queueBody(bot.QueueStats{Running: true, QuietHours: "21:00\x1b[2J-08:00"}, -1, "")
 	if strings.Contains(body, "[2J") || !strings.Contains(ansi.Strip(body), "21:00") {
 		t.Fatalf("quiet hours not sanitized: %q", body)
 	}

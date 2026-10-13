@@ -43,7 +43,7 @@ func NewClient(server, token string, insecure bool) (*Client, error) {
 		return nil, fmt.Errorf("refusing to send the token over plain http to %s: use https, an SSH tunnel to 127.0.0.1, or -insecure", u.Host)
 	}
 	if token == "" {
-		return nil, errors.New("a token is required: set WAME_TOKEN (in the environment, ./.env or ~/.config/wame/admin.env) to the owner secret or an admin token")
+		return nil, errors.New("a token is required: pass -token or set WAME_TOKEN (in the environment, ./.env or ~/.config/wame/admin.env)")
 	}
 	u.RawQuery, u.Fragment = "", ""
 	stream := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, ResponseHeaderTimeout: 30 * time.Second}}
@@ -84,6 +84,12 @@ func (e *APIError) Error() string {
 func isNotFound(err error) bool {
 	apiErr, ok := errors.AsType[*APIError](err)
 	return ok && apiErr.Code == http.StatusNotFound
+}
+
+// isForbidden reports a 403: the token lacks the scope the route needs.
+func isForbidden(err error) bool {
+	apiErr, ok := errors.AsType[*APIError](err)
+	return ok && apiErr.Code == http.StatusForbidden
 }
 
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {

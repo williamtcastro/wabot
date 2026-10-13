@@ -147,8 +147,9 @@ func queueState(it store.OutboxItem) string {
 	return styleDim.Render(safe(it.Status))
 }
 
-// queueBody renders the Send queue card; optOuts < 0 leaves out the opt-out count.
-func queueBody(q bot.QueueStats, optOuts int) string {
+// queueBody renders the Send queue card; optOuts < 0 leaves out the opt-out count, optOutsKey is
+// what o does from here.
+func queueBody(q bot.QueueStats, optOuts int, optOutsKey string) string {
 	state := styleAccent.Render("sending")
 	switch {
 	case !q.Running:
@@ -185,7 +186,7 @@ func queueBody(q bot.QueueStats, optOuts int) string {
 	}
 	rows = append(rows, [2]string{"Jitter", "0–" + (time.Duration(q.JitterMS) * time.Millisecond).String()})
 	if optOuts >= 0 {
-		rows = append(rows, [2]string{"Opt-outs", fmt.Sprint(optOuts) + styleDim.Render(" · o lists them")})
+		rows = append(rows, [2]string{"Opt-outs", fmt.Sprint(optOuts) + styleDim.Render(" · o "+optOutsKey)})
 	}
 	if q.LastError != "" {
 		rows = append(rows, [2]string{"Last error", styleErr.Render(fit(safe(q.LastError), 50)) + styleDim.Render(" "+relTime(q.LastErrorAt))})
@@ -197,7 +198,11 @@ func (m *model) viewQueue() string {
 	if m.queueErr != nil {
 		return m.errCard("Queue", m.queueErr, "the send queue (GET /queue)")
 	}
-	lines := []string{indent(card("Send queue", m.cardWidth(cardWide), queueBody(m.stats.Queue, m.optOutCount())), " "), ""}
+	optOutsKey := "lists them"
+	if m.queueOptOuts {
+		optOutsKey = "back"
+	}
+	lines := []string{indent(card("Send queue", m.cardWidth(cardWide), queueBody(m.stats.Queue, m.optOutCount(), optOutsKey)), " "), ""}
 	if m.queueOptOuts {
 		return m.viewOptOuts(lines)
 	}
@@ -211,7 +216,7 @@ func (m *model) viewQueue() string {
 	if len(m.queue.Items) == 0 {
 		return strings.Join(append(lines, "   "+styleDim.Render("nothing here")), "\n")
 	}
-	start, end := window(m.queueSel, len(m.queue.Items), max(m.bodyHeight()-len(lines)-1, 3))
+	start, end := window(m.queueSel, len(m.queue.Items), m.listRows(lines))
 	for i := start; i < end; i++ {
 		it := m.queue.Items[i]
 		due := relTime(it.Due)

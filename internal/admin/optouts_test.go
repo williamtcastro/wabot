@@ -2,6 +2,8 @@ package admin
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -9,9 +11,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
@@ -54,14 +58,14 @@ func TestQueueOptOuts(t *testing.T) {
 	m.chats = []store.Chat{{JID: maria, Name: "Maria"}}
 	press(m, "7")
 	view := flat(m.View())
-	if !strings.Contains(view, "Opt-outs 2 · o lists them") || !strings.Contains(view, "o opt-outs") {
+	if !strings.Contains(view, "Opt-outs 2 · o lists them") {
 		t.Fatalf("queue view lacks the opt-out count or key:\n%s", view)
 	}
 
 	press(m, "o")
 	raw := m.View()
 	view = flat(raw)
-	for _, want := range []string{"+5511999999999", "Maria", "keyword STOP", "+5511988887777", "added by evil", "a add", "x remove", "o/esc queue"} {
+	for _, want := range []string{"+5511999999999", "Maria", "keyword STOP", "+5511988887777", "added by evil", "a add", "x remove", "o/esc queue", "Opt-outs 2 · o back"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("opt-outs view lacks %q:\n%s", want, view)
 		}
@@ -90,6 +94,9 @@ func TestQueueOptOuts(t *testing.T) {
 	press(m, "/", "m", "a", "r", "i", "a", "enter")
 	if vis := m.visibleOptOuts(); len(vis) != 1 || vis[0].Chat != maria || !strings.Contains(ansi.Strip(m.View()), "filtered by") {
 		t.Fatalf("filter: %+v", vis)
+	}
+	if keys := flat(m.viewKeys()); !strings.Contains(keys, "esc clear") || strings.Contains(keys, "o/esc") {
+		t.Fatalf("with a filter set esc clears it, the footer must say so: %s", keys)
 	}
 	press(m, "esc")
 	if m.optOutQuery != "" || !m.queueOptOuts || len(m.visibleOptOuts()) != 3 {
@@ -149,5 +156,160 @@ func TestQueueOptOutsOnAnOlderServer(t *testing.T) {
 	press(m, "a")
 	if m.mode != modeNormal || !m.noticeErr || !strings.Contains(m.notice, "update wame") {
 		t.Fatalf("a on an older server: mode %v, notice %q", m.mode, m.notice)
+	}
+}
+
+// optOutsServer is a real API that counts GET /optouts; with gone set the route answers 404, as on
+// a server older than opt-outs.
+func optOutsServer(t *testing.T, gone bool) (*Client, *atomic.Int32) {
+	t.Helper()
+	b, err := bot.New(context.Background(), filepath.Join(t.TempDir(), "wame.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.InitSettings(bot.Settings{Rate: 20, ChatGap: time.Second, MaxWait: 30 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	h := api.NewHandler(b, &auth.Authenticator{Store: b.Store, Owner: owner}, "test")
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/optouts") && r.Method == http.MethodGet {
+			hits.Add(1)
+			if gone {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(srv.URL, owner, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, &hits
+}
+
+// tickNow delivers one poll tick and runs what it asks for, without waiting for the next tick.
+func tickNow(m *model) {
+	_, cmd := m.Update(tickMsg{})
+	run(m, cmd)
+}
+
+func TestOptOutsStopPollingAfter404Or403(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		gone  bool
+		scope string
+		want  string
+	}{
+		{"older server", true, "admin", "update wame"},
+		{"no admin scope", false, "read", "admin scope"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			admin, hits := optOutsServer(t, c.gone)
+			plain, _, err := admin.CreateToken(t.Context(), TokenRequest{Name: "agent", Scopes: []string{c.scope}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cl, err := NewClient(admin.Server(), plain, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := newTestModel(t, Options{Client: cl})
+			if n := hits.Load(); n != 0 {
+				t.Fatalf("startup on the Status tab asked for the opt-outs %d times", n)
+			}
+			press(m, "7")
+			if hits.Load() != 1 || !m.optOutsOff() {
+				t.Fatalf("opening the Queue tab: %d requests, err %v", hits.Load(), m.optOutsErr)
+			}
+			tickNow(m)
+			tickNow(m)
+			m.Update(doneMsg{notice: "ok"})
+			if n := hits.Load(); n != 1 {
+				t.Fatalf("the tick kept polling /optouts after %v: %d requests", m.optOutsErr, n)
+			}
+			press(m, "o")
+			press(m, "r")
+			if n := hits.Load(); n != 3 {
+				t.Fatalf("o and r must retry: %d requests", n)
+			}
+			if view := flat(m.View()); strings.Contains(view, "· o back") {
+				t.Fatalf("the card must hide the count:\n%s", view)
+			}
+
+			for _, k := range []string{"a", "x", "j", "G"} {
+				m.notice = ""
+				press(m, k)
+				if m.mode != modeNormal || !m.noticeErr || !strings.Contains(m.notice, c.want) {
+					t.Fatalf("%s with %v: mode %v, notice %q", k, m.optOutsErr, m.mode, m.notice)
+				}
+			}
+		})
+	}
+}
+
+func TestOptOutsKeysRefusedWhileTheListFailed(t *testing.T) {
+	m := newTestModel(t, Options{})
+	m.mode, m.tab, m.queueOptOuts = modeNormal, tabQueue, true
+	m.Update(optOutsMsg{seq: m.optOutsReq.start(), list: []store.OptOut{{Chat: maria}, {Chat: john}}})
+	m.Update(optOutsMsg{seq: m.optOutsReq.start(), err: errors.New("context deadline exceeded")})
+	if view := flat(m.View()); !strings.Contains(view, "Opt-outs 2 · o back") {
+		t.Fatalf("a one-off error must keep the last count:\n%s", view)
+	}
+	for _, k := range []string{"x", "a", "k", "G"} {
+		press(m, k)
+		if m.mode != modeNormal || m.confirmOptOut != "" || !m.noticeErr || !strings.Contains(m.notice, "didn't load: context deadline exceeded") {
+			t.Fatalf("%s on a list that didn't load: mode %v, confirm %q, notice %q", k, m.mode, m.confirmOptOut, m.notice)
+		}
+	}
+	m.Update(optOutsMsg{seq: m.optOutsReq.start(), list: []store.OptOut{{Chat: maria}}})
+	press(m, "x")
+	if m.mode != modeConfirmRemoveOptOut || m.confirmOptOut != maria {
+		t.Fatalf("x after the list loaded again: mode %v, notice %q", m.mode, m.notice)
+	}
+}
+
+func TestQueueListsKeepTheSelectionVisible(t *testing.T) {
+	var opts []store.OptOut
+	var items []store.OutboxItem
+	for i := range 60 {
+		opts = append(opts, store.OptOut{Chat: fmt.Sprintf("5511999999%03d@s.whatsapp.net", i), Reason: "STOP", By: "whatsapp"})
+		items = append(items, store.OutboxItem{ID: int64(9000 + i), Chat: maria, Status: store.OutboxQueued})
+	}
+	for _, w := range []int{100, 120, 180} {
+		m := newTestModel(t, Options{})
+		m.mode, m.tab = modeNormal, tabQueue
+		m.Update(tea.WindowSizeMsg{Width: w, Height: 40})
+		m.stats.Queue = bot.QueueStats{OutboxCounts: store.OutboxCounts{Queued: 60, Sent: 3, OldestQueued: time.Now().Add(-time.Hour)}, Running: true, QuietHours: "21:00-08:00", Timezone: "UTC", LastError: "boom"}
+		m.queue = QueuePage{Items: items}
+		press(m, "G")
+		if view := ansi.Strip(m.View()); !strings.Contains(view, "9059") {
+			t.Fatalf("width %d: the last queue item is off screen:\n%s", w, view)
+		}
+		press(m, "o")
+		m.Update(optOutsMsg{seq: m.optOutsReq.start(), list: opts})
+		press(m, "G")
+		if view := ansi.Strip(m.View()); !strings.Contains(view, "+5511999999059") {
+			t.Fatalf("width %d: the last opt-out is off screen:\n%s", w, view)
+		}
+	}
+}
+
+func TestQueueFootersFitAt120(t *testing.T) {
+	m := newTestModel(t, Options{Profiles: []Profile{{Name: "prod"}}})
+	m.mode, m.tab = modeNormal, tabQueue
+	m.stats.Queue.Paused = true
+	for _, k := range []string{"", "o", "/"} {
+		if k == "/" {
+			press(m, "/", "m", "enter")
+		} else if k != "" {
+			press(m, k)
+		}
+		keys := flat(m.viewKeys())
+		if !strings.HasSuffix(keys, "r refresh q quit") || strings.Contains(keys, "…") {
+			t.Fatalf("after %q the footer is cut at 120 columns: %q", k, keys)
+		}
 	}
 }

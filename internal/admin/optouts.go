@@ -46,12 +46,41 @@ func (m *model) applyOptOuts(msg optOutsMsg) {
 	m.optOutSel = clamp(m.optOutSel, len(vis))
 }
 
-// optOutCount is what the Send queue card shows; -1 hides the row (not loaded, or an older server).
+// optOutsOff reports a server without the route (404) or a token without the admin scope (403):
+// asking again won't help, so the tick stops polling until r, o or a tab switch.
+func (m *model) optOutsOff() bool {
+	return isNotFound(m.optOutsErr) || isForbidden(m.optOutsErr)
+}
+
+// pollOptOuts reloads the opt-outs for the Queue tab, the only place that shows them; idle skips
+// it while a request is pending (the tick).
+func (m *model) pollOptOuts(idle bool) tea.Cmd {
+	if m.tab != tabQueue || m.optOutsOff() || (idle && m.optOutsReq.busy()) {
+		return nil
+	}
+	return m.loadOptOuts()
+}
+
+// optOutCount is what the Send queue card shows; -1 hides the row (not loaded, an older server or
+// a token without the admin scope). A one-off error keeps the last count.
 func (m *model) optOutCount() int {
-	if !m.optOutsLoaded || m.optOutsErr != nil {
+	if !m.optOutsLoaded || m.optOutsOff() {
 		return -1
 	}
 	return len(m.optOuts)
+}
+
+// optOutsRefusal is why the list can't be acted on, or "" when it can.
+func (m *model) optOutsRefusal() string {
+	switch {
+	case m.optOutsErr == nil:
+		return ""
+	case isNotFound(m.optOutsErr):
+		return "this server doesn't have opt-outs yet: update wame on it"
+	case isForbidden(m.optOutsErr):
+		return "this token can't manage opt-outs: it needs the admin scope"
+	}
+	return "the opt-outs didn't load: " + m.optOutsErr.Error()
 }
 
 func (m *model) visibleOptOuts() []store.OptOut {
@@ -77,17 +106,31 @@ func optOutReason(o store.OptOut) string {
 	return strings.Join(nonEmpty(o.Reason, o.By), " by ")
 }
 
-// optOutLabel names a chat as "Maria (+5511999999999)" when its name is known, sanitized.
-func (m *model) optOutLabel(chat string) string {
-	num, name := displayJID(safe(chat)), m.chatName(chat)
+// optOutNames is a chat's number and its name, sanitized; name is "" when unknown.
+func (m *model) optOutNames(chat string) (num, name string) {
+	num, name = displayJID(safe(chat)), m.chatName(chat)
 	if name == num {
-		return num
+		name = ""
 	}
-	return name + " (" + num + ")"
+	return num, name
+}
+
+// optOutLabel names a chat as "Maria (+5511999999999)" when its name is known.
+func (m *model) optOutLabel(chat string) string {
+	if num, name := m.optOutNames(chat); name != "" {
+		return name + " (" + num + ")"
+	}
+	return displayJID(safe(chat))
 }
 
 func (m *model) optOutsKey(k string) tea.Cmd {
 	n := len(m.visibleOptOuts())
+	if _, ok := termui.ListMove(k, m.optOutSel, n, 1); ok || k == "a" || k == "x" {
+		if why := m.optOutsRefusal(); why != "" {
+			m.setNotice(why, true)
+			return nil
+		}
+	}
 	if sel, ok := termui.ListMove(k, m.optOutSel, n, m.bodyHeight()/2); ok {
 		m.optOutSel = sel
 		return nil
@@ -103,15 +146,9 @@ func (m *model) optOutsKey(k string) tea.Cmd {
 		m.listFilterKey(k, "")
 	case "/":
 		m.listFilterKey(k, "filter by number, name or reason")
-	case "a", "x":
-		if isNotFound(m.optOutsErr) {
-			m.setNotice("this server doesn't have opt-outs yet: update wame on it", true)
-			return nil
-		}
-		if k == "a" {
-			m.startPrompt(modeAddOptOut, "number with country code or JID, e.g. +5511999999999")
-			return nil
-		}
+	case "a":
+		m.startPrompt(modeAddOptOut, "number with country code or JID, e.g. +5511999999999")
+	case "x":
 		o, ok := m.selectedOptOut()
 		if !ok {
 			m.setNotice("no opt-out marked", true)
@@ -165,13 +202,10 @@ func (m *model) viewOptOuts(lines []string) string {
 		}
 		return strings.Join(append(lines, "   "+styleDim.Render(msg)), "\n")
 	}
-	start, end := window(m.optOutSel, len(vis), max(m.bodyHeight()-len(lines)-1, 3))
+	start, end := window(m.optOutSel, len(vis), m.listRows(lines))
 	for i := start; i < end; i++ {
 		o := vis[i]
-		num, name := displayJID(safe(o.Chat)), m.chatName(o.Chat)
-		if name == num {
-			name = ""
-		}
+		num, name := m.optOutNames(o.Chat)
 		line := table(cols, num, name, safe(optOutReason(o)), styleDim.Render(when(o.At)+"  "+relTime(o.At)))
 		lines = append(lines, m.row(line, i == m.optOutSel))
 	}

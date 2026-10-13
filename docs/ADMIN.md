@@ -19,7 +19,7 @@ wame admin -server https://wame.example.com
 | **4 Audit** | the audit log, newest first, with ✓ / ✗ and actions colored by kind; a card below shows the selected entry with its full time and error | `j`/`k`, `Ctrl+D`/`Ctrl+U`, `g`/`G` move, `/` filter, `Esc` clear the filter |
 | **5 Health** | the server's version and uptime; for sends, number lookups and auto-replies, a meter of the last minute's use against the limit, the per-chat gap and 429s (or dropped auto-replies) since startup; the webhook's queue, delivered / retried / replayed / given up / dropped counts and its latest failures; the [alerts](#alerts): backend, delay, sent (failed in red), the last one sent and the last error | `j`/`k` pick a failure, `R` replay it, `t` send a test delivery, `a` send a test alert |
 | **6 Settings** | the settings that change without a restart (send rate, chat gap, max wait, auto-replies, webhook filter, queue paused, queue jitter, queue quiet hours, quiet hours on/off, queue time zone): the value in effect, the server's flag, and who changed it and when | `j`/`k` move, `Enter` change (toggles on/off ones), `x` back to the flag |
-| **7 Queue** | the [send queue](QUEUE.md): whether it's sending, paused, in [quiet hours](QUEUE.md#quiet-hours) (until when, in which zone), backing off or has no worker, what's waiting and what was sent or failed in the last 7 days, how many sent ones were delivered and read, the quiet hours, the jitter and the last error; below, the items (batch, recipient, state, attempts, who queued it, when it's due, error), never their text. A sent item's state shows its receipts like WhatsApp: `✓ sent`, `✓✓ delivered`, and a blue `✓✓ read`. The card also counts the opt-outs: chats that get no queued messages (`GET /optouts`, see [API.md](API.md#get-optouts-post-optouts-delete-optoutschat)); `o` swaps the items for that list (number, name when known, reason such as `keyword STOP` or `added by api`, when) | `j`/`k` move, `f` filter by state, `x` cancel the marked item, `X` cancel its whole batch (asks first), `P` pause / resume, `Q` quiet hours off / on (keeps the window), `o` opt-outs. In the opt-outs: `j`/`k` move, `/` filter, `a` add a number or JID, `x` remove the marked one (asks first), `o` back to the items (`Esc` too, once the filter is cleared) |
+| **7 Queue** | the [send queue](QUEUE.md): whether it's sending, paused, in [quiet hours](QUEUE.md#quiet-hours) (until when, in which zone), backing off or has no worker, what's waiting and what was sent or failed in the last 7 days, how many sent ones were delivered and read, the quiet hours, the jitter and the last error; below, the items (batch, recipient, state, attempts, who queued it, when it's due, error), never their text. A sent item's state shows its receipts like WhatsApp: `✓ sent`, `✓✓ delivered`, and a blue `✓✓ read`. The card also counts the opt-outs: chats that get no queued messages (`GET /optouts`, see [API.md](API.md#get-optouts-post-optouts-delete-optoutschat)); `o` swaps the items for that list (number, name when known, reason such as `keyword STOP` or `added by api`, when; one stored under a `…@lid` id shows that id, without a name) | `j`/`k` move, `f` filter by state, `x` cancel the marked item, `X` cancel its whole batch (asks first), `P` pause / resume, `Q` quiet hours off / on (keeps the window), `o` opt-outs. In the opt-outs: `j`/`k` move, `/` filter, `a` add a number or JID, `x` remove the marked one (asks first), `o` back to the items (`Esc` too, once the filter is cleared) |
 | **8 Logs** | the server's recent app logs, newest first: time, level (debug faint, info blue, warn amber, error red), message and attributes (dim); a card below shows the selected entry with every attribute. While the tab is open it follows new entries every 3 s ([details](#logs)) | `j`/`k` move, `f` level (all, info, warn, error), `/` filter, `Esc` clear the filter, `F` pause / follow |
 
 In every list, `j`/`k` or the arrows move, `Ctrl+D`/`Ctrl+U` or `PgDn`/`PgUp` page, and `g`/`G` or
@@ -196,15 +196,17 @@ Use `-insecure` (or `WAME_INSECURE=true` in a server's file) only on a network y
 Tailscale): the token would otherwise be readable by anyone on the path.
 
 A token without the admin scope can still open the panel and see the Status and Chats tabs (without
-the QR), but the Tokens, Audit, Health and Logs tabs say it needs the admin scope. Prefer a dedicated
+the QR), but the Tokens, Audit, Health and Logs tabs say it needs the admin scope, and so do the
+opt-outs: the Queue card leaves out their count and the panel stops asking for them until `r`, `o`
+or a tab switch. Prefer a dedicated
 admin token with an expiry over the owner secret, so it can be revoked (or rotated) on its own:
 
 ```sh
 wame token create ops-laptop -scopes admin -expires 720h   # on the server
 ```
 
-The Health tab, the usage columns, webhook test and replay, the Settings, Queue and Logs tabs need
-a recent server (`GET /stats`, `/settings`, `/webhook/*`, `/queue`, `/logs`); an older one says so
+The Health tab, the usage columns, webhook test and replay, the Settings, Queue and Logs tabs and the opt-outs
+need a recent server (`GET /stats`, `/settings`, `/webhook/*`, `/queue`, `/logs`, `/optouts`); an older one says so
 instead of failing.
 
 ## What it doesn't do (yet)

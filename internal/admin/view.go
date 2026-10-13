@@ -313,14 +313,17 @@ func (m *model) viewKeys() string {
 			keys = [][2]string{{"j/k", "move"}, {"enter", "change"}, {"x", "reset"}}
 		case tabQueue:
 			if m.queueOptOuts {
-				keys = [][2]string{{"j/k", "move"}, {"/", "filter"}, {"a", "add"}, {"x", "remove"}, {"o/esc", "queue"}}
+				keys = [][2]string{{"/", "filter"}, {"a", "add"}, {"x", "remove"}, {"o/esc", "queue"}}
+				if m.optOutQuery != "" {
+					keys = append(keys[:3], [2]string{"esc", "clear"}, [2]string{"o", "queue"})
+				}
 				break
 			}
 			pause := "pause"
 			if m.stats.Queue.Paused {
 				pause = "resume"
 			}
-			keys = [][2]string{{"j/k", "move"}, {"f", "filter"}, {"x", "cancel"}, {"X", "cancel batch"}, {"o", "opt-outs"}, {"P", pause}, {"Q", "quiet on/off"}}
+			keys = [][2]string{{"f", "filter"}, {"x", "cancel"}, {"X", "batch"}, {"P", pause}, {"Q", "quiet"}}
 		case tabLogs:
 			follow := "pause"
 			if !m.logsFollow {
@@ -890,6 +893,11 @@ func indent(s, prefix string) string {
 		lines[i] = prefix + l
 	}
 	return strings.Join(lines, "\n")
+}
+
+// listRows is how many list rows fit under lines, which may hold multi-line cards.
+func (m *model) listRows(lines []string) int {
+	return max(m.bodyHeight()-lipgloss.Height(strings.Join(lines, "\n")), 3)
 }
 
 // window returns the slice [start, end) of n rows to show in h lines, keeping sel visible.
