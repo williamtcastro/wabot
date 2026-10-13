@@ -131,6 +131,9 @@ settings it's kept over restarts.
 drain the queue. Every send is in the audit log as `send` under the token that queued it, with
 `queue #id` in the detail; queuing and canceling are audited as `queue` and `queue_cancel`.
 
+**From an AI agent.** The MCP tools `schedule_message`, `list_scheduled` and `cancel_scheduled` use
+the same queue with the same rules (send scope, allowlist, own items only); see [MCP.md](MCP.md#tools).
+
 ## Why not Redis
 
 We measured it before deciding. On an M1 laptop, SQLite (WAL mode, the same file wame already
