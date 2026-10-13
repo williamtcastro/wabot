@@ -597,15 +597,15 @@ opt-in and the existing limits; nothing here raises a rate).
 Per-recipient quiet hours; refresh a tag's profiles in batches of 50 (admin, budgeted); opt-in
 photo previews.
 
-## Open questions
+## Decisions (2026-10-13)
 
-1. Writes are `admin` only. Do you want a separate `contacts` scope so a CRM sync token can edit
-   names and tags without being admin?
-2. On logout, keep own contacts (proposed) or wipe them too? Should there be a "delete all
-   contacts" route?
-3. Should `-skip-sent` also count messages you sent outside the queue (from the phone, `/send`,
-   the TUI), using `wame_messages` and a window longer than 7 days?
-4. Count messages a person wrote in groups in the profile? It needs an index on
-   `wame_messages (sender)`, which costs every insert.
-5. Is the `{name}` push-name exclusion right, or do you want `{push_name}` as an explicit, opt-in
-   placeholder?
+1. **Writes are admin only.** No separate `contacts` scope; a sync integration uses an admin token.
+2. **Logout keeps your own contacts**; only the WhatsApp profile cache is cleared. An admin
+   "delete all contacts" route exists for when you want them gone.
+3. **`-skip-sent` counts every message you sent**, not only queued ones: it uses `wame_messages`
+   (from_me), so the phone, `/send` and the TUI count too, and the window may be longer than the
+   queue's 7 days (cap it, e.g. 90 days).
+4. **Group messages aren't counted in the profile** for now: no index on `wame_messages (sender)`.
+   Revisit if the profile needs it.
+5. **`{name}` never uses push names; `{push_name}` is an explicit opt-in placeholder** with the same
+   fallback rules.
