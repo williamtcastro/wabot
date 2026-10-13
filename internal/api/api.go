@@ -106,6 +106,8 @@ func NewHandler(b *bot.Bot, authn *auth.Authenticator, version string) *Handler 
 	mux.HandleFunc("PATCH /settings", need(admin, a.updateSettings))
 	mux.HandleFunc("POST /webhook/test", need(admin, a.webhookTest))
 	mux.HandleFunc("POST /webhook/replay", need(admin, a.webhookReplay))
+	mux.HandleFunc("POST /alerts/test", need(admin, a.alertTest))
+	mux.HandleFunc("GET /metrics", need(admin, a.metrics))
 	mux.HandleFunc("GET /tokens", need(admin, a.listTokens))
 	mux.HandleFunc("POST /tokens", need(admin, a.createToken))
 	mux.HandleFunc("DELETE /tokens/{name}", need(admin, a.revokeToken))
@@ -639,6 +641,7 @@ type Stats struct {
 	Limits    StatsLimits       `json:"limits"`
 	Webhook   *bot.WebhookStats `json:"webhook"`
 	Queue     bot.QueueStats    `json:"queue"`
+	Alerts    bot.AlertStats    `json:"alerts"`
 	Callers   []CallerStats     `json:"callers"`
 }
 
@@ -659,6 +662,7 @@ func (a *server) stats(w http.ResponseWriter, r *http.Request) {
 		Version: a.version, Started: a.b.Started, AutoReply: a.b.AutoReplyOn(),
 		Limits: StatsLimits{Send: a.b.Limiter.Stats(), Lookups: a.b.Lookups.Stats(), AutoReply: a.b.AutoReplyStats()},
 		Queue:  a.b.QueueStats(),
+		Alerts: a.b.AlertStats(),
 	}
 	if a.b.Webhook != nil {
 		s := a.b.Webhook.Stats()
@@ -716,6 +720,10 @@ func (a *server) webhookReplay(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := a.b.ReplayWebhook(r.Context(), principal(r).Name, req.Delivery)
 	webhookResult(w, res, err)
+}
+
+func (a *server) alertTest(w http.ResponseWriter, r *http.Request) {
+	respond(w, map[string]bool{"ok": true}, a.b.TestAlert(r.Context(), principal(r).Name))
 }
 
 // webhookResult answers 200 with the attempt's outcome, even when the receiver failed: the request

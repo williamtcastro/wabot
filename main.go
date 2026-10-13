@@ -73,6 +73,9 @@ Flags (right after the command, before other arguments):
                          (env WAME_QUEUE_QUIET_HOURS, default off)
   -queue-timezone TZ     time zone of the quiet hours, e.g. America/Sao_Paulo
                          (env WAME_QUEUE_TIMEZONE, default Local: the server's zone)
+  -alert-gotify URL      push alerts (disconnected, logged out, queue and webhook trouble) to this Gotify server (env WAME_ALERT_GOTIFY)
+  -alert-gotify-token T  the Gotify app token, sent as X-Gotify-Key (env WAME_ALERT_GOTIFY_TOKEN)
+  -alert-delay D         alert when WhatsApp stays disconnected this long (env WAME_ALERT_DELAY, default 2m)
   -log-format F          text or json (env WAME_LOG_FORMAT, default text)
   -log-file PATH         write app logs to PATH instead of stderr (env WAME_LOG_FILE)
   -debug                 verbose logs, including whatsmeow's
@@ -82,10 +85,12 @@ Docs: README.md, docs/*.md, or http://localhost:8080/docs while serving`
 type config struct {
 	db, addr, token, phone                string
 	webhook, webhookSecret, webhookFilter string
+	alertGotify, alertGotifyToken         string
 	logFormat, logFile                    string
 	quietHours, timezone                  string
 	rate                                  int
 	chatGap, maxWait, queueJitter         time.Duration
+	alertDelay                            time.Duration
 	autoreply, typing, online, debug      bool
 }
 
@@ -139,6 +144,14 @@ func main() {
 	fs.DurationVar(&c.queueJitter, "queue-jitter", queueJitter, "")
 	fs.StringVar(&c.quietHours, "queue-quiet-hours", envOr("WAME_QUEUE_QUIET_HOURS", ""), "")
 	fs.StringVar(&c.timezone, "queue-timezone", envOr("WAME_QUEUE_TIMEZONE", "Local"), "")
+	fs.StringVar(&c.alertGotify, "alert-gotify", envOr("WAME_ALERT_GOTIFY", ""), "")
+	fs.StringVar(&c.alertGotifyToken, "alert-gotify-token", envOr("WAME_ALERT_GOTIFY_TOKEN", ""), "")
+	alertDelay, err := time.ParseDuration(envOr("WAME_ALERT_DELAY", "2m"))
+	if err != nil || alertDelay < 0 {
+		fmt.Fprintln(os.Stderr, "error: WAME_ALERT_DELAY must be a duration like 2m")
+		os.Exit(2)
+	}
+	fs.DurationVar(&c.alertDelay, "alert-delay", alertDelay, "")
 	fs.BoolVar(&c.typing, "typing", false, "")
 	fs.BoolVar(&c.online, "online", false, "")
 	fs.BoolVar(&c.debug, "debug", false, "")
@@ -204,6 +217,13 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 	if err != nil {
 		return fmt.Errorf("-queue-timezone: %w", err)
 	}
+	if c.alertGotify != "" {
+		g, err := bot.NewGotify(c.alertGotify, c.alertGotifyToken)
+		if err != nil {
+			return fmt.Errorf("-alert-gotify: %w", err)
+		}
+		b.SetAlerts(g, c.alertDelay)
+	}
 	// Settings changed at runtime (GET/PATCH /settings) override these flags.
 	if _, err := b.InitSettings(bot.Settings{Rate: c.rate, ChatGap: c.chatGap, MaxWait: c.maxWait, AutoReply: c.autoreply,
 		WebhookFilter: c.webhookFilter, QueueJitter: c.queueJitter, QuietHours: quietHours, Timezone: tz}); err != nil {
@@ -242,6 +262,7 @@ func serveCommand(ctx context.Context, b *bot.Bot, c config) error {
 	}
 	go printQRUpdates(ctx, b)
 	b.Go(b.RunOutbox)
+	b.Go(b.RunAlerts)
 	return serve(ctx, b, c)
 }
 
@@ -256,6 +277,7 @@ func tuiCommand(ctx context.Context, b *bot.Bot, c config) error {
 		return err
 	}
 	b.Go(b.RunOutbox)
+	b.Go(b.RunAlerts)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var served sync.WaitGroup

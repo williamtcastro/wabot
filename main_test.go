@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -59,5 +60,16 @@ func TestIsLoopbackAddr(t *testing.T) {
 		if got := isLoopbackAddr(addr); got != want {
 			t.Errorf("isLoopbackAddr(%q) = %v, want %v", addr, got, want)
 		}
+	}
+}
+
+func TestAlertFlagsChecked(t *testing.T) {
+	c := config{db: filepath.Join(t.TempDir(), "wame.db"), alertGotify: "http://10.0.0.5:8070"}
+	if err := run(t.Context(), "token", []string{"list"}, c); err == nil || !strings.Contains(err.Error(), "-alert-gotify") {
+		t.Fatalf("a Gotify URL without a token: %v", err)
+	}
+	c.alertGotify, c.alertGotifyToken = "http://10.0.0.5:8070/?token=A1b2C3d4", "A1b2C3d4"
+	if err := run(t.Context(), "token", []string{"list"}, c); err == nil || strings.Contains(err.Error(), "A1b2C3d4") {
+		t.Fatalf("a token in the URL: %v", err)
 	}
 }

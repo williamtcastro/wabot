@@ -51,6 +51,7 @@ type Bot struct {
 	replies   atomic.Bool
 	usage     usage
 	outbox    outbox
+	alerts    *alerter
 
 	settingsMu   sync.Mutex
 	settings     Settings

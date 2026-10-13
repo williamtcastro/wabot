@@ -173,4 +173,7 @@ func TestUsage(t *testing.T) {
 	if len(u) != 1 || u[0].Name != "claude" || u[0].Requests != 2 || u[0].Sends != 1 || u[0].Failed != 1 || u[0].LastIP != "10.0.0.8" {
 		t.Fatalf("usage = %+v", u)
 	}
+	if ok, failed := b.SendTotals(); ok != 1 || failed != 1 {
+		t.Fatalf("send totals = %d, %d", ok, failed)
+	}
 }

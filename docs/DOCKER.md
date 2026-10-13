@@ -156,6 +156,49 @@ in-flight requests up to 5 seconds and queued webhook deliveries one last attemp
 database. Messages in the [send queue](QUEUE.md) stay in `/data` and continue after the restart.
 Docker's default 10-second stop timeout is enough.
 
+## Alerts and monitoring
+
+### Gotify
+
+To get a push notification when WhatsApp disconnects or logs out, the send queue backs off or the
+webhook loses deliveries, set these in `.env` (Compose passes them through; with `docker run`, use
+`-e`):
+
+```sh
+WAME_ALERT_GOTIFY=http://10.0.0.5:8070     # your Gotify server, without ?token=
+WAME_ALERT_GOTIFY_TOKEN=…                  # an app token created in Gotify
+WAME_ALERT_DELAY=2m                        # optional: how long a disconnection lasts before it alerts
+```
+
+Check it with `curl -H "Authorization: Bearer $WAME_TOKEN" -X POST localhost:8080/alerts/test`.
+What each alert means: [API.md → Alerts](API.md#alerts).
+
+### Prometheus
+
+`GET /metrics` serves Prometheus metrics ([list](API.md#get-metrics)) and requires an admin token.
+Create one for Prometheus and keep it in a file it can read:
+
+```sh
+docker exec wame wame token create prometheus -scopes admin   # prints the token once
+echo -n 'wame_…' > /etc/prometheus/wame-token && chmod 600 /etc/prometheus/wame-token   # paste it here
+```
+
+```yaml
+scrape_configs:
+  - job_name: wame
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/wame-token
+    static_configs:
+      - targets: ["10.0.0.5:8080"]
+```
+
+The port is published on `127.0.0.1` by default; scrape from the same host, or publish it on an
+address Prometheus can reach (a token is required either way). Useful alert rules:
+`wame_connected == 0` for a few minutes, `increase(wame_webhook_failed_total[15m]) > 0`,
+`wame_queue_cooldown == 1`.
+
 ## Moving an existing database in
 
 Stop whatever uses it, and copy `wame.db` with its `-wal` and `-shm` files if they exist.

@@ -38,8 +38,9 @@ func (e *usageEntry) bucket(now time.Time) int {
 }
 
 type usage struct {
-	mu sync.Mutex
-	by map[string]*usageEntry
+	mu                 sync.Mutex
+	by                 map[string]*usageEntry
+	sentOK, sentFailed int64
 }
 
 func (u *usage) entry(name string) *usageEntry {
@@ -74,9 +75,18 @@ func (b *Bot) recordSend(name string, ok bool) {
 	i := e.bucket(time.Now())
 	if ok {
 		e.sends[i]++
+		b.usage.sentOK++
 	} else {
 		e.failed[i]++
+		b.usage.sentFailed++
 	}
+}
+
+// SendTotals counts sends (text and files, every caller) since startup.
+func (b *Bot) SendTotals() (ok, failed int64) {
+	b.usage.mu.Lock()
+	defer b.usage.mu.Unlock()
+	return b.usage.sentOK, b.usage.sentFailed
 }
 
 // Usage returns every caller seen since startup, by name.

@@ -38,10 +38,12 @@ Base URL: whatever you passed to `-addr` (default `http://127.0.0.1:8080` for `s
 | GET | `/groups` | your groups |
 | POST | `/check` | which numbers have WhatsApp |
 | GET | `/audit` | log of control actions (sends, edits, logins…) |
-| GET | `/stats` | limiter and webhook health, per-token usage |
+| GET | `/stats` | limiter, webhook, queue and alert health, per-token usage |
+| GET | `/metrics` | Prometheus metrics |
 | GET, PATCH | `/settings` | read or change rate limits, auto-replies, the webhook filter and the send queue without a restart |
 | POST | `/webhook/test` | send a signed test delivery |
 | POST | `/webhook/replay` | send a recently failed delivery again |
+| POST | `/alerts/test` | send a test alert to Gotify |
 | GET | `/tokens` | list API tokens |
 | POST | `/tokens` | create an API token |
 | DELETE | `/tokens/{name}` | revoke a token (and the tokens it created) |
@@ -126,7 +128,7 @@ the token name is what the [audit log](#get-audit) records as the actor.
 | `GET /chats` | read | only allowed chats are listed |
 | `GET /contacts`, `GET /groups` | read | 403 |
 | `POST /check` | send | 403 |
-| `GET /audit`, `GET /stats`, `GET /settings`, `PATCH /settings`, `POST /webhook/test`, `POST /webhook/replay` | admin | n/a |
+| `GET /audit`, `GET /stats`, `GET /metrics`, `GET /settings`, `PATCH /settings`, `POST /webhook/test`, `POST /webhook/replay`, `POST /alerts/test` | admin | n/a |
 | `GET /optouts`, `POST /optouts`, `DELETE /optouts/{chat}` | admin | n/a |
 | `GET /tokens`, `POST /tokens`, `DELETE /tokens/{name}` | admin | n/a |
 | `GET /docs`, `GET /openapi.yaml` | none | public |
@@ -766,12 +768,14 @@ mode, `mcp` for `wame mcp` without a token), or `tui`, `cli`, `autoreply` or `wh
 `action` is `send`, `send_file`, `react`, `edit`, `delete`, `read`, `pair`, `logout`,
 `logged_out`, `token_create`, `token_revoke` (for the token ones, `target` is the token name and
 `detail` the requested scopes), `settings` (`detail` lists the changes, e.g. `rate=10, chat_gap
-reset`), `webhook_test` or `webhook_replay` (`detail` is the delivery id). See
+reset`), `webhook_test` or `webhook_replay` (`detail` is the delivery id), or `alert_test`
+(`detail` is the backend, `gotify`). See
 [proposed-features/ADMIN-PANEL.md](proposed-features/ADMIN-PANEL.md#logging-today) for what each one records.
 
 ## `GET /stats`
 
-Health of the parts that can quietly fall behind: the limiters and the webhook. Requires `admin`;
+Health of the parts that can quietly fall behind: the limiters, the webhook, the send queue and
+alerts. Requires `admin`;
 it's what the [admin panel](ADMIN.md)'s Health tab shows. Counters are kept in memory and reset
 when wame restarts. The webhook URL, its secret and message content are never included.
 
@@ -799,6 +803,10 @@ when wame restarts. The webhook URL, its secret and message content are never in
     "oldest_queued": "2026-10-12T21:00:00-03:00", "next_due": "2026-10-12T21:41:03-03:00",
     "paused": false, "running": true, "jitter_ms": 2000,
     "quiet_hours": "21:00-08:00", "timezone": "America/Sao_Paulo", "quiet_until": "2026-10-13T08:00:00-03:00"
+  },
+  "alerts": {
+    "configured": true, "backend": "gotify", "delay_ms": 120000, "sent": 2, "failed": 0,
+    "last_sent": "2026-10-12T21:30:00-03:00", "last_title": "wame: WhatsApp is back"
   }
 }
 ```
@@ -816,6 +824,10 @@ when wame restarts. The webhook URL, its secret and message content are never in
   whether it's `paused`, whether a worker is `running` in this process, and `cooldown_until` /
   `last_error` while it backs off after WhatsApp errors. `delivered` and `read` count sent items
   with those receipts; `quiet_until` appears while [quiet hours](QUEUE.md#quiet-hours) hold it.
+- `alerts` is `{"configured": false, "sent": 0, "failed": 0}` without
+  [`-alert-gotify`](#alerts). Otherwise it shows how many alerts went out or failed, the title of the
+  last one sent and `last_error` / `last_error_at` from the last failure (with the Gotify address
+  replaced by `gotify`). The URL and the app token are never included.
 
 ## `GET /settings`, `PATCH /settings`
 
@@ -879,6 +891,76 @@ curl -H "$H" -X POST localhost:8080/webhook/replay -d '{"delivery": "4711-messag
 Both answer 200 with the attempt's outcome even when the receiver failed (`ok: false`, `status`,
 `error`); 400 without a webhook, 404 for an unknown delivery. Both require `admin` and are audited
 as `webhook_test` / `webhook_replay`.
+
+## Alerts
+
+With `-alert-gotify URL` and `-alert-gotify-token TOKEN` (`WAME_ALERT_GOTIFY`,
+`WAME_ALERT_GOTIFY_TOKEN`), `wame serve` and `wame tui` push alerts to a
+[Gotify](https://gotify.net) server: `POST {URL}/message` with the app token in the `X-Gotify-Key`
+header (never in the URL) and the JSON body `{"title", "message", "priority"}`.
+
+| Alert | When | Priority |
+|---|---|---|
+| WhatsApp disconnected | the linked account has been disconnected (or not logged in) for `-alert-delay` (default `2m`) | 7 |
+| WhatsApp logged out | at once, when the device is unlinked | 8 |
+| WhatsApp is back | the connection is up again after either of the two above | 2 |
+| send queue backing off | the [send queue](#post-queue) entered a cooldown after repeated WhatsApp errors | 5 |
+| queued messages failed | queue items failed for good (the count since the last alert) | 5 |
+| webhook deliveries lost | webhook deliveries were given up on or dropped (the count since the last alert) | 5 |
+
+- The last three are sent at most once per kind every 15 minutes; failures in between are added to
+  the next one.
+- Alerts carry the account's own number, never message text, contacts' numbers, tokens or the
+  webhook URL.
+- A failed alert is retried after a minute. `GET /stats` shows the outcome under `alerts`.
+- A server that was never linked doesn't alert. Alerts are checked every 5 seconds and on every
+  connection change, in the background.
+
+### `POST /alerts/test`
+
+Sends a low-priority test alert. Requires `admin`; audited as `alert_test`.
+
+```sh
+curl -H "$H" -X POST localhost:8080/alerts/test
+```
+
+```json
+{ "ok": true }
+```
+
+400 when no alerts are configured, 502 when Gotify refused it or couldn't be reached (the error says
+why, with the address replaced by `gotify`).
+
+## `GET /metrics`
+
+Prometheus metrics in the text format (version 0.0.4). Requires `admin`: give Prometheus an admin
+token through its `authorization` setting (see [DOCKER.md](DOCKER.md#prometheus)).
+
+```sh
+curl -H "$H" localhost:8080/metrics
+```
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `wame_up` | gauge | | always 1 |
+| `wame_build_info` | gauge | `version`, `goversion` | always 1 |
+| `wame_start_time_seconds`, `wame_uptime_seconds` | gauge | | when wame started, and since how long |
+| `wame_connected`, `wame_logged_in` | gauge | | 1 while connected to WhatsApp / logged in |
+| `wame_sends_total` | counter | `result` (`ok`, `failed`) | texts and files sent by any caller (API, MCP, TUI, queue, auto-replies) |
+| `wame_limiter_last_minute` | gauge | `limiter` (`send`, `lookups`, `auto_reply`) | slots taken in the last minute |
+| `wame_limiter_per_minute` | gauge | `limiter` | the configured limit (0 = unlimited) |
+| `wame_limiter_rejected_total` | counter | `limiter` | 429s (dropped replies for `auto_reply`) |
+| `wame_webhook_configured` | gauge | | 1 with `-webhook` |
+| `wame_webhook_delivered_total`, `_retried_total`, `_failed_total`, `_dropped_total` | counter | | webhook deliveries, as in `/stats` |
+| `wame_webhook_queue_depth` | gauge | | deliveries waiting |
+| `wame_queue_items` | gauge | `state` | send queue items by state (finished ones are pruned after 7 days) |
+| `wame_queue_paused`, `wame_queue_cooldown` | gauge | | 1 while paused / backing off |
+| `wame_alerts_configured` | gauge | | 1 with `-alert-gotify` |
+| `wame_alerts_sent_total`, `wame_alerts_failed_total` | counter | | alerts delivered / not delivered |
+| `wame_open_streams` | gauge | | open `/events` and `/messages/wait` connections |
+
+Counters start at zero when wame restarts. Per-token numbers are left out on purpose (they'd make
+a series per token and show who uses the API); they're in `/stats` under `callers`.
 
 ## `GET /tokens`
 

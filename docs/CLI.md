@@ -8,7 +8,7 @@ Flags go right after the command and before any other arguments, e.g.
 `wame serve -addr 127.0.0.1:9000 -debug` or `wame send -db other.db 5511999999999 hi`.
 Boolean flags take `=`: `-autoreply=false`. Durations use Go syntax: `500ms`, `2s`, `1m`.
 
-Pass secrets (`WAME_TOKEN`, `WAME_WEBHOOK_SECRET`) as environment variables rather than flags:
+Pass secrets (`WAME_TOKEN`, `WAME_WEBHOOK_SECRET`, `WAME_ALERT_GOTIFY_TOKEN`) as environment variables rather than flags:
 command-line arguments are visible to every user on the machine through `ps`.
 
 ## Commands
@@ -167,6 +167,9 @@ wame was called `wabot`. After switching binaries nothing has to change:
 | `-queue-jitter D` | `WAME_QUEUE_JITTER` | `2s` | wait a random 0–D more between [queued](QUEUE.md) sends; `0` = none |
 | `-queue-quiet-hours W` | `WAME_QUEUE_QUIET_HOURS` | off | send nothing from the queue in this daily window, e.g. `21:00-08:00` (may cross midnight). See [quiet hours](QUEUE.md#quiet-hours) |
 | `-queue-timezone TZ` | `WAME_QUEUE_TIMEZONE` | `Local` | IANA time zone the quiet hours are read in, e.g. `America/Sao_Paulo`; `Local` is the server's zone (UTC in Docker unless `TZ` is set) |
+| `-alert-gotify URL` | `WAME_ALERT_GOTIFY` | none | `serve` and `tui`: push [alerts](API.md#alerts) (disconnected, logged out, queue and webhook trouble, recovered) to this Gotify server, e.g. `http://10.0.0.5:8070`. No query string: the token goes in the next flag |
+| `-alert-gotify-token T` | `WAME_ALERT_GOTIFY_TOKEN` | none | the Gotify app token, sent as `X-Gotify-Key`; required with `-alert-gotify`, never logged or shown |
+| `-alert-delay D` | `WAME_ALERT_DELAY` | `2m` | alert when WhatsApp stays disconnected this long; a logout alerts at once |
 | `-log-format F` | `WAME_LOG_FORMAT` | `text` | app log format: `text` or `json` |
 | `-log-file PATH` | `WAME_LOG_FILE` | stderr | write app logs to PATH (appended, mode 0600) |
 | `-debug` | | `false` | debug-level logs, including whatsmeow's |

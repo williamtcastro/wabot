@@ -712,8 +712,8 @@ paths:
   /stats:
     get:
       tags: [Admin]
-      summary: Limiter and webhook health
-      description: Version and start time, a snapshot of the send, lookup and auto-reply limiters (use in the last minute, rejections since startup), and webhook delivery counters with the latest failures. Counters live in memory and reset on restart. Never includes the webhook URL, its secret or message content. Requires admin.
+      summary: Limiter, webhook, queue and alert health
+      description: Version and start time, a snapshot of the send, lookup and auto-reply limiters (use in the last minute, rejections since startup), webhook delivery counters with the latest failures, the send queue and the alerter. Counters live in memory and reset on restart. Never includes the webhook URL, its secret, the Gotify URL or token, or message content. Requires admin.
       responses:
         "200":
           description: Stats
@@ -769,6 +769,48 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+
+  /metrics:
+    get:
+      tags: [Admin]
+      summary: Prometheus metrics
+      description: |
+        Prometheus text exposition format 0.0.4: connection state, build info, uptime, sends by result,
+        limiter use and rejections, webhook and alert counters, send queue items by state and open
+        streams. No per-token series. Requires admin (configure Prometheus with an authorization
+        Bearer token).
+      responses:
+        "200":
+          description: Metrics
+          content:
+            text/plain:
+              schema: { type: string }
+              example: |
+                # HELP wame_connected 1 while connected to WhatsApp.
+                # TYPE wame_connected gauge
+                wame_connected 1
+                # HELP wame_sends_total Messages and files sent since startup, by result.
+                # TYPE wame_sends_total counter
+                wame_sends_total{result="ok"} 42
+                wame_sends_total{result="failed"} 1
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /alerts/test:
+    post:
+      tags: [Admin]
+      summary: Send a test alert
+      description: Sends a low-priority test alert through the configured backend (Gotify). Audited as alert_test. Requires admin.
+      responses:
+        "200":
+          description: Gotify accepted it
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { type: boolean } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "502": { description: "Gotify refused the alert or couldn't be reached; the error never contains its address or token", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
   /webhook/test:
     post:
@@ -1172,6 +1214,19 @@ components:
                 cooldown_until: { type: string, format: date-time, description: "Backing off after repeated WhatsApp errors" }
                 last_error: { type: string }
                 last_error_at: { type: string, format: date-time }
+        alerts:
+          type: object
+          description: Push alerts (-alert-gotify). Never includes the URL or the token
+          properties:
+            configured: { type: boolean }
+            backend: { type: string, example: gotify }
+            delay_ms: { type: integer, description: "How long a disconnection lasts before it alerts" }
+            sent: { type: integer }
+            failed: { type: integer }
+            last_sent: { type: string, format: date-time }
+            last_title: { type: string, example: "wame: WhatsApp is back" }
+            last_error: { type: string, description: "The Gotify address is replaced by gotify" }
+            last_error_at: { type: string, format: date-time }
         callers:
           type: array
           description: Everyone who called the API or /mcp since startup, by token name; in memory, last 24 hours
@@ -1252,7 +1307,7 @@ components:
         id: { type: integer, format: int64 }
         at: { type: string, format: date-time }
         actor: { type: string, description: "Token name for API/MCP calls (api = owner secret or token-less, mcp = stdio without a token), or tui, cli, autoreply, whatsapp", example: "support-bot" }
-        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel, optout_add, optout_remove] }
+        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel, optout_add, optout_remove, alert_test] }
         target: { type: string, description: "Chat JID, when there is one" }
         detail: { type: string, example: "text, 6 chars" }
         ok: { type: boolean }
