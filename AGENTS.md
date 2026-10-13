@@ -56,8 +56,12 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `internal/tui/format.go` | `tui` | text helpers and `safe()` sanitizing of untrusted text |
 | `internal/admin/client.go` | `admin` | `wame admin`: HTTP client for a remote server (`NewClient` refuses plain http beyond loopback), typed on `bot.Status`, `store.Token`, `store.AuditEntry` |
 | `internal/admin/config.go` | `admin` | `ReadEnvFile` (`WAME_SERVER`/`WAME_TOKEN` from `./.env`, `~/.config/wame/admin.env`) and `Resolve` (precedence; a file's server needs that file's token) |
-| `internal/admin/model.go` | `admin` | the panel's Bubble Tea model: tabs, modes (pair, confirm, token form, one-time token view, filter), polling |
-| `internal/admin/view.go` | `admin` | rendering: header, tabs, status with QR, tokens and audit tables |
+| `internal/admin/model.go` | `admin` | the panel's Bubble Tea model: `Options`, tabs, modes, polling, `call` (every server answer is tagged with the client generation in a `genMsg`, so answers from a server the user switched away from are dropped), `applyStatus` (bell on a healthy → unhealthy change), server switching |
+| `internal/admin/live.go` | `admin` | the `/events` follower: reconnects with backoff, feeds `liveMsg`/`eventMsg` through a channel closed on stop; keeps time/chat/sender (never text) of the last hour's messages for the counts |
+| `internal/admin/chats.go` | `admin` | Chats tab: list, messages, search, sending, and `safe()` for text other people wrote |
+| `internal/admin/tokens.go` | `admin` | Tokens tab keys, the create form, rotation (`nextName`, `rotationRequest`, create-then-revoke) and `unused` |
+| `internal/admin/health.go` | `admin` | Health tab (`GET /stats`), meters, and `grid`: panels laid out in equal-height rows |
+| `internal/admin/view.go` | `admin` | rendering: header (degrades by width), dialogs, the Status grid, tokens and audit tables |
 | `Dockerfile`, `compose.yaml` | | static build into distroless `nonroot`; `/data` volume with `WAME_DB=/data/wame.db`, `WAME_ADDR=0.0.0.0:8080` (so a token is required). CI builds it and smoke-tests `version` and the no-token refusal. Docs: `docs/DOCKER.md` |
 | `_demo/` | `main` | README screenshot: seeds a scratch DB with fake chats and opens the TUI without connecting; `screenshot.sh` records it with VHS into `docs/wame-tui.png`. Ignored by `./...`, built by CI. Rerun it after visible TUI changes |
 | `docs/openapi.yaml` | | OpenAPI 3 spec, embedded into the binary (rebuild after editing) |
@@ -121,7 +125,11 @@ numbers and names below.
 - `internal/tui`: 110×24 renders exactly 24 lines (with and without the context bar), autocomplete,
   reaction divider, vim-style keys, half-page scroll, `safe()`.
 - `internal/admin`: the client against the real `api.NewHandler` (tokens, audit paging, 401/403
-  messages), the http guard, and the panel's create → copy → revoke → filter flow.
+  messages), the http guard, env files and profiles, and the panel: create → copy → revoke →
+  filter, rotation, the Chats tab (sanitizing), the live stream, the bell, Health, server switching
+  (stale answers dropped) and that Status cards line up at 120 and 180 columns. Tests that build a
+  model use `newTestModel`, which stops the live stream on cleanup (otherwise the test server
+  can't close).
 - `main`: default DB path, `isLoopbackAddr`.
 - Also: `internal/store/state_test.go` (read positions, upgrade marks history read, FTS search incl.
   accents/prefix/deleted/edited, group cache) and `internal/bot/state_test.go` (read-self receipts,

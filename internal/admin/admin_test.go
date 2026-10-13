@@ -167,18 +167,25 @@ func press(m *model, keys ...string) {
 	}
 }
 
+func newTestModel(t *testing.T, o Options) *model {
+	t.Helper()
+	m := newModel(o)
+	t.Cleanup(m.close)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	run(m, m.Init())
+	return m
+}
+
 func TestPanelCreatesAndRevokesTokens(t *testing.T) {
 	_, c := newServer(t)
 	var copied string
-	m := newModel(c, func(s string) error { copied = s; return nil })
-	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	run(m, m.Init())
+	m := newTestModel(t, Options{Client: c, Copy: func(s string) error { copied = s; return nil }})
 
 	if !strings.Contains(m.View(), "1 Status") || m.statusErr != nil {
 		t.Fatalf("status not loaded: %v\n%s", m.statusErr, m.View())
 	}
 
-	press(m, "2", "n")
+	press(m, "3", "n")
 	if m.mode != modeCreate {
 		t.Fatal("n didn't open the form")
 	}
@@ -211,7 +218,7 @@ func TestPanelCreatesAndRevokesTokens(t *testing.T) {
 		t.Fatalf("not revoked: %q", m.notice)
 	}
 
-	press(m, "3")
+	press(m, "4")
 	view := m.View()
 	for _, want := range []string{"token_create", "token_revoke", "claude"} {
 		if !strings.Contains(view, want) {
@@ -226,9 +233,8 @@ func TestPanelCreatesAndRevokesTokens(t *testing.T) {
 
 func TestPanelFormValidation(t *testing.T) {
 	_, c := newServer(t)
-	m := newModel(c, nil)
-	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	press(m, "2", "n")
+	m := newTestModel(t, Options{Client: c})
+	press(m, "3", "n")
 	m.form[3].SetValue("lots")
 	m.form[0].SetValue("bot")
 	press(m, "enter", "enter", "enter", "enter", "enter")
@@ -244,7 +250,7 @@ func TestPanelFormValidation(t *testing.T) {
 
 func TestPanelShowsTheQR(t *testing.T) {
 	_, c := newServer(t)
-	m := newModel(c, nil)
+	m := newTestModel(t, Options{Client: c})
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
 	m.Update(statusMsg{s: bot.Status{State: "waiting for QR scan", QR: "2@fake-qr-payload"}})
 	view := m.View()

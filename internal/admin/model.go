@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/williamtcastro/wame/internal/api"
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/store"
 )
@@ -17,11 +19,13 @@ type tab int
 
 const (
 	tabStatus tab = iota
+	tabChats
 	tabTokens
 	tabAudit
+	tabHealth
 )
 
-var tabNames = []string{"Status", "Tokens", "Audit"}
+var tabNames = []string{"Status", "Chats", "Tokens", "Audit", "Health"}
 
 type mode int
 
@@ -30,17 +34,31 @@ const (
 	modePair
 	modeConfirmLogout
 	modeConfirmRevoke
+	modeConfirmRotate
 	modeCreate
 	modeShowToken
 	modeFilter
+	modeSearch
+	modeCompose
+	modeServers
 )
 
 const (
-	pollEvery = 3 * time.Second
-	auditPage = 100
+	pollFast      = 3 * time.Second
+	pollLive      = 15 * time.Second
+	auditPage     = 100
+	chatsLimit    = 100
+	messagesLimit = 60
+	unusedAfter   = 30 * 24 * time.Hour
 )
 
 type (
+	// genMsg tags a server answer with the client that produced it, so answers from a server the
+	// user has since switched away from are dropped.
+	genMsg struct {
+		gen int
+		msg tea.Msg
+	}
 	statusMsg struct {
 		s       bot.Status
 		latency time.Duration
@@ -55,9 +73,27 @@ type (
 		older   bool
 		err     error
 	}
-	createdMsg struct {
-		plain string
+	statsMsg struct {
+		s   api.Stats
+		err error
+	}
+	chatsMsg struct {
+		chats []store.Chat
 		err   error
+	}
+	messagesMsg struct {
+		chat, query string
+		msgs        []store.Message
+		err         error
+	}
+	sentMsg struct {
+		chat string
+		err  error
+	}
+	createdMsg struct {
+		plain, replaced string
+		revokeErr       error
+		err             error
 	}
 	pairMsg struct {
 		code string
@@ -74,9 +110,21 @@ type (
 	tickMsg struct{}
 )
 
+// Options configure the panel. Without a Client it opens on the server picker.
+type Options struct {
+	Client   *Client
+	Profile  string
+	Profiles []Profile
+	Insecure bool
+	Copy     func(string) error
+	Bell     func()
+}
+
 type model struct {
 	c             *Client
-	copy          func(string) error
+	gen           int
+	opts          Options
+	profile       string
 	width, height int
 	tab           tab
 	mode          mode
@@ -98,55 +146,106 @@ type model struct {
 	auditBusy  bool
 	auditQuery string
 
+	stats    api.Stats
+	statsErr error
+	statsAt  time.Time
+
+	chats      []store.Chat
+	chatsErr   error
+	chatSel    int
+	msgs       []store.Message
+	msgsChat   string
+	msgsErr    error
+	search     string
+	searchHits []store.Message
+
+	live live
+
 	prompt    textinput.Model
 	form      []textinput.Model
 	formFocus int
 	created   string
+	replaced  string
+	serverSel int
 
 	notice    string
 	noticeErr bool
 }
 
-// Run opens the panel. copy puts text on the clipboard (used for a newly created token).
-func Run(c *Client, copy func(string) error) error {
-	_, err := tea.NewProgram(newModel(c, copy), tea.WithAltScreen()).Run()
+// Run opens the panel.
+func Run(o Options) error {
+	m := newModel(o)
+	defer m.close()
+	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }
 
-func newModel(c *Client, copy func(string) error) *model {
+func newModel(o Options) *model {
 	p := textinput.New()
 	p.Prompt = "› "
 	p.PromptStyle = styleAccent
-	return &model{c: c, copy: copy, prompt: p, auditMore: true}
+	p.CharLimit = 4096
+	if o.Copy == nil {
+		o.Copy = func(string) error { return nil }
+	}
+	if o.Bell == nil {
+		o.Bell = func() {}
+	}
+	m := &model{c: o.Client, opts: o, profile: o.Profile, prompt: p, auditMore: true}
+	if m.c == nil {
+		m.mode = modeServers
+	}
+	return m
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), tick())
+	return tea.Batch(m.loadAll(), m.live.start(m.c, m.gen), tick(m.pollEvery()))
 }
 
-func tick() tea.Cmd {
-	return tea.Tick(pollEvery, func(time.Time) tea.Msg { return tickMsg{} })
+func (m *model) close() { m.live.stop() }
+
+func (m *model) loadAll() tea.Cmd {
+	if m.c == nil {
+		return nil
+	}
+	return tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadStats(), m.loadChats())
 }
 
-func call[T any](f func(ctx context.Context) T) tea.Cmd {
+func (m *model) pollEvery() time.Duration {
+	if m.live.on {
+		return pollLive
+	}
+	return pollFast
+}
+
+func tick(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+// call runs f against the current client in the background, tagged with its generation.
+func (m *model) call(f func(ctx context.Context, c *Client) tea.Msg) tea.Cmd {
+	c, gen := m.c, m.gen
+	if c == nil {
+		return nil
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		return f(ctx)
+		return genMsg{gen, f(ctx, c)}
 	}
 }
 
 func (m *model) loadStatus() tea.Cmd {
-	return call(func(ctx context.Context) tea.Msg {
+	return m.call(func(ctx context.Context, c *Client) tea.Msg {
 		start := time.Now()
-		s, err := m.c.Status(ctx)
+		s, err := c.Status(ctx)
 		return statusMsg{s, time.Since(start), err}
 	})
 }
 
 func (m *model) loadTokens() tea.Cmd {
-	return call(func(ctx context.Context) tea.Msg {
-		t, err := m.c.Tokens(ctx)
+	return m.call(func(ctx context.Context, c *Client) tea.Msg {
+		t, err := c.Tokens(ctx)
 		return tokensMsg{t, err}
 	})
 }
@@ -157,9 +256,16 @@ func (m *model) loadAudit(older bool) tea.Cmd {
 		before = m.audit[len(m.audit)-1].ID
 	}
 	m.auditBusy = true
-	return call(func(ctx context.Context) tea.Msg {
-		e, err := m.c.Audit(ctx, auditPage, before)
+	return m.call(func(ctx context.Context, c *Client) tea.Msg {
+		e, err := c.Audit(ctx, auditPage, before)
 		return auditMsg{e, older, err}
+	})
+}
+
+func (m *model) loadStats() tea.Cmd {
+	return m.call(func(ctx context.Context, c *Client) tea.Msg {
+		s, err := c.Stats(ctx)
+		return statsMsg{s, err}
 	})
 }
 
@@ -167,26 +273,65 @@ func (m *model) setNotice(text string, isErr bool) {
 	m.notice, m.noticeErr = text, isErr
 }
 
+func (m *model) healthy() bool {
+	return m.statusErr == nil && !m.checked.IsZero() && m.status.Connected && m.status.LoggedIn
+}
+
+// applyStatus records a new status and rings the bell when a healthy server stops being healthy.
+func (m *model) applyStatus(s bot.Status, err error) {
+	was := m.healthy()
+	if err == nil {
+		m.status = s
+	}
+	m.statusErr, m.checked = err, time.Now()
+	if s.LoggedIn {
+		m.pairCode = ""
+	}
+	if was && !m.healthy() {
+		m.opts.Bell()
+		switch {
+		case err != nil:
+			m.setNotice("lost contact with the server: "+err.Error(), true)
+		case !s.LoggedIn:
+			m.setNotice("WhatsApp logged this server out", true)
+		default:
+			m.setNotice("the server lost its WhatsApp connection", true)
+		}
+	}
+}
+
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case genMsg:
+		if msg.gen != m.gen {
+			return m, nil
+		}
+		return m.Update(msg.msg)
+
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 
 	case tickMsg:
-		cmds := []tea.Cmd{m.loadStatus(), tick()}
+		cmds := []tea.Cmd{m.loadStatus(), m.loadStats(), tick(m.pollEvery())}
 		if m.mode == modeNormal && m.tab == tabTokens {
 			cmds = append(cmds, m.loadTokens())
 		}
 		if m.mode == modeNormal && m.tab == tabAudit && m.auditSel == 0 && m.auditQuery == "" && !m.auditBusy {
 			cmds = append(cmds, m.loadAudit(false))
 		}
+		if m.tab == tabChats && !m.live.on {
+			cmds = append(cmds, m.loadChats())
+		}
 		return m, tea.Batch(cmds...)
 
+	case liveMsg, eventMsg:
+		return m, m.handleLive(msg)
+
 	case statusMsg:
-		m.status, m.statusErr, m.checked, m.latency = msg.s, msg.err, time.Now(), msg.latency
-		if msg.s.LoggedIn {
-			m.pairCode = ""
+		m.applyStatus(msg.s, msg.err)
+		if msg.err == nil {
+			m.latency = msg.latency
 		}
 		return m, nil
 
@@ -210,12 +355,37 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.auditSel = clamp(m.auditSel, len(m.visibleAudit()))
 		return m, nil
 
+	case statsMsg:
+		m.statsErr = msg.err
+		if msg.err == nil {
+			m.stats, m.statsAt = msg.s, time.Now()
+		}
+		return m, nil
+
+	case chatsMsg:
+		return m, m.applyChats(msg)
+
+	case messagesMsg:
+		m.applyMessages(msg)
+		return m, nil
+
+	case sentMsg:
+		if msg.err != nil {
+			m.setNotice("not sent: "+msg.err.Error(), true)
+			return m, nil
+		}
+		m.setNotice("sent", false)
+		return m, tea.Batch(m.loadMessages(msg.chat), m.loadChats(), m.loadAudit(false))
+
 	case createdMsg:
 		if msg.err != nil {
 			m.setNotice("create failed: "+msg.err.Error(), true)
 			return m, nil
 		}
-		m.form, m.created, m.mode, m.notice = nil, msg.plain, modeShowToken, ""
+		m.form, m.created, m.replaced, m.mode, m.notice = nil, msg.plain, msg.replaced, modeShowToken, ""
+		if msg.revokeErr != nil {
+			m.setNotice("the new token works, but revoking "+msg.replaced+" failed: "+msg.revokeErr.Error(), true)
+		}
 		return m, tea.Batch(m.loadTokens(), m.loadAudit(false))
 
 	case pairMsg:
@@ -250,12 +420,33 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	switch m.mode {
+	case modeServers:
+		return m.serversKey(k)
 	case modePair:
 		return m.promptKey(k, func(v string) tea.Cmd {
 			m.setNotice("asking the server for a pairing code…", false)
-			return call(func(ctx context.Context) tea.Msg {
-				code, err := m.c.Pair(ctx, v)
+			return m.call(func(ctx context.Context, c *Client) tea.Msg {
+				code, err := c.Pair(ctx, v)
 				return pairMsg{code, err}
+			})
+		})
+	case modeCompose:
+		chat := m.msgsChat
+		return m.promptKey(k, func(v string) tea.Cmd {
+			m.setNotice("sending…", false)
+			key := "admin-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+			return m.call(func(ctx context.Context, c *Client) tea.Msg {
+				_, err := c.Send(ctx, chat, v, key)
+				return sentMsg{chat, err}
+			})
+		})
+	case modeSearch:
+		return m.promptKey(k, func(v string) tea.Cmd {
+			m.search = v
+			m.setNotice("searching…", false)
+			return m.call(func(ctx context.Context, c *Client) tea.Msg {
+				msgs, err := c.Messages(ctx, "", v, messagesLimit)
+				return messagesMsg{query: v, msgs: msgs, err: err}
 			})
 		})
 	case modeFilter:
@@ -273,8 +464,8 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.setNotice("logging out…", false)
-		return m, call(func(ctx context.Context) tea.Msg {
-			return doneMsg{"logged out: the session on the server was unlinked", m.c.Logout(ctx)}
+		return m, m.call(func(ctx context.Context, c *Client) tea.Msg {
+			return doneMsg{"logged out: the session on the server was unlinked", c.Logout(ctx)}
 		})
 	case modeConfirmRevoke:
 		m.mode = modeNormal
@@ -283,44 +474,76 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		name := m.tokens[m.tokSel].Name
-		return m, call(func(ctx context.Context) tea.Msg {
-			n, err := m.c.RevokeToken(ctx, name)
+		return m, m.call(func(ctx context.Context, c *Client) tea.Msg {
+			n, err := c.RevokeToken(ctx, name)
 			return doneMsg{"revoked " + name + " (" + plural(n, "token") + ")", err}
 		})
+	case modeConfirmRotate:
+		m.mode = modeNormal
+		if k.String() != "y" || m.tokSel >= len(m.tokens) {
+			m.setNotice("rotation cancelled", false)
+			return m, nil
+		}
+		return m, m.rotate(m.tokens[m.tokSel])
 	case modeCreate:
 		return m.formKey(k)
 	case modeShowToken:
 		if k.String() == "c" {
-			plain := m.created
+			plain, copyFn := m.created, m.opts.Copy
 			return m, func() tea.Msg {
-				if err := m.copy(plain); err != nil {
+				if err := copyFn(plain); err != nil {
 					return noticeMsg{"copy failed: " + err.Error(), true}
 				}
 				return noticeMsg{"token copied to the clipboard", false}
 			}
 		}
-		m.created, m.mode = "", modeNormal
-		m.setNotice("token closed; it can't be shown again", false)
+		m.created, m.replaced, m.mode = "", "", modeNormal
+		if !m.noticeErr {
+			m.setNotice("token closed; it can't be shown again", false)
+		}
 		return m, nil
 	}
 
 	switch k.String() {
 	case "q":
 		return m, tea.Quit
-	case "tab", "l", "right":
-		m.tab = (m.tab + 1) % tab(len(tabNames))
-	case "shift+tab", "h", "left":
-		m.tab = (m.tab + tab(len(tabNames)) - 1) % tab(len(tabNames))
-	case "1", "2", "3":
-		m.tab = tab(k.String()[0] - '1')
+	case "tab", "right":
+		return m, m.setTab((m.tab + 1) % tab(len(tabNames)))
+	case "shift+tab", "left":
+		return m, m.setTab((m.tab + tab(len(tabNames)) - 1) % tab(len(tabNames)))
+	case "1", "2", "3", "4", "5":
+		return m, m.setTab(tab(k.String()[0] - '1'))
 	case "r":
 		m.setNotice("refreshing…", false)
-		return m, tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false))
-	default:
-		return m, m.tabKey(k.String())
+		return m, m.loadAll()
+	case "S":
+		if len(m.opts.Profiles) == 0 {
+			m.setNotice("no saved servers: add files to ~/.config/wame/servers/ (see docs/ADMIN.md)", true)
+			return m, nil
+		}
+		m.mode = modeServers
+		m.serverSel = 0
+		for i, p := range m.opts.Profiles {
+			if p.Name == m.profile {
+				m.serverSel = i
+			}
+		}
+		return m, nil
 	}
-	m.notice = ""
-	return m, nil
+	return m, m.tabKey(k.String())
+}
+
+func (m *model) setTab(t tab) tea.Cmd {
+	m.tab, m.notice = t, ""
+	switch t {
+	case tabChats:
+		return m.loadChats()
+	case tabHealth:
+		return m.loadStats()
+	case tabTokens:
+		return m.loadTokens()
+	}
+	return nil
 }
 
 func (m *model) tabKey(k string) tea.Cmd {
@@ -340,24 +563,10 @@ func (m *model) tabKey(k string) tea.Cmd {
 			}
 			m.mode = modeConfirmLogout
 		}
+	case tabChats:
+		return m.chatsKey(k)
 	case tabTokens:
-		switch k {
-		case "j", "down":
-			m.tokSel = clamp(m.tokSel+1, len(m.tokens))
-		case "k", "up":
-			m.tokSel = clamp(m.tokSel-1, len(m.tokens))
-		case "n":
-			m.startForm()
-		case "x", "d":
-			if m.tokSel >= len(m.tokens) {
-				return nil
-			}
-			if m.tokens[m.tokSel].Revoked {
-				m.setNotice(m.tokens[m.tokSel].Name+" is already revoked", true)
-				return nil
-			}
-			m.mode = modeConfirmRevoke
-		}
+		return m.tokensKey(k)
 	case tabAudit:
 		n := len(m.visibleAudit())
 		switch k {
@@ -387,6 +596,43 @@ func (m *model) tabKey(k string) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+func (m *model) serversKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	n := len(m.opts.Profiles)
+	switch k.String() {
+	case "j", "down":
+		m.serverSel = clamp(m.serverSel+1, n)
+	case "k", "up":
+		m.serverSel = clamp(m.serverSel-1, n)
+	case "esc", "q":
+		if m.c == nil {
+			return m, tea.Quit
+		}
+		m.mode = modeNormal
+	case "enter":
+		if m.serverSel < n {
+			return m, m.switchTo(m.opts.Profiles[m.serverSel])
+		}
+	}
+	return m, nil
+}
+
+// switchTo points the panel at another saved server, dropping everything loaded from the old one.
+func (m *model) switchTo(p Profile) tea.Cmd {
+	c, err := NewClient(p.Server, p.Token, p.Insecure || m.opts.Insecure)
+	if err != nil {
+		m.setNotice(p.Name+": "+err.Error(), true)
+		return nil
+	}
+	m.live.stop()
+	fresh := newModel(m.opts)
+	fresh.c, fresh.profile, fresh.gen = c, p.Name, m.gen+1
+	fresh.width, fresh.height, fresh.tab = m.width, m.height, m.tab
+	fresh.mode = modeNormal
+	*m = *fresh
+	m.setNotice("switched to "+p.Name, false)
+	return tea.Batch(m.loadAll(), m.live.start(m.c, m.gen))
 }
 
 func (m *model) startPrompt(md mode, placeholder string) {
@@ -425,100 +671,6 @@ func (m *model) promptKeyLive(k tea.KeyMsg) tea.Cmd {
 	return cmd
 }
 
-var formFields = []struct{ label, value, hint string }{
-	{"Name", "", "a unique name, e.g. support-bot"},
-	{"Scopes", "read", "read, send and/or admin"},
-	{"Chats", "", "optional allowlist: numbers or JIDs, comma-separated"},
-	{"Rate", "10", "sends per minute for this token, 0 = only the global limit"},
-	{"Expires", "720h", "optional, e.g. 24h or 720h; empty = never"},
-}
-
-func (m *model) startForm() {
-	m.form = make([]textinput.Model, len(formFields))
-	for i, f := range formFields {
-		in := textinput.New()
-		in.Prompt = ""
-		in.Placeholder = f.hint
-		in.SetValue(f.value)
-		m.form[i] = in
-	}
-	m.formFocus = 0
-	m.form[0].Focus()
-	m.mode = modeCreate
-	m.notice = ""
-}
-
-func (m *model) focusField(i int) {
-	m.form[m.formFocus].Blur()
-	m.formFocus = (i + len(m.form)) % len(m.form)
-	m.form[m.formFocus].Focus()
-	m.form[m.formFocus].CursorEnd()
-}
-
-func (m *model) formKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.String() {
-	case "esc":
-		m.form, m.mode = nil, modeNormal
-		m.setNotice("token not created", false)
-		return m, nil
-	case "tab", "down":
-		m.focusField(m.formFocus + 1)
-		return m, nil
-	case "shift+tab", "up":
-		m.focusField(m.formFocus - 1)
-		return m, nil
-	case "enter":
-		if m.formFocus < len(m.form)-1 {
-			m.focusField(m.formFocus + 1)
-			return m, nil
-		}
-		req, err := m.formRequest()
-		if err != nil {
-			m.setNotice(err.Error(), true)
-			return m, nil
-		}
-		m.setNotice("creating "+req.Name+"…", false)
-		return m, call(func(ctx context.Context) tea.Msg {
-			plain, _, err := m.c.CreateToken(ctx, req)
-			return createdMsg{plain, err}
-		})
-	}
-	var cmd tea.Cmd
-	m.form[m.formFocus], cmd = m.form[m.formFocus].Update(k)
-	return m, cmd
-}
-
-type formError string
-
-func (e formError) Error() string { return string(e) }
-
-func (m *model) formRequest() (TokenRequest, error) {
-	v := func(i int) string { return strings.TrimSpace(m.form[i].Value()) }
-	r := TokenRequest{Name: v(0), Scopes: splitList(v(1)), Chats: splitList(v(2)), ExpiresIn: v(4)}
-	if r.Name == "" {
-		return r, formError("the token needs a name")
-	}
-	if len(r.Scopes) == 0 {
-		return r, formError("pick at least one scope: read, send or admin")
-	}
-	if s := v(3); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n < 0 {
-			return r, formError("rate must be a whole number, 0 or more")
-		}
-		r.Rate = &n
-	}
-	return r, nil
-}
-
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }) {
-		out = append(out, p)
-	}
-	return out
-}
-
 func (m *model) visibleAudit() []store.AuditEntry {
 	q := strings.ToLower(m.auditQuery)
 	if q == "" {
@@ -532,6 +684,11 @@ func (m *model) visibleAudit() []store.AuditEntry {
 		}
 	}
 	return out
+}
+
+func decode[T any](data json.RawMessage) (T, bool) {
+	var v T
+	return v, json.Unmarshal(data, &v) == nil
 }
 
 func clamp(i, n int) int {

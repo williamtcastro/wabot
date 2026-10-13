@@ -44,9 +44,33 @@ func TestResolve(t *testing.T) {
 		{".env server with a home token", []Source{flags("", ""), env("", ""), file("https://evil", ""), home("https://h", "t4")}, "", "", true},
 		{"home file alone", []Source{flags("", ""), env("", ""), file("", ""), home("https://h", "t4")}, "https://h", "t4", false},
 	} {
-		server, tok, err := Resolve(c.sources)
+		server, tok, _, err := Resolve(c.sources)
 		if (err != nil) != c.fails || (!c.fails && (server != c.server || tok != c.tok)) {
 			t.Errorf("%s: got %q, %q, %v", c.name, server, tok, err)
 		}
+	}
+}
+
+func TestProfiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("vps.env", "WAME_SERVER=https://vps.example.com\nWAME_TOKEN=t1\n")
+	write("home.env", "WAME_SERVER=http://10.0.0.5:8080\nWAME_TOKEN=t2\nWAME_INSECURE=true\n")
+	write("broken.env", "WAME_SERVER=https://x\n")
+	write("notes.txt", "WAME_SERVER=https://y\nWAME_TOKEN=t3\n")
+	ps, err := Profiles(dir)
+	if err != nil || len(ps) != 2 || ps[0].Name != "home" || !ps[0].Insecure || ps[1].Name != "vps" || ps[1].Insecure {
+		t.Fatalf("profiles = %+v, %v", ps, err)
+	}
+	if ps, err := Profiles(filepath.Join(dir, "missing")); err != nil || ps != nil {
+		t.Fatalf("missing dir: %v, %v", ps, err)
+	}
+	_, _, insecure, _ := Resolve([]Source{{Name: "env", Token: "t"}, ps[0].Source})
+	if insecure {
+		t.Fatal("insecure came from a file whose server wasn't used")
 	}
 }

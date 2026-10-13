@@ -153,8 +153,9 @@ export WAME_TOKEN=…   # owner secret or an admin token
 wame admin -server https://wame.example.com
 ```
 
-A terminal panel with the connection status, a QR to link the server's WhatsApp from afar (or a
-pairing code), token creation and revocation, and the audit log. It uses only the HTTP API and
+A terminal panel, updated live: connection status, a QR to link the server's WhatsApp from afar
+(or a pairing code), chats with search and sending, tokens (create, rotate, revoke), the audit log,
+and limiter and webhook health, across several saved servers. It uses only the HTTP API and
 refuses plain `http://` beyond localhost, so use HTTPS or an SSH tunnel. See [docs/ADMIN.md](docs/ADMIN.md).
 
 ## Bots and webhooks

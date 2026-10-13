@@ -49,6 +49,8 @@ func (m *model) View() string {
 	}
 	var body string
 	switch {
+	case m.mode == modeServers:
+		body = m.modal(styleModal, m.viewServers())
 	case m.mode == modeCreate:
 		body = m.modal(styleModal, m.viewForm())
 	case m.mode == modeShowToken:
@@ -59,12 +61,18 @@ func (m *model) View() string {
 		body = m.modal(styleDanger, m.viewConfirmLogout())
 	case m.mode == modeConfirmRevoke:
 		body = m.modal(styleDanger, m.viewConfirmRevoke())
+	case m.mode == modeConfirmRotate:
+		body = m.modal(styleModal, m.viewConfirmRotate())
 	case m.tab == tabStatus:
 		body = m.viewStatus()
+	case m.tab == tabChats:
+		body = m.viewChats()
 	case m.tab == tabTokens:
 		body = m.viewTokens()
-	default:
+	case m.tab == tabAudit:
 		body = m.viewAudit()
+	default:
+		body = m.viewHealth()
 	}
 	lines := strings.Split(body, "\n")
 	if h := m.bodyHeight(); len(lines) > h {
@@ -87,6 +95,8 @@ func (m *model) modal(style lipgloss.Style, content string) string {
 // connection describes the server's state as a colored dot and a short label.
 func (m *model) connection() (string, string) {
 	switch {
+	case m.c == nil:
+		return styleDim.Render("●"), "no server"
 	case m.statusErr != nil:
 		return styleErr.Render("●"), "unreachable"
 	case m.checked.IsZero():
@@ -99,11 +109,25 @@ func (m *model) connection() (string, string) {
 	return styleWarn.Render("●"), m.status.State
 }
 
+func (m *model) host() string {
+	if m.c == nil {
+		return ""
+	}
+	if m.profile != "" {
+		return m.profile + " " + styleFaint.Render("("+m.c.base.Host+")")
+	}
+	return m.c.base.Host
+}
+
 func (m *model) viewHeader() string {
 	parts := []string{" " + styleLogo.Render("◆ wame admin")}
 	for i, name := range tabNames {
 		label := fmt.Sprintf("%d %s", i+1, name)
 		switch tab(i) {
+		case tabChats:
+			if n := m.unreadChats(); n > 0 {
+				label += " " + styleAccent.Render(fmt.Sprint(n))
+			}
 		case tabTokens:
 			if n := m.activeTokens(); n > 0 {
 				label += " " + styleDim.Render(fmt.Sprint(n))
@@ -111,6 +135,10 @@ func (m *model) viewHeader() string {
 		case tabAudit:
 			if n := m.recentFailures(); n > 0 {
 				label += " " + styleErr.Render(fmt.Sprintf("✗%d", n))
+			}
+		case tabHealth:
+			if m.healthWarning() {
+				label += " " + styleWarn.Render("!")
 			}
 		}
 		if tab(i) == m.tab {
@@ -121,21 +149,43 @@ func (m *model) viewHeader() string {
 	}
 	left := strings.Join(parts, " ")
 	dot, state := m.connection()
-	right := dot + " " + state + styleFaint.Render("  ·  ") + styleDim.Render(m.c.base.Host)
+	live := ""
+	if m.c != nil {
+		live = styleDim.Render("polling")
+		if m.live.on {
+			live = styleAccent.Render("⚡live")
+		}
+	}
+	latency := ""
 	if m.statusErr == nil && m.latency > 0 {
-		right += styleFaint.Render("  ·  ") + styleDim.Render(fmt.Sprintf("%d ms", m.latency.Milliseconds()))
+		latency = styleDim.Render(fmt.Sprintf("%d ms", m.latency.Milliseconds()))
 	}
-	right += " "
-	gap := m.width - ansi.StringWidth(left) - ansi.StringWidth(right)
-	if gap < 2 {
-		return ansi.Truncate(left+"  "+right, m.width, "…")
+	host := ""
+	if m.c != nil {
+		host = styleDim.Render(cmpOr(m.profile, m.c.base.Host))
 	}
-	return left + strings.Repeat(" ", gap) + right
+	// Longest first; drop detail until it fits next to the tabs.
+	for _, items := range [][]string{
+		{dot + " " + state, styleDim.Render(m.host()), live, latency},
+		{dot + " " + state, host, live, latency},
+		{dot + " " + state, host, live},
+		{dot + " " + state, live},
+		{dot + " " + state},
+	} {
+		right := strings.Join(nonEmpty(items...), styleFaint.Render("  ·  ")) + " "
+		if gap := m.width - ansi.StringWidth(left) - ansi.StringWidth(right); gap >= 2 {
+			return left + strings.Repeat(" ", gap) + right
+		}
+	}
+	return ansi.Truncate(left, m.width, "…")
 }
 
 func (m *model) viewNotice() string {
-	if m.mode == modeFilter {
+	switch m.mode {
+	case modeFilter, modeSearch:
 		return " " + styleAccent.Render("/") + " " + m.prompt.View()
+	case modeCompose:
+		return " " + styleAccent.Render("✎ "+m.chatName(m.msgsChat)) + " " + m.prompt.View()
 	}
 	if m.notice == "" {
 		return ""
@@ -153,13 +203,17 @@ func (m *model) viewNotice() string {
 func (m *model) viewKeys() string {
 	var keys [][2]string
 	switch m.mode {
+	case modeServers:
+		keys = [][2]string{{"j/k", "move"}, {"enter", "connect"}, {"esc", "cancel"}}
 	case modeCreate:
 		keys = [][2]string{{"tab", "next field"}, {"enter", "next / create"}, {"esc", "cancel"}}
 	case modeShowToken:
 		keys = [][2]string{{"c", "copy"}, {"any key", "close"}}
-	case modePair, modeFilter:
+	case modePair, modeFilter, modeSearch:
 		keys = [][2]string{{"enter", "ok"}, {"esc", "cancel"}}
-	case modeConfirmLogout, modeConfirmRevoke:
+	case modeCompose:
+		keys = [][2]string{{"enter", "send"}, {"esc", "cancel"}}
+	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate:
 		keys = [][2]string{{"y", "confirm"}, {"any key", "cancel"}}
 	default:
 		switch m.tab {
@@ -169,12 +223,18 @@ func (m *model) viewKeys() string {
 			} else {
 				keys = append(keys, [2]string{"p", "pair with phone number"})
 			}
+		case tabChats:
+			keys = [][2]string{{"j/k", "chat"}, {"i", "send"}, {"/", "search"}}
 		case tabTokens:
-			keys = [][2]string{{"j/k", "move"}, {"n", "new"}, {"x", "revoke"}}
+			keys = [][2]string{{"j/k", "move"}, {"n", "new"}, {"R", "rotate"}, {"x", "revoke"}}
 		case tabAudit:
 			keys = [][2]string{{"j/k", "move"}, {"g/G", "top/bottom"}, {"/", "filter"}}
 		}
-		keys = append(keys, [2]string{"1-3", "tabs"}, [2]string{"r", "refresh"}, [2]string{"q", "quit"})
+		keys = append(keys, [2]string{"1-5", "tabs"})
+		if len(m.opts.Profiles) > 0 {
+			keys = append(keys, [2]string{"S", "servers"})
+		}
+		keys = append(keys, [2]string{"r", "refresh"}, [2]string{"q", "quit"})
 	}
 	parts := make([]string, len(keys))
 	for i, k := range keys {
@@ -186,6 +246,11 @@ func (m *model) viewKeys() string {
 // card is a bordered box of total width w with a title.
 func card(title string, w int, body string) string {
 	return styleCard.Width(max(w-2, 10)).Render(styleBold.Render(title) + "\n" + body)
+}
+
+// cardSized is a card with a fixed total height, so cards side by side line up.
+func cardSized(title string, w, h int, body string) string {
+	return styleCard.Width(max(w-2, 10)).Height(max(h-2, 1)).Render(styleBold.Render(title) + "\n" + body)
 }
 
 func kv(rows [][2]string) string {
@@ -201,7 +266,10 @@ func kv(rows [][2]string) string {
 }
 
 func (m *model) viewStatus() string {
-	if m.statusErr != nil {
+	if m.c == nil {
+		return ""
+	}
+	if m.statusErr != nil && m.checked.IsZero() || m.statusErr != nil && m.status.State == "" {
 		return indent(card("Can't reach the server", min(m.width-2, 90),
 			styleErr.Render(m.statusErr.Error())+"\n\n"+
 				styleDim.Render("Check the URL and token. Retrying every few seconds.")), " ")
@@ -210,7 +278,6 @@ func (m *model) viewStatus() string {
 		return "  " + styleDim.Render("loading…")
 	}
 	s := m.status
-	colW := max((m.width-3)/2, 36)
 	yes := func(b bool, on, off string) string {
 		if b {
 			return styleAccent.Render("● " + on)
@@ -221,40 +288,122 @@ func (m *model) viewStatus() string {
 	if s.JID != "" {
 		account = styleBold.Render("+" + userOf(s.JID))
 		if s.PushName != "" {
-			account += " " + styleDim.Render(s.PushName)
+			account += " " + styleDim.Render(safe(s.PushName))
 		}
 	}
-	whatsapp := card("WhatsApp", colW, kv([][2]string{
+	whatsapp := panel{"WhatsApp", kv([][2]string{
 		{"Account", account},
 		{"Session", yes(s.LoggedIn, "linked", "not linked")},
 		{"Socket", yes(s.Connected, "connected", "disconnected")},
 		{"State", styleDim.Render(s.State)},
-	}))
-	server := card("Server", colW, kv([][2]string{
+	})}
+	liveState := styleDim.Render("○ polling every " + m.pollEvery().String())
+	if m.live.on {
+		liveState = styleAccent.Render("● live") + styleDim.Render(" since "+m.live.since.Format("15:04"))
+	} else if m.live.err != nil {
+		liveState += styleDim.Render(" (" + fit(m.live.err.Error(), 30) + ")")
+	}
+	version := styleDim.Render("?")
+	if m.stats.Version != "" {
+		version = m.stats.Version + styleDim.Render(", up "+strings.TrimSuffix(relTime(m.stats.Started), " ago"))
+	}
+	server := panel{"Server", kv([][2]string{
 		{"URL", m.c.Server()},
+		{"Version", version},
 		{"Latency", fmt.Sprintf("%d ms", m.latency.Milliseconds())},
-		{"Checked", styleDim.Render(m.checked.Format("15:04:05") + ", every " + pollEvery.String())},
-	}))
-	left := lipgloss.JoinVertical(lipgloss.Left, whatsapp, server)
+		{"Updates", liveState},
+	})}
 
-	var right string
 	switch {
 	case m.pairCode != "":
-		right = card("Pairing code", colW, "\n  "+styleLogo.Render(m.pairCode)+"\n\n"+
-			styleDim.Render("On the phone: WhatsApp → Linked devices →\nLink a device → Link with phone number instead."))
+		return m.besides([]panel{whatsapp, server}, panel{"Pairing code", "\n  " + styleLogo.Render(m.pairCode) + "\n\n" +
+			styleDim.Render("On the phone: WhatsApp → Linked devices →\nLink a device → Link with phone number instead.")})
 	case s.QR != "":
 		var qr strings.Builder
 		qrterminal.GenerateHalfBlock(s.QR, qrterminal.L, &qr)
-		right = card("Scan to log in", colW, styleDim.Render("WhatsApp → Linked devices → Link a device.\nIt refreshes on its own; p pairs by phone number.")+
-			"\n"+strings.TrimRight(qr.String(), "\n"))
-	default:
-		right = lipgloss.JoinVertical(lipgloss.Left, card("Tokens", colW, m.tokenSummary()), card("Activity", colW, m.activitySummary()))
-		if !s.LoggedIn {
-			right = lipgloss.JoinVertical(lipgloss.Left, card("Not linked", colW,
-				styleWarn.Render("No QR yet.")+styleDim.Render(" The server shows one once it\nconnects; or press p to pair with a phone number.")), right)
+		return m.besides([]panel{whatsapp, server}, panel{"Scan to log in", styleDim.Render("WhatsApp → Linked devices → Link a device.\nIt refreshes on its own; p pairs by phone number.") +
+			"\n" + strings.TrimRight(qr.String(), "\n")})
+	}
+	ps := []panel{whatsapp, server, {"Tokens", m.tokenSummary()}, {"Activity", m.activitySummary()},
+		{"Messages, last hour", m.liveSummary()}, {"Health", m.healthSummary()}}
+	if !s.LoggedIn {
+		ps = append([]panel{{"Not linked", styleWarn.Render("No QR yet.") + styleDim.Render(" The server shows one once it connects;\nor press p to pair with a phone number.")}}, ps...)
+	}
+	return m.grid(ps)
+}
+
+// besides stacks panels on the left and puts a tall one (a QR) on the right.
+func (m *model) besides(left []panel, right panel) string {
+	w := max((m.width-2)/2, 36)
+	var cards []string
+	for _, p := range left {
+		cards = append(cards, card(p.title, w, p.body))
+	}
+	return indent(lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.JoinVertical(lipgloss.Left, cards...), " ", card(right.title, w, right.body)), " ")
+}
+
+func (m *model) liveSummary() string {
+	if !m.live.on && len(m.live.recent) == 0 {
+		return styleDim.Render("Counted from the live stream, which isn't connected.")
+	}
+	in, out, top := m.live.counts()
+	lines := []string{kv([][2]string{{"Received", styleBold.Render(fmt.Sprint(in))}, {"Sent", styleBold.Render(fmt.Sprint(out))}})}
+	for i, c := range top {
+		if i == 3 {
+			break
+		}
+		name := m.chatName(c.chat)
+		if name == displayJID(c.chat) && c.name != "" {
+			name = safe(c.name)
+		}
+		lines = append(lines, styleDim.Render(fmt.Sprintf("%3d  ", c.n))+fit(name, 30))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *model) healthWarning() bool {
+	s := m.stats
+	if m.statsAt.IsZero() {
+		return false
+	}
+	recent := func(t time.Time) bool { return !t.IsZero() && time.Since(t) < time.Hour }
+	return recent(s.Limits.Send.LastRejected) || (s.Webhook != nil && (recent(s.Webhook.LastFailure) || s.Webhook.Dropped > 0))
+}
+
+func (m *model) healthSummary() string {
+	switch {
+	case m.statsUnsupported():
+		return styleDim.Render("Update wame on the server for limiter\nand webhook health.")
+	case m.statsAt.IsZero():
+		return styleDim.Render("loading…")
+	}
+	s := m.stats
+	webhook := styleDim.Render("not configured")
+	if w := s.Webhook; w != nil {
+		webhook = styleAccent.Render(fmt.Sprintf("%d delivered", w.Delivered))
+		if w.Failed+w.Dropped > 0 {
+			webhook += styleErr.Render(fmt.Sprintf(", %d lost", w.Failed+w.Dropped))
 		}
 	}
-	return indent(lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right), " ")
+	rejected := styleDim.Render("none")
+	if n := s.Limits.Send.Rejected; n > 0 {
+		rejected = styleErr.Render(fmt.Sprint(n)) + styleDim.Render(", last "+relTime(s.Limits.Send.LastRejected))
+	}
+	return kv([][2]string{
+		{"Sends/min", bar(s.Limits.Send.LastMinute, s.Limits.Send.PerMinute, 14)},
+		{"429s", rejected},
+		{"Webhook", webhook},
+	})
+}
+
+func (m *model) unreadChats() int {
+	n := 0
+	for _, c := range m.chats {
+		if c.Unread > 0 {
+			n++
+		}
+	}
+	return n
 }
 
 func (m *model) activeTokens() int {
@@ -275,7 +424,7 @@ func (m *model) tokenSummary() string {
 	if m.tokensErr != nil {
 		return styleErr.Render(m.tokensErr.Error())
 	}
-	var expiring, revoked int
+	var expiring, revoked, idle int
 	for _, t := range m.tokens {
 		switch {
 		case !tokenLive(t):
@@ -283,14 +432,20 @@ func (m *model) tokenSummary() string {
 		case !t.Expires.IsZero() && time.Until(t.Expires) < 7*24*time.Hour:
 			expiring++
 		}
+		if unused(t) {
+			idle++
+		}
 	}
-	exp := styleDim.Render("0")
-	if expiring > 0 {
-		exp = styleWarn.Render(fmt.Sprint(expiring))
+	warn := func(n int) string {
+		if n > 0 {
+			return styleWarn.Render(fmt.Sprint(n))
+		}
+		return styleDim.Render("0")
 	}
 	return kv([][2]string{
 		{"Active", styleBold.Render(fmt.Sprint(m.activeTokens()))},
-		{"Expiring in 7d", exp},
+		{"Expiring in 7d", warn(expiring)},
+		{"Unused 30d+", warn(idle)},
 		{"Revoked/expired", styleDim.Render(fmt.Sprint(revoked))},
 	})
 }
@@ -341,6 +496,23 @@ func scopeBadges(scopes []string) string {
 	return strings.Join(parts, " ")
 }
 
+// table formats cells into fixed-width columns; the last cell takes the rest of the line.
+func table(cols []int, cells ...string) string {
+	var b strings.Builder
+	for i, c := range cells {
+		if i < len(cols) {
+			b.WriteString(pad(fit(c, cols[i]), cols[i]) + " ")
+		} else {
+			b.WriteString(c)
+		}
+	}
+	return b.String()
+}
+
+func (m *model) selectedRow(line string) string {
+	return " " + styleAccent.Render("▌") + " " + lipgloss.NewStyle().Background(colSel).Width(m.width-3).Render(ansi.Truncate(line, m.width-3, "…"))
+}
+
 func (m *model) viewTokens() string {
 	if m.tokensErr != nil {
 		return indent(card("Tokens", min(m.width-2, 90), styleErr.Render(m.tokensErr.Error())), " ")
@@ -349,20 +521,9 @@ func (m *model) viewTokens() string {
 		return indent(card("No tokens yet", min(m.width-2, 70),
 			styleDim.Render("Press n to create one for an agent, bot or script.\nEach gets its own scopes, chats, rate and expiry.")), " ")
 	}
-	cols := []int{20, 18, 10, 8, 12, 12}
-	row := func(cells ...string) string {
-		var b strings.Builder
-		for i, c := range cells {
-			if i < len(cols) {
-				b.WriteString(pad(fit(c, cols[i]), cols[i]) + " ")
-			} else {
-				b.WriteString(c)
-			}
-		}
-		return b.String()
-	}
+	cols := []int{20, 18, 10, 8, 12, 14}
 	detail := m.tokenDetail()
-	lines := []string{"   " + styleHead.Render(row("NAME", "SCOPES", "CHATS", "RATE", "EXPIRES", "LAST USED", "CREATED BY"))}
+	lines := []string{"   " + styleHead.Render(table(cols, "NAME", "SCOPES", "CHATS", "RATE", "EXPIRES", "LAST USED", "CREATED BY"))}
 	start, end := window(m.tokSel, len(m.tokens), m.bodyHeight()-2-lipgloss.Height(detail))
 	for i := start; i < end; i++ {
 		t := m.tokens[i]
@@ -389,14 +550,16 @@ func (m *model) viewTokens() string {
 		if !t.LastUsed.IsZero() {
 			lastUsed = relTime(t.LastUsed)
 		}
-		createdBy := cmpOr(t.CreatedBy, "owner")
+		if unused(t) {
+			lastUsed = styleWarn.Render(ansi.Strip(lastUsed) + " ⚠")
+		}
 		name, scopes := t.Name, scopeBadges(t.Scopes)
 		if !tokenLive(t) {
 			name, scopes = styleDim.Strikethrough(true).Render(name), styleDim.Render(strings.Join(t.Scopes, " "))
 		}
-		line := row(name, scopes, chats, rate, expires, lastUsed, styleDim.Render(createdBy))
+		line := table(cols, name, scopes, chats, rate, expires, lastUsed, styleDim.Render(cmpOr(t.CreatedBy, "owner")))
 		if i == m.tokSel {
-			lines = append(lines, " "+styleAccent.Render("▌")+" "+lipgloss.NewStyle().Background(colSel).Width(m.width-3).Render(line))
+			lines = append(lines, m.selectedRow(line))
 		} else {
 			lines = append(lines, "   "+line)
 		}
@@ -424,14 +587,17 @@ func (m *model) tokenDetail() string {
 	}
 	created := t.Created.Format("2006-01-02 15:04") + styleDim.Render(" by "+cmpOr(t.CreatedBy, "the owner"))
 	state := styleAccent.Render("● active")
-	if t.Revoked {
+	switch {
+	case t.Revoked:
 		state = styleErr.Render("● revoked")
-	} else if !tokenLive(t) {
+	case !tokenLive(t):
 		state = styleErr.Render("● expired")
+	case unused(t):
+		state = styleWarn.Render("● unused for 30+ days") + styleDim.Render(": consider revoking it")
 	}
 	left := kv([][2]string{{"ID", styleDim.Render(t.ID)}, {"State", state}, {"Scopes", scopeBadges(t.Scopes)}, {"Chats", chats}})
 	right := kv([][2]string{{"Created", created}, {"Expires", expires}, {"Rate", cmpOr(rateText(t.Rate), "global limit only")}})
-	w := min(m.width-2, 120)
+	w := min(m.width-2, 130)
 	return card(t.Name, w, lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width((w-4)/2).Render(left), right))
 }
 
@@ -467,19 +633,8 @@ func (m *model) viewAudit() string {
 		return indent(card("Audit log", min(m.width-2, 90), styleDim.Render(msg)), " ")
 	}
 	cols := []int{2, 13, 16, 13, 22}
-	row := func(cells ...string) string {
-		var b strings.Builder
-		for i, c := range cells {
-			if i < len(cols) {
-				b.WriteString(pad(fit(c, cols[i]), cols[i]) + " ")
-			} else {
-				b.WriteString(c)
-			}
-		}
-		return b.String()
-	}
 	detail := m.auditDetail(entries)
-	lines := []string{"   " + styleHead.Render(row("", "WHEN", "ACTOR", "ACTION", "TARGET", "DETAIL"))}
+	lines := []string{"   " + styleHead.Render(table(cols, "", "WHEN", "ACTOR", "ACTION", "TARGET", "DETAIL"))}
 	start, end := window(m.auditSel, len(entries), m.bodyHeight()-3-lipgloss.Height(detail))
 	for i := start; i < end; i++ {
 		e := entries[i]
@@ -487,9 +642,9 @@ func (m *model) viewAudit() string {
 		if !e.OK {
 			icon, detail = styleErr.Render("✗"), styleErr.Render(strings.Join(nonEmpty(e.Detail, e.Error), " · "))
 		}
-		line := row(icon, styleDim.Render(when(e.At)), e.Actor, actionStyle(e.Action).Render(e.Action), displayJID(e.Target), detail)
+		line := table(cols, icon, styleDim.Render(when(e.At)), e.Actor, actionStyle(e.Action).Render(e.Action), displayJID(e.Target), detail)
 		if i == m.auditSel {
-			lines = append(lines, " "+styleAccent.Render("▌")+" "+lipgloss.NewStyle().Background(colSel).Width(m.width-3).Render(ansi.Truncate(line, m.width-3, "…")))
+			lines = append(lines, m.selectedRow(line))
 		} else {
 			lines = append(lines, "   "+line)
 		}
@@ -524,7 +679,29 @@ func (m *model) auditDetail(entries []store.AuditEntry) string {
 		{"Detail", cmpOr(e.Detail, styleDim.Render("none"))},
 		{"Result", result},
 	}
-	return card(fmt.Sprintf("#%d %s", e.ID, e.Action), min(m.width-2, 120), kv(rows))
+	return card(fmt.Sprintf("#%d %s", e.ID, e.Action), min(m.width-2, 130), kv(rows))
+}
+
+func (m *model) viewServers() string {
+	lines := []string{styleBold.Render("Servers"), styleDim.Render("Saved in ~/.config/wame/servers/NAME.env"), ""}
+	if len(m.opts.Profiles) == 0 {
+		lines = append(lines, styleDim.Render("None saved."))
+	}
+	for i, p := range m.opts.Profiles {
+		mark := "  "
+		if p.Name == m.profile {
+			mark = styleAccent.Render("● ")
+		}
+		line := mark + pad(p.Name, 14) + " " + styleDim.Render(p.Server)
+		if p.Insecure {
+			line += " " + styleWarn.Render("insecure")
+		}
+		if i == m.serverSel {
+			line = lipgloss.NewStyle().Background(colSel).Render(line)
+		}
+		lines = append(lines, line)
+	}
+	return lipgloss.NewStyle().Width(min(m.width-12, 70)).Render(strings.Join(lines, "\n"))
 }
 
 func (m *model) viewForm() string {
@@ -544,10 +721,17 @@ func (m *model) viewForm() string {
 }
 
 func (m *model) viewCreated() string {
-	return styleAccent.Render("✓ Token created") + "\n\n" +
+	title := "✓ Token created"
+	if m.replaced != "" {
+		title = "✓ Token rotated"
+	}
+	out := styleAccent.Render(title) + "\n\n" +
 		lipgloss.NewStyle().Background(colSel).Padding(0, 1).Render(m.created) + "\n\n" +
-		styleWarn.Render("Store it now: it can't be shown again.") + "\n" +
-		styleDim.Render("Send it as  Authorization: Bearer <token>")
+		styleWarn.Render("Store it now: it can't be shown again.") + "\n"
+	if m.replaced != "" {
+		out += styleDim.Render("It replaces "+m.replaced+", which no longer works.") + "\n"
+	}
+	return out + styleDim.Render("Send it as  Authorization: Bearer <token>")
 }
 
 func (m *model) viewPair() string {
@@ -570,6 +754,21 @@ func (m *model) viewConfirmRevoke() string {
 	return styleErr.Render("Revoke "+t.Name+"?") + "\n\n" +
 		"It stops working at once, with every token it created.\nOpen streams close within 10 s. This can't be undone.\n\n" +
 		styleKey.Render("y") + " revoke   " + styleKey.Render("any key") + " cancel"
+}
+
+func (m *model) viewConfirmRotate() string {
+	if m.tokSel >= len(m.tokens) {
+		return ""
+	}
+	t := m.tokens[m.tokSel]
+	r := rotationRequest(t, m.tokens)
+	life := "never expires"
+	if r.ExpiresIn != "" {
+		life = "expires in " + r.ExpiresIn
+	}
+	return styleBold.Render("Rotate "+t.Name+"?") + "\n\n" +
+		"Creates " + styleBold.Render(r.Name) + " with the same scopes, chats and rate\n(" + life + "), shows it once, then revokes " + t.Name + "\nand every token it created.\n\n" +
+		styleKey.Render("y") + " rotate   " + styleKey.Render("any key") + " cancel"
 }
 
 func indent(s, prefix string) string {
@@ -623,6 +822,9 @@ func cmpOr(s, def string) string {
 
 // when is a compact timestamp: the time today, the weekday this week, the date otherwise.
 func when(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
 	now := time.Now()
 	switch {
 	case t.YearDay() == now.YearDay() && t.Year() == now.Year():
@@ -630,7 +832,7 @@ func when(t time.Time) string {
 	case now.Sub(t) < 6*24*time.Hour:
 		return t.Format("Mon 15:04")
 	}
-	return t.Format("Jan 02 15:04")
+	return t.Format("Jan 02")
 }
 
 func displayJID(jid string) string {

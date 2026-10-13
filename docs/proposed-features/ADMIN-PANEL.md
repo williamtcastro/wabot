@@ -5,8 +5,8 @@
 > see the [list of proposals](README.md).
 
 A terminal version now exists: `wame admin` ([ADMIN.md](../ADMIN.md)) covers status, remote
-login, tokens and the audit log over the API. The webhook, limiter, config and log views below
-would serve both.
+login, chats, tokens, the audit log and limiter / webhook health (`GET /stats`, in memory) over the
+API. The persistent delivery log, config and log views below would serve both.
 
 This is a plan for a small web admin panel served by `wame serve`, and a description of the
 logging and audit groundwork that already exists for it.

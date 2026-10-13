@@ -2,6 +2,7 @@
 package admin
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -15,14 +16,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/williamtcastro/wame/internal/api"
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/store"
 )
 
 type Client struct {
-	base  *url.URL
-	token string
-	http  *http.Client
+	base   *url.URL
+	token  string
+	http   *http.Client
+	stream *http.Client
 }
 
 // NewClient checks the server URL. Plain http is only allowed to loopback addresses unless insecure
@@ -42,7 +45,8 @@ func NewClient(server, token string, insecure bool) (*Client, error) {
 		return nil, errors.New("a token is required: set WAME_TOKEN (in the environment, ./.env or ~/.config/wame/admin.env) to the owner secret or an admin token")
 	}
 	u.RawQuery, u.Fragment = "", ""
-	return &Client{base: u, token: token, http: &http.Client{Timeout: 30 * time.Second}}, nil
+	stream := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, ResponseHeaderTimeout: 30 * time.Second}}
+	return &Client{base: u, token: token, http: &http.Client{Timeout: 30 * time.Second}, stream: stream}, nil
 }
 
 func isLoopback(host string) bool {
@@ -183,4 +187,108 @@ func (c *Client) Audit(ctx context.Context, limit int, before int64) ([]store.Au
 	var out []store.AuditEntry
 	err := c.do(ctx, "GET", "audit", q, nil, &out)
 	return out, err
+}
+
+// Stats returns the server's limiter and webhook health (GET /stats).
+func (c *Client) Stats(ctx context.Context) (api.Stats, error) {
+	var s api.Stats
+	err := c.do(ctx, "GET", "stats", nil, nil, &s)
+	return s, err
+}
+
+func (c *Client) Chats(ctx context.Context, limit int) ([]store.Chat, error) {
+	var out []store.Chat
+	err := c.do(ctx, "GET", "chats", url.Values{"limit": {strconv.Itoa(limit)}}, nil, &out)
+	return out, err
+}
+
+// Messages returns the newest messages first, in one chat or (with q) matching a text search.
+func (c *Client) Messages(ctx context.Context, chat, q string, limit int) ([]store.Message, error) {
+	v := url.Values{"limit": {strconv.Itoa(limit)}}
+	if chat != "" {
+		v.Set("chat", chat)
+	}
+	if q != "" {
+		v.Set("q", q)
+	}
+	var out []store.Message
+	err := c.do(ctx, "GET", "messages", v, nil, &out)
+	return out, err
+}
+
+// Send sends a text message. The idempotency key makes a retried request safe.
+func (c *Client) Send(ctx context.Context, to, text, key string) (store.Message, error) {
+	var m store.Message
+	err := c.do(ctx, "POST", "send", nil, map[string]string{"to": to, "text": text, "idempotency_key": key}, &m)
+	return m, err
+}
+
+// Event is one server-sent event from GET /events.
+type Event struct {
+	Type string
+	Data json.RawMessage
+}
+
+// streamIdle is how long a stream may stay silent; the server pings every 25 s.
+const streamIdle = 60 * time.Second
+
+// Events streams the given event types (comma-separated) into out until ctx ends or the stream
+// breaks; connected is called once the server accepts it.
+func (c *Client) Events(ctx context.Context, events string, connected func(), out func(Event)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	u := c.base.JoinPath("events")
+	u.RawQuery = url.Values{"events": {events}}.Encode()
+	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := c.stream.Do(req)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return ue.Err
+		}
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var e struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&e)
+		return &APIError{Code: resp.StatusCode, Msg: e.Error}
+	}
+	connected()
+	idle := time.AfterFunc(streamIdle, cancel)
+	defer idle.Stop()
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 64<<10), 4<<20)
+	var ev Event
+	var data []byte
+	for sc.Scan() {
+		idle.Reset(streamIdle)
+		line := sc.Text()
+		switch {
+		case line == "":
+			if ev.Type != "" && data != nil {
+				ev.Data = data
+				out(ev)
+			}
+			ev, data = Event{}, nil
+		case strings.HasPrefix(line, "event:"):
+			ev.Type = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			data = append(data, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")...)
+		}
+	}
+	if err := sc.Err(); err != nil && ctx.Err() == nil {
+		return err
+	}
+	if ctx.Err() != nil && ctx.Err() != context.Canceled {
+		return ctx.Err()
+	}
+	return errors.New("stream closed")
 }

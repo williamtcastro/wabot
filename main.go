@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -48,8 +49,9 @@ Usage:
   wame token list | revoke NAME       manage API tokens for agents and bots (see docs/API.md)
   wame mcp [-allow-send] [-mcp-token TOKEN]
                                        MCP server over stdio for AI agents (see docs/MCP.md)
-  wame admin [-server URL] [-insecure]
-                                       admin panel for a running server: status, login, tokens, audit
+  wame admin [-profile NAME] [-server URL] [-insecure]
+                                       admin panel for a running server: status, login, chats, tokens,
+                                       audit, health
                                        (WAME_SERVER, WAME_TOKEN: env, ./.env or ~/.config/wame/admin.env)
   wame version                        print the version
   wame logout                         unlink the device and delete the session
@@ -660,17 +662,42 @@ func mcpCommand(ctx context.Context, b *bot.Bot, args []string) error {
 }
 
 // adminCommand opens the admin panel for a server over its HTTP API; it never touches the local database.
-// The server and token come from flags, the environment, ./.env or ~/.config/wame/admin.env, in that order.
+// The server and token come from -profile, or else flags, the environment, ./.env or
+// ~/.config/wame/admin.env, in that order. With nothing set, it offers the saved profiles.
 func adminCommand(args []string) error {
 	fs := flag.NewFlagSet("admin", flag.ExitOnError)
 	fs.Usage = func() { fmt.Println(usage) }
 	server := fs.String("server", "", "")
 	token := fs.String("token", "", "")
+	profile := fs.String("profile", "", "")
 	insecure := fs.Bool("insecure", false, "")
 	_ = fs.Parse(args)
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q (flags go right after 'admin')", fs.Arg(0))
 	}
+	var profiles []admin.Profile
+	if dir := configDir(); dir != "" {
+		var err error
+		if profiles, err = admin.Profiles(filepath.Join(dir, "wame", "servers")); err != nil {
+			return err
+		}
+	}
+	o := admin.Options{Profiles: profiles, Insecure: *insecure, Copy: tui.CopyToClipboard, Bell: func() { _, _ = os.Stderr.WriteString("\a") }}
+
+	if *profile != "" {
+		i := slices.IndexFunc(profiles, func(p admin.Profile) bool { return p.Name == *profile })
+		if i < 0 {
+			return fmt.Errorf("no saved server %q in %s", *profile, filepath.Join(configDir(), "wame", "servers"))
+		}
+		p := profiles[i]
+		c, err := admin.NewClient(p.Server, p.Token, p.Insecure || *insecure)
+		if err != nil {
+			return fmt.Errorf("%s: %w", p.Name, err)
+		}
+		o.Client, o.Profile = c, p.Name
+		return admin.Run(o)
+	}
+
 	sources := []admin.Source{
 		{Name: "flags", Server: *server, Token: *token},
 		{Name: "environment", Server: envOr("WAME_SERVER", ""), Token: envOr("WAME_TOKEN", "")},
@@ -686,13 +713,17 @@ func adminCommand(args []string) error {
 		}
 		sources = append(sources, src)
 	}
-	srv, tok, err := admin.Resolve(sources)
+	srv, tok, fileInsecure, err := admin.Resolve(sources)
 	if err != nil {
 		return err
 	}
-	c, err := admin.NewClient(srv, tok, *insecure)
+	if tok == "" && len(profiles) > 0 {
+		return admin.Run(o)
+	}
+	c, err := admin.NewClient(srv, tok, *insecure || fileInsecure)
 	if err != nil {
 		return err
 	}
-	return admin.Run(c, tui.CopyToClipboard)
+	o.Client = c
+	return admin.Run(o)
 }
