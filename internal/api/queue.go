@@ -2,7 +2,7 @@ package api
 
 import (
 	"cmp"
-	"fmt"
+	"mime"
 	"net/http"
 	"strconv"
 	"time"
@@ -21,29 +21,33 @@ type queueMessage struct {
 	SendAt  time.Time `json:"send_at"`
 }
 
-// enqueue takes {"batch", "text", "send_at", "messages": [{to, text, reply_to, send_at}], "idempotency_key"};
-// the top-level text and send_at are defaults for messages that leave them out.
+// queueBody is POST /queue as JSON; a CSV upload is read into the same shape.
+type queueBody struct {
+	Batch          string         `json:"batch"`
+	Text           string         `json:"text"`
+	SendAt         time.Time      `json:"send_at"`
+	Messages       []queueMessage `json:"messages"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	csv            []bot.QueueRequest
+}
+
+// enqueue takes {"batch", "text", "send_at", "messages": [{to, text, reply_to, send_at}], "idempotency_key"},
+// or a text/csv body with batch, text and send_at in the query (see readQueueCSV); the top-level
+// text and send_at are defaults for messages that leave them out.
 func (a *server) enqueue(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Batch          string         `json:"batch"`
-		Text           string         `json:"text"`
-		SendAt         time.Time      `json:"send_at"`
-		Messages       []queueMessage `json:"messages"`
-		IdempotencyKey string         `json:"idempotency_key"`
+	var req queueBody
+	if ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); ct == "text/csv" {
+		if !readQueueCSV(w, r, &req) {
+			return
+		}
+	} else if !readJSONMax(w, r, &req, maxQueueBody) {
+		return
 	}
-	if !readJSONMax(w, r, &req, maxQueueBody) {
+	reqs, ok := a.queueRequests(w, r, req)
+	if !ok {
 		return
 	}
 	p := principal(r)
-	reqs := make([]bot.QueueRequest, len(req.Messages))
-	for i, m := range req.Messages {
-		to, ok := a.allowedChat(r, m.To)
-		if !ok {
-			writeErr(w, http.StatusForbidden, fmt.Sprintf("messages[%d]: %s", i, errChatForbidden))
-			return
-		}
-		reqs[i] = bot.QueueRequest{To: to, Text: cmp.Or(m.Text, req.Text), ReplyTo: m.ReplyTo, SendAt: cmp.Or(m.SendAt, req.SendAt)}
-	}
 	key := cmp.Or(r.Header.Get("Idempotency-Key"), req.IdempotencyKey)
 	items, err := a.b.Enqueue(p.Name, p.TokenID, req.Batch, key, reqs)
 	if err != nil {
@@ -54,6 +58,52 @@ func (a *server) enqueue(w http.ResponseWriter, r *http.Request) {
 		items[i].Text = ""
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"batch": items[0].Batch, "queued": len(items), "items": items})
+}
+
+// readQueueCSV reads a CSV body (bot.ReadQueueCSV) of at most maxQueueBody bytes and
+// bot.MaxQueueBatch rows, with ?batch, ?text and ?send_at as the body's top-level fields.
+func readQueueCSV(w http.ResponseWriter, r *http.Request, req *queueBody) bool {
+	q := r.URL.Query()
+	req.Batch, req.Text = q.Get("batch"), q.Get("text")
+	if s := q.Get("send_at"); s != "" {
+		t, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			writeError(w, bot.BadInput("?send_at must be an RFC 3339 time like 2026-10-13T09:00:00-03:00"))
+			return false
+		}
+		req.SendAt = t
+	}
+	rows, err := bot.ReadQueueCSV(http.MaxBytesReader(w, r.Body, maxQueueBody), bot.MaxQueueBatch)
+	if tooLarge(w, err) {
+		return false
+	}
+	if err != nil {
+		writeError(w, bot.BadInput("%v", err))
+		return false
+	}
+	req.csv = rows
+	return true
+}
+
+// queueRequests applies the body's defaults and checks every recipient against the caller's
+// allowlist; Enqueue checks the rest.
+func (a *server) queueRequests(w http.ResponseWriter, r *http.Request, req queueBody) ([]bot.QueueRequest, bool) {
+	reqs := req.csv
+	if reqs == nil {
+		reqs = make([]bot.QueueRequest, len(req.Messages))
+		for i, m := range req.Messages {
+			reqs[i] = bot.QueueRequest{To: m.To, Text: m.Text, ReplyTo: m.ReplyTo, SendAt: m.SendAt}
+		}
+	}
+	for i := range reqs {
+		to, ok := a.allowedChat(r, reqs[i].To)
+		if !ok {
+			writeErr(w, http.StatusForbidden, reqs[i].Where(i)+": "+errChatForbidden)
+			return nil, false
+		}
+		reqs[i].To, reqs[i].Text, reqs[i].SendAt = to, cmp.Or(reqs[i].Text, req.Text), cmp.Or(reqs[i].SendAt, req.SendAt)
+	}
+	return reqs, true
 }
 
 // own limits f to the caller's own items unless it has the admin scope.

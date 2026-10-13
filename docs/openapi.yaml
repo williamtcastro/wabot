@@ -557,8 +557,16 @@ paths:
         and backing off on errors, and keeps going after a restart. Top-level text and send_at apply to
         messages that leave theirs out. Tokens limited to chats can only queue to those. See docs/QUEUE.md.
         Requires send.
+
+        With Content-Type text/csv, the body is a CSV file: a header line naming the columns (to
+        required; text, send_at, reply_to; any order and case) and one message per line; batch, text
+        and send_at come from the query. Unknown columns are refused, and errors name the line
+        ("line 7: invalid recipient").
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
+        - { name: batch, in: query, description: "CSV body only: the batch", schema: { type: string, pattern: "^[A-Za-z0-9._-]{1,64}$" } }
+        - { name: text, in: query, description: "CSV body only: text for rows without one", schema: { type: string } }
+        - { name: send_at, in: query, description: "CSV body only: earliest send time for rows without one", schema: { type: string, format: date-time } }
       requestBody:
         required: true
         content:
@@ -583,6 +591,9 @@ paths:
                       reply_to: { type: string }
                       send_at: { type: string, format: date-time }
             example: { batch: promo-october, text: "Hi! Our store opens at 9 tomorrow.", messages: [{ to: "5511999999999" }, { to: "5511988887777", text: "Hi John!" }] }
+          text/csv:
+            schema: { type: string, description: "Header line, then one message per line; at most 1000 rows and 16 MB" }
+            example: "to,text,send_at\n5511999999999,\"Hi Maria, your order is ready.\",\n5511988887777,Hi John!,2026-10-13T09:00:00-03:00\n"
       responses:
         "202":
           description: Queued (or, for a repeated idempotency key, the items queued the first time)
@@ -597,6 +608,8 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: "The idempotency key was used for a different request" }
+        "413": { description: "The body is over 16 MB" }
     get:
       tags: [Queue]
       summary: Queued, sent and failed items

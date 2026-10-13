@@ -480,6 +480,17 @@ curl -H "$H" "localhost:8080/queue?batch=promo-october&status=failed"
 curl -H "$H" -X DELETE "localhost:8080/queue?batch=promo-october"     # cancel what hasn't gone out
 ```
 
+**As CSV.** With `Content-Type: text/csv` the body is a CSV file instead: a header line naming the
+columns (`to` required; `text`, `send_at`, `reply_to`; any order) and one message per line, with
+`batch`, `text` and `send_at` in the query as defaults. Same limits (1000 rows, 16 MB, allowlist per
+row, `Idempotency-Key`); an unknown column is a 400 that names it, and errors name the file's line
+(`line 7: invalid recipient "12"`). See [CSV import](QUEUE.md#csv-import), and `wame queue import`
+for files of any length.
+
+```sh
+curl -H "$H" -H "Content-Type: text/csv" --data-binary @promo.csv "localhost:8080/queue?batch=promo-october"
+```
+
 `GET /queue` lists items newest first (`status`, `batch`, `actor`, `before`, `limit` ≤ 500) with
 `counts` by state; `GET /queue/{id}` shows one; `DELETE /queue/{id}` cancels one (409 once it's
 sending or finished). Without `admin`, a token sees and cancels only its own items.

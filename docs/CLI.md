@@ -120,6 +120,37 @@ must be the owner secret or have the admin scope. Both can also be saved in `./.
 `~/.config/wame/admin.env` ([details](ADMIN.md#saving-the-server-and-token)). Plain `http://` is refused for non-loopback
 addresses unless you pass `-insecure`.
 
+### `wame queue import [-batch NAME] [-text DEFAULT] [-send-at TIME] [-key KEY] [-dry-run] FILE.csv`
+
+Queues the messages of a CSV file on a running server ([format](QUEUE.md#csv-import): a header
+line with `to` and optionally `text`, `send_at`, `reply_to`; one message per line). It checks every
+row first, then sends them in requests of 1000 under one batch, printing each request's result and
+a summary:
+
+```sh
+wame queue import -batch promo-october -text "Hi! Our store opens at 9." promo.csv
+wame queue import -dry-run promo.csv          # check and show the requests, send nothing
+```
+
+| Flag | |
+|---|---|
+| `-batch NAME` | the batch for every row (letters, digits, `.`, `_`, `-`); default `csv-` plus a hash of the key (so reruns share it) |
+| `-text DEFAULT` | text for rows without one |
+| `-send-at TIME` | RFC 3339 time for rows without one, e.g. `2026-10-13T09:00:00-03:00` |
+| `-key KEY` | base of the idempotency keys (`KEY.1`, `KEY.2`, … per request); default from a hash of the file |
+| `-dry-run` | parse and check the file locally and print how it would be sent |
+
+Running the same command again never queues a row twice, so after a failure just run it again. Like
+`wame admin`, it only talks to the HTTP API (the server may be in Docker or elsewhere) and takes
+`-profile`, `-server`, `-token` and `-insecure`, or `WAME_SERVER` / `WAME_TOKEN` from the
+environment, `./.env` or `~/.config/wame/admin.env`; the token needs the `send` scope. Files up to
+64 MB.
+
+### `wame queue status [-batch NAME]`
+
+Prints the queue's counts (queued, sending, sent, delivered, read, failed, canceled), for one batch
+with `-batch`. A token without `admin` sees only what it queued. Same server flags as `queue import`.
+
 ### `wame backup [-keep N] [PATH]`
 
 Copies the database into a new file, safely, even while `serve` or `tui` has it open: it opens the

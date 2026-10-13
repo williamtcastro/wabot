@@ -53,6 +53,11 @@ Usage:
                                        admin panel for a running server: status, login, chats, tokens,
                                        audit, health
                                        (WAME_SERVER, WAME_TOKEN: env, ./.env or ~/.config/wame/admin.env)
+  wame queue import [-batch NAME] [-text DEFAULT] [-send-at TIME] [-key KEY] [-dry-run] FILE.csv
+                                       queue the messages of a CSV file on a running server, 1000 per
+                                       request; safe to run again (see docs/QUEUE.md#csv-import)
+  wame queue status [-batch NAME]     counts of queued, sent and failed messages
+                                       (both take admin's -profile, -server, -token, -insecure)
   wame backup [-keep N] [PATH]        copy the database safely, even while a server has it open
                                        (default: wame-YYYYMMDD-HHMMSS.db next to it; PATH may be a dir/)
   wame version                        print the version
@@ -115,6 +120,12 @@ func main() {
 		return
 	case "backup":
 		exitOn(backupCommand(args))
+		return
+	case "queue":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err := queueCommand(ctx, args, os.Stdout)
+		stop()
+		exitOn(err)
 		return
 	}
 
@@ -783,68 +794,93 @@ func byteSize(n int64) string {
 }
 
 // adminCommand opens the admin panel for a server over its HTTP API; it never touches the local database.
-// The server and token come from -profile, or else flags, the environment, ./.env or
-// ~/.config/wame/admin.env, in that order. With nothing set, it offers the saved profiles.
+// With no token set anywhere, it offers the saved profiles.
 func adminCommand(args []string) error {
 	fs := flag.NewFlagSet("admin", flag.ExitOnError)
 	fs.Usage = func() { fmt.Println(usage) }
-	server := fs.String("server", "", "")
-	token := fs.String("token", "", "")
-	profile := fs.String("profile", "", "")
-	insecure := fs.Bool("insecure", false, "")
+	var sf serverFlags
+	sf.register(fs)
 	_ = fs.Parse(args)
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q (flags go right after 'admin')", fs.Arg(0))
 	}
-	var profiles []admin.Profile
-	if dir := configDir(); dir != "" {
-		var err error
-		if profiles, err = admin.Profiles(filepath.Join(dir, "wame", "servers")); err != nil {
-			return err
-		}
+	target, profiles, err := sf.resolve()
+	if err != nil {
+		return err
 	}
-	o := admin.Options{Profiles: profiles, Insecure: *insecure, Copy: tui.CopyToClipboard, Bell: func() { _, _ = os.Stderr.WriteString("\a") }}
-
-	if *profile != "" {
-		i := slices.IndexFunc(profiles, func(p admin.Profile) bool { return p.Name == *profile })
-		if i < 0 {
-			return fmt.Errorf("no saved server %q in %s", *profile, filepath.Join(configDir(), "wame", "servers"))
-		}
-		p := profiles[i]
-		c, err := admin.NewClient(p.Server, p.Token, p.Insecure || *insecure)
-		if err != nil {
-			return fmt.Errorf("%s: %w", p.Name, err)
-		}
-		o.Client, o.Profile = c, p.Name
+	o := admin.Options{Profiles: profiles, Insecure: sf.insecure, Copy: tui.CopyToClipboard, Bell: func() { _, _ = os.Stderr.WriteString("\a") }}
+	if target.Token == "" && len(profiles) > 0 {
 		return admin.Run(o)
 	}
+	if o.Client, err = target.client(); err != nil {
+		return err
+	}
+	o.Profile = target.Name
+	return admin.Run(o)
+}
 
+// serverFlags are the flags of the commands that talk to a running server over its HTTP API.
+type serverFlags struct {
+	server, token, profile string
+	insecure               bool
+}
+
+func (s *serverFlags) register(fs *flag.FlagSet) {
+	fs.StringVar(&s.server, "server", "", "")
+	fs.StringVar(&s.token, "token", "", "")
+	fs.StringVar(&s.profile, "profile", "", "")
+	fs.BoolVar(&s.insecure, "insecure", false, "")
+}
+
+// serverTarget is the server and token to use; Name is the profile's, when one was picked.
+type serverTarget admin.Profile
+
+func (t serverTarget) client() (*admin.Client, error) {
+	c, err := admin.NewClient(t.Server, t.Token, t.Insecure)
+	if err != nil && t.Name != "" {
+		return nil, fmt.Errorf("%s: %w", t.Name, err)
+	}
+	return c, err
+}
+
+// resolve picks the server and token from -profile, or else flags, the environment, ./.env or
+// ~/.config/wame/admin.env, in that order (admin.Resolve), and also returns the saved profiles.
+func (s serverFlags) resolve() (serverTarget, []admin.Profile, error) {
+	var profiles []admin.Profile
+	dir := configDir()
+	if dir != "" {
+		var err error
+		if profiles, err = admin.Profiles(filepath.Join(dir, "wame", "servers")); err != nil {
+			return serverTarget{}, nil, err
+		}
+	}
+	if s.profile != "" {
+		i := slices.IndexFunc(profiles, func(p admin.Profile) bool { return p.Name == s.profile })
+		if i < 0 {
+			return serverTarget{}, nil, fmt.Errorf("no saved server %q in %s", s.profile, filepath.Join(dir, "wame", "servers"))
+		}
+		t := serverTarget(profiles[i])
+		t.Insecure = t.Insecure || s.insecure
+		return t, profiles, nil
+	}
 	sources := []admin.Source{
-		{Name: "flags", Server: *server, Token: *token},
+		{Name: "flags", Server: s.server, Token: s.token},
 		{Name: "environment", Server: envOr("WAME_SERVER", ""), Token: envOr("WAME_TOKEN", "")},
 	}
 	files := []string{".env"}
-	if dir := configDir(); dir != "" {
+	if dir != "" {
 		files = append(files, filepath.Join(dir, "wame", "admin.env"))
 	}
 	for _, f := range files {
 		src, err := admin.ReadEnvFile(f)
 		if err != nil {
-			return err
+			return serverTarget{}, nil, err
 		}
 		sources = append(sources, src)
 	}
 	srv, tok, fileInsecure, err := admin.Resolve(sources)
 	if err != nil {
-		return err
+		return serverTarget{}, nil, err
 	}
-	if tok == "" && len(profiles) > 0 {
-		return admin.Run(o)
-	}
-	c, err := admin.NewClient(srv, tok, *insecure || fileInsecure)
-	if err != nil {
-		return err
-	}
-	o.Client = c
-	return admin.Run(o)
+	return serverTarget{Source: admin.Source{Server: srv, Token: tok, Insecure: s.insecure || fileInsecure}}, profiles, nil
 }

@@ -37,8 +37,7 @@ func readJSONMax(w http.ResponseWriter, r *http.Request, v any, limit int64) boo
 			}
 		}
 	}
-	if tooBig, ok := errors.AsType[*http.MaxBytesError](err); ok {
-		writeErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("body is larger than %d bytes", tooBig.Limit))
+	if tooLarge(w, err) {
 		return false
 	}
 	if err != nil {
@@ -46,6 +45,15 @@ func readJSONMax(w http.ResponseWriter, r *http.Request, v any, limit int64) boo
 		return false
 	}
 	return true
+}
+
+// tooLarge answers 413 when err is a body over its http.MaxBytesReader limit.
+func tooLarge(w http.ResponseWriter, err error) bool {
+	tooBig, ok := errors.AsType[*http.MaxBytesError](err)
+	if ok {
+		writeErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("body is larger than %d bytes", tooBig.Limit))
+	}
+	return ok
 }
 
 func respond(w http.ResponseWriter, v any, err error) {

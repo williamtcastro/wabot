@@ -47,6 +47,72 @@ It doesn't send files, reactions or edits (use the direct routes). It takes at m
 per request (repeat the request with the same `batch` for more), and at most 10,000 waiting per
 token, so a misbehaving client can't fill the disk.
 
+## CSV import
+
+A spreadsheet export works too. `POST /queue` takes the same messages as a CSV file when sent with
+`Content-Type: text/csv`, and `wame queue import` sends a file of any length from the command line.
+
+```csv
+to,text,send_at,reply_to
+5511999999999,"Hi Maria, your order is ready.",,
+5511988887777,"Hi John!
+See you at 9.",2026-10-13T09:00:00-03:00,
+552187654321,,,
+```
+
+- **The first line names the columns**, in any order and any case: `to` (required), `text`,
+  `send_at` (RFC 3339) and `reply_to`. Any other column is refused with its name, so a typo like
+  `txet` can't silently drop the text. Leave out the columns you don't need.
+- **One message per line.** Fields with commas, quotes or line breaks go in double quotes (`""` for
+  a quote inside), as every spreadsheet writes them. A UTF-8 BOM, Windows line ends, spaces around
+  fields and blank lines are all fine.
+- A row without `text` (like Ana's above) gets the default text; without `send_at`, the default time
+  or as soon as the limits allow.
+- **Errors name the line** of the file, like `line 7: invalid recipient "12"`, and nothing in the
+  request is queued.
+- A number a spreadsheet turned into scientific notation (`5.511999E+12`) has lost digits and is
+  refused; format the `to` column as text before exporting.
+
+```sh
+curl -H "Authorization: Bearer $T" -H "Content-Type: text/csv" -H "Idempotency-Key: promo-oct-1" \
+  --data-binary @promo.csv "localhost:8080/queue?batch=promo-october&text=Hi!%20Our%20store%20opens%20at%209."
+```
+
+The query takes `batch`, `text` and `send_at` (the defaults, like the JSON body's top-level fields);
+the limits are the JSON form's: 1000 rows and 16 MB per request, the token's allowlist checked on
+every row, and `Idempotency-Key` to make a retry safe. Use `--data-binary`, not `-d`, which drops
+the line breaks.
+
+**From the command line**, `wame queue import` reads the file, checks every row locally (columns,
+numbers, times, text length) and sends it to the server in requests of 1000 rows, all under one
+batch:
+
+```sh
+wame queue import -batch promo-october -text "Hi! Our store opens at 9." promo.csv
+# 1/3: lines 2-1001: queued 1000
+# 2/3: lines 1002-2001: queued 1000
+# 3/3: lines 2002-2341: queued 340
+# queued 2340 messages, batch promo-october (follow it with: wame queue status -batch promo-october)
+wame queue status -batch promo-october
+# batch promo-october: queued 2210, sending 0, sent 130 (delivered 120, read 41), failed 0, canceled 0
+```
+
+It talks to the server over the API, like [`wame admin`](ADMIN.md) (same `-profile`, `-server`,
+`-token`, `WAME_SERVER` / `WAME_TOKEN`, `./.env` and `admin.env`), so it works with a server in
+Docker or on another machine; the token needs the `send` scope. `-dry-run` checks the file and
+shows how it would be split, without sending anything.
+
+**Running it again is safe.** Each request carries an idempotency key, `-key` plus the request's
+number (`promo-oct.1`, `promo-oct.2`, …) or, without `-key`, one taken from a hash of the file;
+without `-batch`, the batch name comes from the key, so a rerun lands in the same batch. If an import stops halfway (the network
+dropped, the token hit its limit), run the same command again: the requests that already went
+through return what they queued instead of queuing it twice, and the rest are sent. A changed file
+gets new keys (a new import). Under the same `-key`, a request whose rows differ from what was
+queued under its key is refused with 409 (rows only added at the end go through, so a file that
+grew can be sent again). The server remembers the keys as long as it keeps the items, 7 days after
+they finish. `-text` and `-send-at` are filled in before sending, so changing them is a change of
+the rows too.
+
 ## States
 
 ```
@@ -120,7 +186,7 @@ queued itself; with `admin`, every item (`?actor=` narrows it).
 
 | Route | |
 |---|---|
-| `POST /queue` | queue up to 1000 messages. Body: `messages` (each `to`, `text`, optional `reply_to` and `send_at`), optional `batch` (letters, digits, `.`, `_`, `-`; generated when left out), and top-level `text` / `send_at` used by messages that leave theirs out. Answers 202 with the items (without text) |
+| `POST /queue` | queue up to 1000 messages. Body: `messages` (each `to`, `text`, optional `reply_to` and `send_at`), optional `batch` (letters, digits, `.`, `_`, `-`; generated when left out), and top-level `text` / `send_at` used by messages that leave theirs out. Or a [CSV file](#csv-import) as `text/csv`. Answers 202 with the items (without text) |
 | `GET /queue` | items, newest first, plus `counts` by state. Query: `status`, `batch`, `actor` (admin), `before` (id, to page), `limit` (≤ 500) |
 | `GET /queue/{id}` | one item, with its text |
 | `DELETE /queue/{id}` | cancel a queued item (409 when it's already sending or finished) |

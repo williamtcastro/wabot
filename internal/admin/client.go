@@ -4,6 +4,7 @@ package admin
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -71,7 +72,7 @@ func (e *APIError) Error() string {
 	case http.StatusUnauthorized:
 		return "the server rejected the token (401)"
 	case http.StatusForbidden:
-		return "this token can't do that, it needs the admin scope (403): " + e.Msg
+		return "this token can't do that (403): " + cmp.Or(e.Msg, "it needs the admin scope")
 	}
 	if e.Msg == "" {
 		return http.StatusText(e.Code)
@@ -86,25 +87,29 @@ func isNotFound(err error) bool {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
-	u := c.base.JoinPath(path)
-	u.RawQuery = query.Encode()
-	var rd io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		rd = bytes.NewReader(data)
+	if body == nil {
+		return c.send(ctx, c.http, method, path, query, nil, nil, out)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), rd)
+	data, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	return c.send(ctx, c.http, method, path, query, bytes.NewReader(data), http.Header{"Content-Type": {"application/json"}}, out)
+}
+
+// send makes one request with a raw body on hc and decodes a 2xx JSON answer into out.
+func (c *Client) send(ctx context.Context, hc *http.Client, method, path string, query url.Values, body io.Reader, header http.Header, out any) error {
+	u := c.base.JoinPath(path)
+	u.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
+	if err != nil {
+		return err
 	}
-	resp, err := c.http.Do(req)
+	for k, v := range header {
+		req.Header[k] = v
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := hc.Do(req)
 	if err != nil {
 		if ue, ok := errors.AsType[*url.Error](err); ok {
 			return ue.Err
@@ -340,6 +345,43 @@ func (c *Client) Queue(ctx context.Context, status string, limit int) (QueuePage
 	}
 	var out QueuePage
 	err := c.do(ctx, "GET", "queue", q, nil, &out)
+	return out, err
+}
+
+// QueueCounts returns the counts by state of the caller's queued items (every token's, for an admin),
+// in one batch when batch is set.
+func (c *Client) QueueCounts(ctx context.Context, batch string) (store.OutboxCounts, error) {
+	q := url.Values{"limit": {"1"}}
+	if batch != "" {
+		q.Set("batch", batch)
+	}
+	var out QueuePage
+	err := c.do(ctx, "GET", "queue", q, nil, &out)
+	return out.Counts, err
+}
+
+// QueueResult is the answer of POST /queue; items come without their text.
+type QueueResult struct {
+	Batch  string             `json:"batch"`
+	Queued int                `json:"queued"`
+	Items  []store.OutboxItem `json:"items"`
+}
+
+// QueueCSV queues the messages of a CSV file (at most 1000 rows, see docs/QUEUE.md) under batch;
+// the idempotency key makes a retry return the items already queued instead of adding them again.
+func (c *Client) QueueCSV(ctx context.Context, csv []byte, batch, key string) (QueueResult, error) {
+	var q url.Values
+	if batch != "" {
+		q = url.Values{"batch": {batch}}
+	}
+	h := http.Header{"Content-Type": {"text/csv; charset=utf-8"}}
+	if key != "" {
+		h.Set("Idempotency-Key", key)
+	}
+	var out QueueResult
+	// c.stream has no overall timeout, so a large upload on a slow link isn't cut off; the answer
+	// still has to start within 30 s of the upload ending.
+	err := c.send(ctx, c.stream, "POST", "queue", q, bytes.NewReader(csv), h, &out)
 	return out, err
 }
 

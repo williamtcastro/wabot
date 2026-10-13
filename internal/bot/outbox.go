@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	maxQueueBatch    = 1000
+	MaxQueueBatch    = 1000
 	maxQueueOpen     = 10000
 	maxQueueText     = 65536
 	maxQueueAhead    = 30 * 24 * time.Hour
@@ -35,19 +35,30 @@ const (
 )
 
 var (
-	batchName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+	batchName    = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+	errBatchName = BadInput("batch must be 1-64 letters, digits, '.', '_' or '-'")
 
 	// ErrKeyReused rejects a repeated idempotency key whose request differs: silently returning the
 	// first result would hide a bug in the caller.
 	ErrKeyReused = errors.New("idempotency key was already used for a different request")
 )
 
-// QueueRequest is one message to queue. A zero SendAt means as soon as the limits allow.
+// QueueRequest is one message to queue. A zero SendAt means as soon as the limits allow. Line is
+// set for messages read from a CSV file, so errors can point at it.
 type QueueRequest struct {
 	To      string
 	Text    string
 	ReplyTo string
 	SendAt  time.Time
+	Line    int
+}
+
+// Where names the i-th message of a request in errors: its CSV line, or its index.
+func (r QueueRequest) Where(i int) string {
+	if r.Line > 0 {
+		return fmt.Sprintf("line %d", r.Line)
+	}
+	return fmt.Sprintf("messages[%d]", i)
 }
 
 // QueueEvent is published (and sent to the webhook as event "queue") when an item changes state.
@@ -173,17 +184,17 @@ func (b *Bot) Enqueue(actor, tokenID, batch, key string, reqs []QueueRequest) (i
 	switch {
 	case len(reqs) == 0:
 		return nil, BadInput("no messages given")
-	case len(reqs) > maxQueueBatch:
-		return nil, BadInput("at most %d messages per request", maxQueueBatch)
+	case len(reqs) > MaxQueueBatch:
+		return nil, BadInput("at most %d messages per request", MaxQueueBatch)
 	case !batchName.MatchString(batch):
-		return nil, BadInput("batch must be 1-64 letters, digits, '.', '_' or '-'")
+		return nil, errBatchName
 	case len(key) > MaxKeyLength:
 		return nil, BadInput("idempotency key is longer than %d characters", MaxKeyLength)
 	}
 	rows := make([]store.OutboxItem, len(reqs))
 	for i, r := range reqs {
-		if err := validQueueRequest(r); err != nil {
-			return nil, BadInput("messages[%d]: %v", i, err)
+		if err := CheckQueueRequest(r); err != nil {
+			return nil, BadInput("%s: %v", r.Where(i), err)
 		}
 		rows[i] = store.OutboxItem{Batch: batch, Actor: actor, TokenID: tokenID, To: strings.TrimSpace(r.To), Text: r.Text, ReplyTo: r.ReplyTo, Due: r.SendAt}
 		if key != "" {
@@ -210,7 +221,16 @@ func (b *Bot) Enqueue(actor, tokenID, batch, key string, reqs []QueueRequest) (i
 	return items, nil
 }
 
-func validQueueRequest(r QueueRequest) error {
+// CheckBatch accepts 1-64 letters, digits, '.', '_' or '-'.
+func CheckBatch(name string) error {
+	if !batchName.MatchString(name) {
+		return errBatchName
+	}
+	return nil
+}
+
+// CheckQueueRequest is Enqueue's check of one message, for callers that report errors their own way.
+func CheckQueueRequest(r QueueRequest) error {
 	switch {
 	case strings.TrimSpace(r.Text) == "":
 		return errors.New("text is empty")
