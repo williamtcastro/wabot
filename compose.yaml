@@ -1,4 +1,4 @@
-# docker compose up -d, after setting WAME_TOKEN (e.g. in a .env file next to this one).
+# docker compose up -d, after copying .env.example to .env and setting WAME_TOKEN.
 # First login: docker compose run --rm wame login   (or remotely: wame admin, see docs/DOCKER.md)
 services:
   wame:
@@ -7,6 +7,11 @@ services:
     restart: unless-stopped
     environment:
       WAME_TOKEN: ${WAME_TOKEN:?set WAME_TOKEN to an owner secret of 16+ characters}
+      WAME_WEBHOOK: ${WAME_WEBHOOK:-}
+      WAME_WEBHOOK_SECRET: ${WAME_WEBHOOK_SECRET:-}
+      WAME_WEBHOOK_FILTER: ${WAME_WEBHOOK_FILTER:-}
+      WAME_RATE: ${WAME_RATE:-}
+      WAME_LOG_FORMAT: ${WAME_LOG_FORMAT:-}
     ports:
       - "127.0.0.1:8080:8080"
     volumes:

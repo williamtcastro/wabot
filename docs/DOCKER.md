@@ -27,7 +27,7 @@ goes to the server and to whoever connects to it:
 
 ```sh
 openssl rand -hex 24                                    # prints e.g. 3f9c…e1a7
-echo "WAME_TOKEN=<that value>" > .env                   # Compose reads it from here
+cp .env.example .env                                    # then set WAME_TOKEN=<that value> in it
 docker run … -e WAME_TOKEN=<that value> … wame          # or pass it to docker run
 ```
 
@@ -110,9 +110,19 @@ the one-line switch to a host folder (add `user: "1000:1000"` with your uid and 
 folder as above).
 
 ```sh
-echo "WAME_TOKEN=$(openssl rand -hex 24)" > .env    # keep .env out of git
+cp .env.example .env    # set WAME_TOKEN (openssl rand -hex 24); .env is git-ignored
 docker compose run --rm wame login
 docker compose up -d
+```
+
+[`.env.example`](../.env.example) lists the keys: `WAME_TOKEN` (required), and the optional
+webhook, rate and log settings, which Compose passes to the container. `WAME_SERVER` is the URL
+`wame admin` connects to; the server ignores it. To reuse the same file for `wame admin` on your
+machine, load it into the shell:
+
+```sh
+set -a; . ./.env; set +a
+wame admin            # uses WAME_SERVER and WAME_TOKEN
 ```
 
 ## Logging in without a terminal on the server

@@ -44,7 +44,7 @@ revoked along with it.
 
 | Flag | Env | Default | |
 |---|---|---|---|
-| `-server URL` | `WAME_SERVER` | `http://127.0.0.1:8080` | the server's base URL; a path prefix behind a reverse proxy works (`https://example.com/wame`). Without a scheme, `https://` is assumed |
+| `-server URL` | `WAME_SERVER` (also in [`.env.example`](../.env.example)) | `http://127.0.0.1:8080` | the server's base URL; a path prefix behind a reverse proxy works (`https://example.com/wame`). Without a scheme, `https://` is assumed |
 | `-token TOKEN` | `WAME_TOKEN` | | the owner secret or an admin token. Prefer the env variable: flags show up in `ps` |
 | `-insecure` | | `false` | allow plain `http://` to a non-loopback address |
 

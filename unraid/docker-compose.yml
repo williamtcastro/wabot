@@ -1,0 +1,32 @@
+# Same container as unraid/my-wame.xml (what actually runs on tardis), for reference or a non-Unraid
+# host with the same VLAN networks. Secrets come from .env: WAME_TOKEN (and WAME_WEBHOOK_SECRET).
+services:
+  wame:
+    build:
+      context: ..
+    image: local/wame:latest
+    container_name: wame
+    restart: unless-stopped
+    user: "99:100"
+    mem_limit: 512m
+    labels:
+      diun.enable: "false"
+    environment:
+      WAME_TOKEN: ${WAME_TOKEN:?set WAME_TOKEN}
+      WAME_DB: /data/wame.db
+      WAME_ADDR: 0.0.0.0:8080
+      WAME_RATE: "20"
+      WAME_WEBHOOK: ${WAME_WEBHOOK:-}
+      WAME_WEBHOOK_SECRET: ${WAME_WEBHOOK_SECRET:-}
+      WAME_WEBHOOK_FILTER: ${WAME_WEBHOOK_FILTER:-}
+      WAME_LOG_FORMAT: text
+      TZ: America/Sao_Paulo
+    volumes:
+      - /mnt/nvme_cache/appdata/wame:/data
+    networks:
+      br0.10:
+        ipv4_address: 10.0.10.21
+
+networks:
+  br0.10:
+    external: true
