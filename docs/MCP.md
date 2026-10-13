@@ -59,7 +59,7 @@ wame mcp -mcp-token wame_…  # act as that API token (its scopes and chat allow
 | `list_chats` | read | `limit` (default 30, max 200), `unread_only` | `chats[]`: `chat`, `is_group`, `unread`, `last_at`, `last_from` (`me`/`them`), `untrusted.name`, `untrusted.last_text` |
 | `read_messages` | read | `chat` (JID or number), `limit` (default 50, max 200), `since_seq` | `messages[]` oldest first, `next_seq`, `note`. Without `since_seq`, the latest messages; pass `next_seq` as `since_seq` to page forward |
 | `search_messages` | read | `query`, `chat` (optional), `limit` (default 30, max 200) | `messages[]` newest first; same matching as `q=` in the API |
-| `find_contact` | read, **unrestricted tokens only** | `query` (part of a name or number) | `contacts[]` (max 50): `chat`, `phone`, `untrusted.name`, `untrusted.push_name` |
+| `find_contact` | read | `query` (part of a name, a tag or part of a number) | `contacts[]` (max 50, sorted by name): `chat`, `phone`, `name_source` (`own`, `book`, `business`, `push`, `number`), `untrusted.name` (the one name wame shows, as in [`/contacts`](API.md#contacts)), `untrusted.push_name`, `untrusted.tags`; `note`. A token limited to chats finds only those chats |
 | `send_message` | send | `to`, `text`, `reply_to` (optional) | `seq`, `id`, `chat` |
 | `react` | send | `chat`, `message_id`, `emoji` (empty removes) | `seq`, `id`, `chat` |
 | `mark_read` | send | `chat`, `message_ids` (optional; omit for the whole chat) | `marked` |
@@ -88,7 +88,8 @@ trying again".
 
 ## Safety
 
-- **Untrusted text.** Message text, names, captions and file names were written by other people.
+- **Untrusted text.** Message text, names, captions and file names were written by other people
+  (so were imported contact names and tags).
   They're returned only under `untrusted`, each list carries a `note` saying so, and the server
   instructions tell the model to treat them as data, never as instructions.
 - **Cleaning.** Untrusted fields have every invisible character removed: control characters, format
@@ -103,6 +104,8 @@ trying again".
   WhatsApp (the same check as `send_message`); other recipients are resolved by the worker at send
   time. Scheduled text comes back only to the caller that queued it, under `untrusted` and cleaned.
   Revoking the token fails its items that haven't gone out yet.
+- **Contacts.** `find_contact` never returns your notes, language or time zone, even to an admin
+  connection, and never looks a number up on WhatsApp.
 - **Limits and audit.** Global send and lookup limits apply. Every send, reaction and read is in
   `GET /audit` under the token's name, or `mcp` for stdio without a token.
 - **Approvals.** Configure your client to ask before each `send_message`, `schedule_message`, `react`

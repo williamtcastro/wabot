@@ -39,6 +39,7 @@ tags:
   - name: Messaging
   - name: Reading
   - name: Directory
+  - name: Contacts
   - name: Queue
   - name: Admin
   - name: Tokens
@@ -456,10 +457,16 @@ paths:
 
   /contacts:
     get:
-      tags: [Directory]
-      summary: Address-book contacts synced from the phone
+      tags: [Contacts]
+      summary: People from the address book and your own contact list
+      description: |
+        Merged and sorted by name, with one name per person (own > address book > business > ~push name > +number).
+        Never includes notes and never asks WhatsApp. Tokens limited to chats get only those chats. Requires read.
       parameters:
-        - { name: q, in: query, schema: { type: string }, description: "Filter by name or part of the number." }
+        - { name: q, in: query, schema: { type: string }, description: "Part of a name, a tag or part of the number." }
+        - { name: tag, in: query, schema: { type: array, items: { type: string } }, style: form, explode: true, description: "Only people with every tag given (repeat, or separate with commas)." }
+        - { name: known, in: query, schema: { type: boolean }, description: "Leave out people known only by push name or number." }
+        - { name: limit, in: query, schema: { type: integer, default: 1000, maximum: 5000 } }
       responses:
         "200":
           description: Contacts sorted by name
@@ -468,6 +475,128 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Contact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      tags: [Contacts]
+      summary: Empty your own contact list
+      description: The phone's address book isn't touched. Audited as contact_delete_all. Requires admin.
+      parameters:
+        - { name: all, in: query, required: true, schema: { type: boolean, enum: [true] }, description: "Must be true; without it the request is refused." }
+      responses:
+        "200": { description: Deleted, content: { application/json: { schema: { type: object, properties: { deleted: { type: integer, description: "How many people were in the list" } } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /contacts/tags:
+    get:
+      tags: [Contacts]
+      summary: Your tags with how many people have each
+      description: Requires read; not available to tokens limited to chats.
+      responses:
+        "200":
+          description: Tags
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/TagCount" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /contacts/{number}:
+    parameters:
+      - { name: number, in: path, required: true, schema: { type: string }, description: "Number (5511999999999, +5511999999999) or URL-escaped JID", example: "5511999999999" }
+    get:
+      tags: [Contacts]
+      summary: One person
+      description: |
+        Never asks WhatsApp; someone wame knows nothing about is still a 200. own (your fields, notes included) is
+        only returned to admin. Tokens limited to chats get 403 for anyone outside their list. Requires read.
+      responses:
+        "200": { description: The person, content: { application/json: { schema: { $ref: "#/components/schemas/ContactView" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      tags: [Contacts]
+      summary: Replace your own fields for a person
+      description: |
+        Fields left out are cleared; all empty removes the person from your list. While logged in, a number is
+        resolved once on WhatsApp. Audited as contact_set. Requires admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ContactInput" }
+            example: { name: Maria, tags: [clients, vip], notes: "prefers mornings", language: pt-BR, time_zone: America/Sao_Paulo }
+      responses:
+        "200": { description: The person, content: { application/json: { schema: { $ref: "#/components/schemas/ContactView" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { description: "The body is over 64 KB" }
+    patch:
+      tags: [Contacts]
+      summary: Change some of your own fields for a person
+      description: |
+        Only the fields given change; null or "" clears one. add_tags and remove_tags edit the tags without
+        overwriting the others. Never asks WhatsApp. Audited as contact_set. Requires admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ContactInput" }
+            example: { add_tags: [vip], notes: null }
+      responses:
+        "200": { description: The person, content: { application/json: { schema: { $ref: "#/components/schemas/ContactView" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { description: "The body is over 64 KB" }
+    delete:
+      tags: [Contacts]
+      summary: Remove your own fields for a person
+      description: Audited as contact_delete. Requires admin.
+      responses:
+        "200": { description: Deleted, content: { application/json: { schema: { type: object, properties: { deleted: { type: boolean } } } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /contacts/import:
+    post:
+      tags: [Contacts]
+      summary: Import your own contact list from a CSV
+      description: |
+        Header line naming the columns (number required, also as to or phone; name, tags, notes, language, time_zone;
+        any order and case; "," or ";" between fields), then one person per line. A column present overwrites that
+        field (an empty cell clears it); absent columns are left alone. Numbers are never looked up. One transaction:
+        any bad line is a 400 naming it and nothing is stored. Audited as contact_import. Requires admin.
+      parameters:
+        - { name: dry_run, in: query, schema: { type: boolean }, description: "Check and count without storing" }
+        - { name: add_tags, in: query, schema: { type: string }, description: "Tags added to every row (comma-separated)" }
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema: { type: string, description: "At most 5000 rows and 4 MB" }
+            example: "number,name,tags,notes\n5511999999999,Maria,clients vip,\n5511988887777,John,clients,\"prefers mornings\"\n"
+      responses:
+        "200": { description: Counts, content: { application/json: { schema: { $ref: "#/components/schemas/ImportResult" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { description: "The body is over 4 MB" }
+
+  /contacts/export:
+    get:
+      tags: [Contacts]
+      summary: Your own contact list as a CSV
+      description: The import's columns (number, name, tags, notes, language, time_zone), so a round trip is lossless. Holds your notes. Requires admin.
+      responses:
+        "200": { description: The CSV, content: { text/csv: { schema: { type: string } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
@@ -1173,10 +1302,59 @@ components:
     Contact:
       type: object
       properties:
+        jid: { type: string, example: "5511999999999@s.whatsapp.net" }
+        phone: { type: string, example: "+5511999999999", description: "Empty for a person known only by a hidden @lid id" }
+        name: { type: string, description: "The one name every view shows", example: "Maria" }
+        name_source: { type: string, enum: [own, book, business, push, number] }
+        own_name: { type: string, description: "Your own name for them, when set" }
+        book_name: { type: string, description: "The phone's address-book name, when known" }
+        business_name: { type: string }
+        push_name: { type: string, description: "The name they set in WhatsApp" }
+        tags: { type: array, items: { type: string }, example: [clients, vip] }
+    ContactView:
+      allOf:
+        - $ref: "#/components/schemas/Contact"
+        - type: object
+          properties:
+            own:
+              description: Your own fields; admin only, absent when you wrote nothing about them
+              allOf: [{ $ref: "#/components/schemas/OwnContact" }]
+    OwnContact:
+      type: object
+      properties:
         jid: { type: string }
-        phone: { type: string, example: "+5511999999999" }
         name: { type: string }
-        push_name: { type: string }
+        tags: { type: array, items: { type: string } }
+        notes: { type: string }
+        language: { type: string, example: pt-BR }
+        time_zone: { type: string, example: America/Sao_Paulo }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: string }
+    ContactInput:
+      type: object
+      additionalProperties: false
+      description: In a PUT a field left out is cleared; in a PATCH it's left alone, and null or "" clears it.
+      properties:
+        name: { type: string, nullable: true, maxLength: 100 }
+        tags: { type: array, nullable: true, maxItems: 20, items: { type: string, pattern: "^[a-z0-9][a-z0-9_-]{0,31}$" } }
+        notes: { type: string, nullable: true, maxLength: 2000 }
+        language: { type: string, nullable: true, maxLength: 16, example: pt-BR }
+        time_zone: { type: string, nullable: true, maxLength: 64, example: America/Sao_Paulo }
+        add_tags: { type: array, items: { type: string }, description: "PATCH only" }
+        remove_tags: { type: array, items: { type: string }, description: "PATCH only" }
+    ImportResult:
+      type: object
+      properties:
+        added: { type: integer }
+        updated: { type: integer }
+        unchanged: { type: integer }
+    TagCount:
+      type: object
+      properties:
+        tag: { type: string, example: clients }
+        count: { type: integer, example: 12 }
     Token:
       type: object
       description: An API token as stored. The secret and its hash are never returned.
@@ -1367,7 +1545,7 @@ components:
         id: { type: integer, format: int64 }
         at: { type: string, format: date-time }
         actor: { type: string, description: "Token name for API/MCP calls (api = owner secret or token-less, mcp = stdio without a token), or tui, cli, autoreply, whatsapp", example: "support-bot" }
-        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel, optout_add, optout_remove, alert_test] }
+        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel, optout_add, optout_remove, alert_test, contact_set, contact_delete, contact_import, contact_delete_all] }
         target: { type: string, description: "Chat JID, when there is one" }
         detail: { type: string, example: "text, 6 chars" }
         ok: { type: boolean }

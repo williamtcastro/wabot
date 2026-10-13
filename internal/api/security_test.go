@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +107,44 @@ func TestF4RestrictedTokensDontSpendLookups(t *testing.T) {
 	}
 	if _, err := b.Lookups.Reserve("lookup"); err != nil {
 		t.Fatalf("restricted probes used up the shared lookup budget: %v", err)
+	}
+}
+
+// GET /contacts was 403 for tokens limited to chats; it's now filtered to the allowlist, and
+// nothing a restricted token sends about contacts is looked up on WhatsApp.
+func TestRestrictedContacts(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "")
+	admin := bearer(issue(t, b, "boss", []auth.Scope{auth.Admin}, nil, 0))
+	mariaBot := bearer(issue(t, b, "maria-bot", []auth.Scope{auth.Read, auth.Send}, []string{maria}, 0))
+	for _, to := range []string{maria, john, ana} {
+		if w := doJSON(h, "PUT", "/contacts/"+to, `{"name":"x","tags":["clients"],"notes":"private"}`, admin); w.Code != 200 {
+			t.Fatalf("PUT = %d %s", w.Code, w.Body)
+		}
+	}
+	lookups := func() bot.LimiterStats { s := b.Lookups.Stats(); s.NextFree = time.Time{}; return s }
+	before := lookups()
+
+	for _, target := range []string{"/contacts", "/contacts?tag=clients", "/contacts?q=55", "/contacts?known=1"} {
+		w := do(h, "GET", target, mariaBot)
+		if got := contactList(t, w); len(got) != 1 || got[0] != maria || strings.Contains(w.Body.String(), "private") {
+			t.Errorf("restricted %s = %s", target, w.Body)
+		}
+	}
+	if w := do(h, "GET", "/contacts/tags", mariaBot); w.Code != http.StatusForbidden {
+		t.Errorf("restricted /contacts/tags = %d, want 403 (counts span every contact)", w.Code)
+	}
+	for _, probe := range []string{"5511988887777", john, "5521911112222", "+55 21 93333-4444", "120363012345678901@g.us"} {
+		w := do(h, "GET", "/contacts/"+url.PathEscape(probe), mariaBot)
+		if w.Code != http.StatusForbidden || errorOf(w) != errChatForbidden {
+			t.Errorf("restricted /contacts/%s = %d %s; want the fixed 403", probe, w.Code, w.Body)
+		}
+	}
+	if v := contactView(t, do(h, "GET", "/contacts/5511999999999", mariaBot)); v.JID != maria || v.Own != nil {
+		t.Errorf("restricted own chat = %+v", v)
+	}
+	if after := lookups(); after != before {
+		t.Fatalf("restricted contact reads spent lookups: %+v -> %+v", before, after)
 	}
 }
 

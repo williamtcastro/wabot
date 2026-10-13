@@ -53,7 +53,7 @@ func New(b *bot.Bot, version string, fallback *auth.Principal) *mcp.Server {
 	mcp.AddTool(srv, &mcp.Tool{Name: "list_chats", Description: "Recent chats, newest first, with unread counts.", Annotations: ro}, s.listChats)
 	mcp.AddTool(srv, &mcp.Tool{Name: "read_messages", Description: "Messages of one chat, oldest first. Use next_seq as since_seq to page forward.", Annotations: ro}, s.readMessages)
 	mcp.AddTool(srv, &mcp.Tool{Name: "search_messages", Description: "Full-text search across chats (accents and case ignored; the last word matches as a prefix).", Annotations: ro}, s.searchMessages)
-	mcp.AddTool(srv, &mcp.Tool{Name: "find_contact", Description: "Look up address-book contacts by name or part of the number.", Annotations: ro}, s.findContact)
+	mcp.AddTool(srv, &mcp.Tool{Name: "find_contact", Description: "Look up people (your own contact list and the phone's address book) by name, tag or part of the number.", Annotations: ro}, s.findContact)
 	mcp.AddTool(srv, &mcp.Tool{Name: "send_message", Description: "Send a text message. Only when the user asked for it.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &open, OpenWorldHint: &open}}, s.sendMessage)
 	mcp.AddTool(srv, &mcp.Tool{Name: "react", Description: "React to a message with an emoji (empty emoji removes the reaction).",
@@ -286,20 +286,23 @@ func (s *server) searchMessages(ctx context.Context, req *mcp.CallToolRequest, i
 }
 
 type findContactIn struct {
-	Query string `json:"query" jsonschema:"part of a name or number"`
+	Query string `json:"query" jsonschema:"part of a name, a tag or part of a number"`
 }
 
 type contactOut struct {
-	Chat      string `json:"chat"`
-	Phone     string `json:"phone"`
-	Untrusted struct {
-		Name     string `json:"name"`
-		PushName string `json:"push_name,omitempty"`
+	Chat       string `json:"chat"`
+	Phone      string `json:"phone"`
+	NameSource string `json:"name_source"`
+	Untrusted  struct {
+		Name     string   `json:"name"`
+		PushName string   `json:"push_name,omitempty"`
+		Tags     []string `json:"tags"`
 	} `json:"untrusted"`
 }
 
 type contactsOut struct {
 	Contacts []contactOut `json:"contacts"`
+	Note     string       `json:"note"`
 }
 
 func (s *server) findContact(ctx context.Context, req *mcp.CallToolRequest, in findContactIn) (*mcp.CallToolResult, contactsOut, error) {
@@ -307,23 +310,20 @@ func (s *server) findContact(ctx context.Context, req *mcp.CallToolRequest, in f
 	if err != nil {
 		return nil, contactsOut{}, err
 	}
-	if p.Restricted() {
-		return nil, contactsOut{}, errors.New("the address book isn't available to connections limited to specific chats")
-	}
 	if strings.TrimSpace(in.Query) == "" {
 		return nil, contactsOut{}, errors.New("query is required")
 	}
-	contacts, err := s.b.Contacts(ctx, bot.ContactQuery{Q: in.Query})
+	contacts, err := s.b.Contacts(ctx, bot.ContactQuery{Q: in.Query, Allow: p.Chats, Limit: 50})
 	if err != nil {
 		return nil, contactsOut{}, err
 	}
-	out := contactsOut{Contacts: []contactOut{}}
-	for i, c := range contacts {
-		if i == 50 {
-			break
+	out := contactsOut{Contacts: []contactOut{}, Note: untrustedNote}
+	for _, c := range contacts {
+		o := contactOut{Chat: c.JID, Phone: c.Phone, NameSource: c.Source}
+		o.Untrusted.Name, o.Untrusted.PushName, o.Untrusted.Tags = clean(c.Display), clean(c.Push), make([]string, len(c.Tags))
+		for i, t := range c.Tags {
+			o.Untrusted.Tags[i] = clean(t)
 		}
-		o := contactOut{Chat: c.JID, Phone: c.Phone}
-		o.Untrusted.Name, o.Untrusted.PushName = clean(c.Display), clean(c.Push)
 		out.Contacts = append(out.Contacts, o)
 	}
 	return nil, out, nil

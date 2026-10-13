@@ -382,10 +382,8 @@ func TestScopedTokens(t *testing.T) {
 	if rec := do(h, "GET", "/messages?chat="+john, bearer(mariaBot)); rec.Code != http.StatusForbidden {
 		t.Errorf("restricted ?chat=other = %d, want 403", rec.Code)
 	}
-	for _, path := range []string{"/contacts", "/groups"} {
-		if rec := do(h, "GET", path, bearer(mariaBot)); rec.Code != http.StatusForbidden {
-			t.Errorf("restricted %s = %d, want 403", path, rec.Code)
-		}
+	if rec := do(h, "GET", "/groups", bearer(mariaBot)); rec.Code != http.StatusForbidden {
+		t.Errorf("restricted /groups = %d, want 403", rec.Code)
 	}
 	var chats []store.Chat
 	_ = json.Unmarshal(do(h, "GET", "/chats", bearer(mariaBot)).Body.Bytes(), &chats)

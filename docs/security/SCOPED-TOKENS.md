@@ -112,7 +112,7 @@ make the same choice for their generated tokens. This does **not** cover the own
 | `GET /messages`, `/messages/wait`, `/events` | read | `restrictFilter`: `?chat` must be allowed and forces `ChatOnly`; `Chats IN allowlist` always |
 | `GET /media/{seq}` | read | message's chat must be allowed (404 otherwise) |
 | `GET /chats` | read | list filtered to the allowlist |
-| `GET /contacts`, `/groups` | read | forbidden to restricted tokens |
+| `GET /contacts`, `/groups` | read | forbidden to restricted tokens. **Now:** `GET /contacts` is filtered to the allowlist (see [Follow-up: contacts](#follow-up-contacts)); `/groups` stays forbidden |
 | `POST /check` | send | forbidden to restricted tokens |
 | `GET /audit`, `GET/POST /tokens`, `DELETE /tokens/{name}` | admin | n/a |
 | `GET /stats`, `GET/PATCH /settings`, `POST /webhook/test`, `/webhook/replay` | admin | n/a (added later, see [Follow-up: admin routes](#follow-up-admin-routes)) |
@@ -546,6 +546,40 @@ go through the same `withAuth` and failed-login throttle.
   same file, so a stray `.env` can't redirect a token from the shell to another host
   (`TestResolve`, `TestNewClientGuardsTheToken`). Text other people wrote is stripped of control
   characters before it's drawn (`TestSafe`).
+
+## Follow-up: contacts
+
+Your own contact list (`wame_contacts`: name, tags, notes, language, time zone per person) changed
+the token model in one place: **`GET /contacts` went from 403 to filtered** for tokens limited to
+chats.
+
+| Route | Scope | Allowlist handling |
+|---|---|---|
+| `GET /contacts` | read | `Bot.Contacts` with `Allow` = the token's list, expanded by `ExpandAllowlist` (only the list's own entries are ever resolved); `tag=` and `q=` filter inside it |
+| `GET /contacts/tags` | read | forbidden (`unrestricted`): tag names and counts span every contact |
+| `GET /contacts/{number}` | read | `authorizeChat` (`LocalChat` + `ChatAllowed`, no lookup), the fixed 403 text otherwise; your own fields (`own`, with the notes) only for admin |
+| `PUT`/`PATCH`/`DELETE /contacts/{number}`, `DELETE /contacts?all=true`, `POST /contacts/import`, `GET /contacts/export` | admin | n/a |
+
+- **Why filtered is safe.** A restricted token could already see these people's names through
+  `/chats` and the messages it can read. The list never carries notes, and its count is that of
+  the allowed chats, so it says nothing about the rest of the list. Tags it sees are only those of
+  allowed people; the counts per tag stay admin-ish (unrestricted only).
+- **No oracle, no lookups.** `{number}` outside the list gets the same `this token can't access
+  that chat` as every other route, whether or not the person is in the list, and nothing a
+  restricted token sends is looked up on WhatsApp. Even unrestricted reads never look anything up;
+  only an admin `PUT` while logged in resolves the number once.
+- **Writes are admin only.** A name feeds every token's display and a tag will decide who a
+  `tag:` batch reaches, so a `send` or `read` token can't change them.
+- **Notes** are only in `own`, which is returned to admin callers only, and in the admin-only CSV
+  export. MCP's `find_contact` never returns them, even to an admin connection. Audit details carry
+  field names and counts, never values.
+- **Sizes.** Bodies are capped at 64 KB (`PUT`/`PATCH`) and 4 MB / 5000 rows (import), 413 above;
+  at most 100,000 people in the list.
+
+Regression tests: `TestRestrictedContacts` (list filtered, `/contacts/tags` 403, `{number}`
+outside the list 403 with the fixed text and no lookups), `TestContactReads` (a `read` token
+never sees `own`), `TestContactWrites` (admin only, unknown fields, 413, audit without values),
+MCP `TestFindContact`.
 
 ## Residual risks (accepted by design)
 

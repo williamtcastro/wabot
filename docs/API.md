@@ -34,7 +34,12 @@ Base URL: whatever you passed to `-addr` (default `http://127.0.0.1:8080` for `s
 | GET | `/events` | live SSE stream with resume |
 | GET | `/media/{seq}` | download the photo/video/audio/document of a message |
 | GET | `/chats` | conversations by most recent activity |
-| GET | `/contacts` | address book |
+| GET | `/contacts` | people: the phone's address book and your own contact list |
+| GET | `/contacts/tags` | your tags and how many people have each |
+| GET, PUT, PATCH, DELETE | `/contacts/{number}` | one person; set or clear your own name, tags, notes, language, time zone |
+| DELETE | `/contacts?all=true` | empty your own contact list |
+| POST | `/contacts/import` | import your own contact list from a CSV |
+| GET | `/contacts/export` | your own contact list as a CSV |
 | GET | `/groups` | your groups |
 | POST | `/check` | which numbers have WhatsApp |
 | GET | `/audit` | log of control actions (sends, edits, logins…) |
@@ -116,9 +121,9 @@ its queue items with token-less `wame mcp`: revoke it and issue one under anothe
 
 | Scope | Allows |
 |---|---|
-| `read` | reading status, chats, messages, events, media, contacts, groups |
+| `read` | reading status, chats, messages, events, media, contacts (names and tags), groups |
 | `send` | sending and the other actions that write to WhatsApp (react, edit, delete, read receipts, typing, number checks) |
-| `admin` | everything, including login/logout, the audit log and managing tokens. Implies `read` and `send` |
+| `admin` | everything, including login/logout, the audit log, managing tokens and your own contact list (and its notes). Implies `read` and `send` |
 
 | Route | Scope | Tokens limited to chats |
 |---|---|---|
@@ -129,7 +134,10 @@ its queue items with token-less `wame mcp`: revoke it and issue one under anothe
 | `GET /messages`, `/messages/wait`, `/events` | read | results limited to allowed chats; `chat=` outside the list is 403, and a person's `chat=` matches only the 1:1 chat |
 | `GET /media/{seq}` | read | 404 for messages outside the allowed chats |
 | `GET /chats` | read | only allowed chats are listed |
-| `GET /contacts`, `GET /groups` | read | 403 |
+| `GET /contacts` | read | only allowed chats are listed |
+| `GET /contacts/{number}` | read (your own fields, notes included, only with admin) | only allowed chats (403 otherwise) |
+| `GET /contacts/tags`, `GET /groups` | read | 403 |
+| `PUT`, `PATCH`, `DELETE /contacts/{number}`, `DELETE /contacts`, `POST /contacts/import`, `GET /contacts/export` | admin | n/a |
 | `POST /check` | send | 403 |
 | `GET /audit`, `GET /stats`, `GET /metrics`, `GET /logs`, `GET /settings`, `PATCH /settings`, `POST /webhook/test`, `POST /webhook/replay`, `POST /alerts/test` | admin | n/a |
 | `GET /optouts`, `POST /optouts`, `DELETE /optouts/{chat}` | admin | n/a |
@@ -153,8 +161,8 @@ A missing scope is 403 `this token lacks the <scope> scope`.
 - What a restricted token sends you (`to`, `chat`, `?chat=`) is **never looked up on WhatsApp**. It's
   parsed locally and compared with the list, so it can't probe numbers or spend the shared lookup
   budget. Anything outside the list gets the same 403: `this token can't access that chat`.
-- The address book, the group list and number checks reveal data beyond the list, so they're 403:
-  `not available to tokens limited to specific chats`.
+- The tag counts, the group list and number checks reveal data beyond the list, so they're 403:
+  `not available to tokens limited to specific chats`. `GET /contacts` lists only the allowed chats.
 - Admin tokens can't have an allowlist.
 
 ### Rate, expiry, revocation
@@ -188,11 +196,11 @@ Non-2xx responses always look like this:
 |---|---|
 | 400 | bad input: missing fields, invalid JSON (or anything after the JSON value), bad recipient, a number that isn't on WhatsApp, unknown or deleted `reply_to`, editing someone else's message or one older than 20 minutes, idempotency key over 200 characters, media over the 100 MB download cap |
 | 401 | missing, malformed, unknown, revoked or expired token; or `?token=` on a route that doesn't accept it |
-| 403 | the token lacks the scope, or is limited to chats and the request is outside them (or uses `/contacts`, `/groups`, `/check`); a token tried to create an admin token; or token-less mode and the request isn't a local same-origin one |
-| 404 | not found: no QR pending, unknown message `id` in that chat, unknown `seq`, a message without media, or a deleted message's media |
+| 403 | the token lacks the scope, or is limited to chats and the request is outside them (or uses `/contacts/tags`, `/groups`, `/check`); a token tried to create an admin token; or token-less mode and the request isn't a local same-origin one |
+| 404 | not found: no QR pending, unknown message `id` in that chat, unknown `seq`, a message without media, a deleted message's media, or `DELETE /contacts/{number}` for someone without your own fields |
 | 409 | an idempotency key was reused for a different request; canceling a queued message that is already sending or finished |
 | 410 | media expired on WhatsApp's servers (`/media`) |
-| 413 | the body is too large: over 1 MB of JSON (16 MB for `/queue`), or a file over 64 MB |
+| 413 | the body is too large: over 1 MB of JSON (16 MB for `/queue`, 64 KB for `/contacts/{number}`), a contacts CSV over 4 MB, or a file over 64 MB |
 | 429 | rate limited (global sends or lookups, or the token's own rate), too many open streams for the token, or too many failed logins from your IP; see `Retry-After` (seconds) |
 | 500 | an internal error (the database, for instance). The message is just `internal error`; the details are in the server log |
 | 502 | WhatsApp rejected or failed the request (also "not logged in") |
@@ -691,8 +699,9 @@ curl -H "Authorization: Bearer $T" "localhost:8080/chats?limit=10"
 ]
 ```
 
-`name` is the address-book name, the group subject, `Me` for your own chat, or `~ProfileName`
-when the person isn't in your contacts. Group names and admin lists are cached in the database
+`name` is the group subject, `Me` for your own chat, or a person's name picked like in
+[`/contacts`](#contacts): your own name, the address-book name, the business name,
+`~ProfileName`, then `+number`. Group names and admin lists are cached in the database
 (`wame_groups`), so they're available right away at startup, even offline; they're refreshed
 in the background on connect and when older than 10 minutes. A group that was never fetched
 shows as `group <id>` until then.
@@ -709,18 +718,136 @@ It's kept in `wame_chat_state`, so it survives restarts. When a database is upgr
 version, everything already stored counts as read, and so does history imported after a fresh
 login.
 
-## `GET /contacts`
+## `/contacts`
 
-Your address-book contacts, synced from the phone a few seconds after the first connect.
-Sorted by name. `q` filters by name or part of the number.
+People from two places, merged: the phone's address book (synced a few seconds after the first
+connect) and **your own contact list**, which wame keeps in its database (`wame_contacts`) and
+never writes back to WhatsApp or the phone. For each person you can keep your own name, tags,
+notes, a language and a time zone.
+
+Every view shows one name, picked in this order: your own name, the address-book name, the
+business name, the name the person set in WhatsApp (shown as `~Name`), then `+number`.
+`name_source` says which one it is (`own`, `book`, `business`, `push`, `number`).
+
+None of these routes ever asks WhatsApp anything, except a `PUT` by an admin while logged in,
+which resolves a number once so your fields land under the chat WhatsApp uses.
+
+### `GET /contacts`
+
+Everyone in the address book or your own list, sorted by name. Notes are never in the list.
+
+| Query | Default | |
+|---|---|---|
+| `q` | | part of a name, a tag, or part of the number |
+| `tag` | | only people with this tag; repeat it (or separate with commas) to require several |
+| `known` | | `1`: leave out people known only by the name they set in WhatsApp or by number |
+| `limit` | 1000 | up to 5000 |
 
 ```sh
-curl -H "Authorization: Bearer $T" "localhost:8080/contacts?q=maria"
+curl -H "Authorization: Bearer $T" "localhost:8080/contacts?tag=clients&q=maria"
 ```
 
 ```json
-[ { "jid": "5511999999999@s.whatsapp.net", "phone": "+5511999999999", "name": "Maria", "push_name": "Maria" } ]
+[ { "jid": "5511999999999@s.whatsapp.net", "phone": "+5511999999999", "name": "Maria",
+    "name_source": "own", "own_name": "Maria", "book_name": "Maria Silva", "push_name": "Maria",
+    "tags": ["clients", "vip"] } ]
 ```
+
+`book_name`, `business_name` and `push_name` are there when known. A token limited to chats gets
+only those chats, filtered the same way.
+
+### `GET /contacts/tags`
+
+```json
+[ { "tag": "clients", "count": 12 }, { "tag": "vip", "count": 3 } ]
+```
+
+403 for tokens limited to chats: the counts span every contact.
+
+### `GET /contacts/{number}`
+
+One person, by number (`5511999999999`, `+5511999999999`) or URL-escaped JID. Someone wame knows
+nothing about is still a 200, with only the number. Groups are 400 `contacts are people, not
+groups`. A `read` token gets the list fields; with `admin`, `own` adds your own fields:
+
+```json
+{ "jid": "5511988887777@s.whatsapp.net", "phone": "+5511988887777", "name": "John",
+  "name_source": "own", "own_name": "John", "tags": ["clients"],
+  "own": { "jid": "5511988887777@s.whatsapp.net", "name": "John", "tags": ["clients"],
+           "notes": "prefers mornings", "language": "en", "time_zone": "America/New_York",
+           "created_at": "2026-10-13T09:12:00-03:00", "created_by": "admin-panel",
+           "updated_at": "2026-10-13T09:12:00-03:00", "updated_by": "admin-panel" } }
+```
+
+A token limited to chats can ask only about those chats; anyone else gets the usual 403 `this
+token can't access that chat`, and the number is never looked up.
+
+### `PUT /contacts/{number}`, `PATCH /contacts/{number}`
+
+Admin only. The body (at most 64 KB) has any of:
+
+| Field | |
+|---|---|
+| `name` | up to 100 characters, one line |
+| `tags` | up to 20 tags of `a-z`, `0-9`, `_` and `-` (1 to 32 characters, lowercased) |
+| `notes` | up to 2000 characters |
+| `language` | a language tag like `pt-BR` |
+| `time_zone` | an IANA name like `America/Sao_Paulo` |
+| `add_tags`, `remove_tags` | `PATCH` only: tags to add or take away, without overwriting the others |
+
+`PUT` replaces all your fields: one left out is cleared. `PATCH` changes only the fields given:
+`null` or `""` clears one. Unknown fields are a 400. When every field ends up empty, the person
+is removed from your list. Both answer with the person as in `GET`, `own` included.
+
+```sh
+curl -H "Authorization: Bearer $T" -X PATCH localhost:8080/contacts/5511999999999 \
+  -d '{"name": "Maria", "add_tags": ["vip"], "notes": null}'
+```
+
+### `DELETE /contacts/{number}`, `DELETE /contacts?all=true`
+
+Admin only. The first removes one person's own fields (404 when there are none) and answers
+`{"deleted": true}`. The second empties your whole list and answers `{"deleted": 3}`; without
+`?all=true` it's a 400, so a stray `DELETE /contacts` can't do it. The phone's address book is
+never touched.
+
+### `POST /contacts/import`, `GET /contacts/export`
+
+Admin only. The import takes a CSV (at most 4 MB and 5000 rows) with a header line:
+
+```csv
+number,name,tags,notes
+5511999999999,Maria,clients vip,
+5511988887777,John,clients,"prefers mornings"
+552187654321,,,
+```
+
+- Columns in any order and case: `number` (required; `to` and `phone` work too), `name`, `tags`
+  (separated by spaces, commas, `;` or `|`), `notes`, `language`, `time_zone`. Unknown columns are
+  refused by name. Same CSV rules as [the queue](QUEUE.md) (BOM, CRLF, `;` files, numbers in
+  scientific notation refused).
+- A column present overwrites that field (an empty cell clears it); absent columns are left alone.
+- Numbers are never looked up: a row updates the person stored under that number or its variant
+  with or without Brazil's 9th digit, otherwise it's stored as typed.
+- One transaction: any bad line is a 400 naming it (`line 3: …`), and nothing is stored.
+- `?add_tags=imported` adds tags to every row; `?dry_run=1` checks and counts without storing.
+
+```sh
+curl -H "Authorization: Bearer $T" -H "Content-Type: text/csv" \
+  --data-binary @contacts.csv "localhost:8080/contacts/import?dry_run=1"
+```
+
+```json
+{ "added": 2, "updated": 1, "unchanged": 0 }
+```
+
+The export writes your own list with the same columns (`number,name,tags,notes,language,time_zone`),
+so importing it gives back the same list. It holds your notes: keep the file private. Cells are
+written as stored; a spreadsheet may treat one starting with `=`, `+`, `-` or `@` as a formula.
+
+Writes are audited as `contact_set` (the changed field names), `contact_delete`,
+`contact_import` (`N rows: A added, U updated`) and `contact_delete_all` (`N contacts`); names,
+notes and tags are never in the audit log.
 
 ## `GET /groups`
 
@@ -751,6 +878,7 @@ Control actions taken through wame, newest first: sends, files, reactions, edits
 read receipts, pairing and logout, serving the login QR (`qr`), number checks (`check`, with the
 count but not the numbers), queuing and canceling (`queue`, `queue_cancel`), the opt-out list (`optout_add`, `optout_remove`;
 a chat that opted out by keyword is recorded with actor `whatsapp` and detail `keyword STOP`),
+changes to your own contact list (`contact_set`, `contact_delete`, `contact_import`, `contact_delete_all`),
 settings, tokens and webhook tests, plus WhatsApp logging the device out. Every send, file,
 reaction, edit and delete attempt is recorded exactly once, including ones rejected for bad
 input (`ok: false` with the error). Message text is never stored here.
@@ -793,7 +921,10 @@ reset`), `webhook_test` or `webhook_replay` (`detail` is the delivery id), `aler
 (`detail` is the backend, `gotify`), `qr`, `check`, `queue` (`target` is the batch, `detail` `N
 messages`), `queue_cancel` (`target` is the batch or `#id`, `detail` `N canceled`), `optout_add`
 (`target` is the chat; `detail` is `added`, `already listed`, or `keyword STOP` with actor
-`whatsapp` when the chat sent the keyword) or `optout_remove`. See
+`whatsapp` when the chat sent the keyword), `optout_remove`, `contact_set` (`target` is the chat,
+`detail` the changed fields like `name, tags`, or `no change`), `contact_delete`, `contact_import`
+(`target` `csv`, `detail` `N rows: A added, U updated`, plus ` (dry run)`) or `contact_delete_all`
+(`detail` `N contacts`). See
 [proposed-features/ADMIN-PANEL.md](proposed-features/ADMIN-PANEL.md#logging-today) for what each one records.
 
 ## `GET /stats`

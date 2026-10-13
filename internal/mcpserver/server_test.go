@@ -128,8 +128,8 @@ func TestRestrictedCaller(t *testing.T) {
 	if chats := out["chats"].([]any); len(chats) != 1 || chats[0].(map[string]any)["chat"] != maria {
 		t.Fatalf("restricted list_chats = %v", chats)
 	}
-	if _, _, isErr := call(t, cs, "find_contact", map[string]any{"query": "a"}); !isErr {
-		t.Fatal("restricted callers can't read the address book")
+	if out, text, isErr := call(t, cs, "find_contact", map[string]any{"query": "5511"}); isErr || len(out["contacts"].([]any)) != 0 {
+		t.Fatalf("restricted find_contact = %v %q; want no one outside the allowlist", out, text)
 	}
 	if _, text, isErr := call(t, cs, "send_message", map[string]any{"to": john, "text": "hi"}); !isErr || !strings.Contains(text, "can't access") {
 		t.Fatalf("restricted send to another chat = %q", text)
@@ -185,5 +185,48 @@ func TestCleanDropsInvisibleRunes(t *testing.T) {
 	}
 	if got := cleanID("M1\n\u202e" + strings.Repeat("é", 100)); strings.ContainsAny(got, "\n\u202e") || len(got) > maxIDLen || !utf8.ValidString(got) {
 		t.Errorf("cleanID = %q (%d bytes)", got, len(got))
+	}
+}
+
+func TestFindContact(t *testing.T) {
+	b := newBot(t)
+	ctx := t.Context()
+	name, notes, tags := "Maria Silva", "prefers mornings", []string{"clients", "vip"}
+	if _, err := b.PatchContact(ctx, "test", maria, bot.ContactInput{Name: &name, Notes: &notes, Tags: &tags}); err != nil {
+		t.Fatal(err)
+	}
+	johnName := "John"
+	if _, err := b.PatchContact(ctx, "test", "5511988887777", bot.ContactInput{Name: &johnName, Notes: &notes}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		p    auth.Principal
+		want []string
+	}{
+		{auth.Principal{Name: "reader", Scopes: []auth.Scope{auth.Read}}, []string{john, maria}},
+		{auth.Principal{Name: "boss", Scopes: []auth.Scope{auth.Admin}}, []string{john, maria}},
+		{auth.Principal{Name: "maria-bot", Scopes: []auth.Scope{auth.Read}, Chats: []string{maria}}, []string{maria}},
+	} {
+		cs := connect(t, b, c.p)
+		out, text, isErr := call(t, cs, "find_contact", map[string]any{"query": "55"})
+		if isErr || strings.Contains(text, "mornings") {
+			t.Fatalf("%s: find_contact = %q; notes must never be returned", c.p.Name, text)
+		}
+		var got []string
+		for _, x := range out["contacts"].([]any) {
+			got = append(got, x.(map[string]any)["chat"].(string))
+		}
+		if strings.Join(got, ",") != strings.Join(c.want, ",") {
+			t.Fatalf("%s: chats = %v, want %v", c.p.Name, got, c.want)
+		}
+		list := out["contacts"].([]any)
+		first := list[len(list)-1].(map[string]any)
+		u := first["untrusted"].(map[string]any)
+		if first["name_source"] != "own" || u["name"] != name || len(u["tags"].([]any)) != 2 || out["note"] == "" {
+			t.Fatalf("%s: first = %v", c.p.Name, first)
+		}
+		if _, top := first["name"]; top {
+			t.Fatal("names must only appear under 'untrusted'")
+		}
 	}
 }

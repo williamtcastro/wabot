@@ -96,7 +96,15 @@ func NewHandler(b *bot.Bot, authn *auth.Authenticator, version string) *Handler 
 	mux.HandleFunc("GET /media/{seq}", need(read, a.media))
 	mux.HandleFunc("GET /chats", need(read, a.chats))
 
-	mux.HandleFunc("GET /contacts", need(read, unrestricted(a.contacts)))
+	mux.HandleFunc("GET /contacts", need(read, a.contacts))
+	mux.HandleFunc("GET /contacts/tags", need(read, unrestricted(a.contactTags)))
+	mux.HandleFunc("GET /contacts/export", need(admin, a.exportContacts))
+	mux.HandleFunc("GET /contacts/{number}", need(read, a.contact))
+	mux.HandleFunc("PUT /contacts/{number}", need(admin, a.putContact))
+	mux.HandleFunc("PATCH /contacts/{number}", need(admin, a.putContact))
+	mux.HandleFunc("DELETE /contacts/{number}", need(admin, a.deleteContact))
+	mux.HandleFunc("DELETE /contacts", need(admin, a.deleteAllContacts))
+	mux.HandleFunc("POST /contacts/import", need(admin, a.importContacts))
 	mux.HandleFunc("GET /groups", need(read, unrestricted(a.groups)))
 	mux.HandleFunc("POST /check", need(send, unrestricted(a.check)))
 
@@ -587,11 +595,6 @@ func (a *server) chats(w http.ResponseWriter, r *http.Request) {
 	allowed := a.b.ExpandAllowlist(r.Context(), p.Chats)
 	chats = slices.DeleteFunc(chats, func(c store.Chat) bool { return !slices.Contains(allowed, c.JID) })
 	writeJSON(w, 200, chats[:min(len(chats), limit)])
-}
-
-func (a *server) contacts(w http.ResponseWriter, r *http.Request) {
-	contacts, err := a.b.Contacts(r.Context(), bot.ContactQuery{Q: r.URL.Query().Get("q")})
-	respond(w, contacts, err)
 }
 
 func (a *server) groups(w http.ResponseWriter, r *http.Request) {

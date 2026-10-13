@@ -157,6 +157,10 @@ whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 | `queue_cancel` | `Bot.CancelQueued`: `DELETE /queue`, `DELETE /queue/{id}`, MCP `cancel_scheduled` | `N canceled` (target = batch or `#id`) |
 | `optout_add` | `POST /optouts`; an incoming opt-out keyword (actor `whatsapp`) | `added` / `already listed`, or `keyword STOP` (target = chat) |
 | `optout_remove` | `DELETE /optouts/{chat}` | (target = chat) |
+| `contact_set` | `Bot.SetContact` / `Bot.PatchContact`: `PUT`/`PATCH /contacts/{number}`, TUI `/name`, `/tag` | changed field names (`name, tags`) or `no change`, never values (target = chat) |
+| `contact_delete` | `DELETE /contacts/{number}` | (target = chat) |
+| `contact_import` | `POST /contacts/import` | `N rows: A added, U updated`, plus ` (dry run)` (target = `csv`) |
+| `contact_delete_all` | `DELETE /contacts?all=true` | `N contacts` |
 
 `send`, `send_file`, `react`, `edit` and `delete` run through `Bot.audited`, which records every
 attempt exactly once, whatever the outcome. Failures (`ok` = 0) include input errors such as empty
