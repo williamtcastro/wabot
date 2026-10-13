@@ -138,6 +138,12 @@ require("node:http").createServer((req, res) => {
 }).listen(9000, "127.0.0.1");
 ```
 
+**Testing your receiver.** `POST /webhook/test` (or `t` on the [admin panel](ADMIN.md)'s Health
+tab) sends a signed delivery with `X-Wame-Event: test` and no message, and reports what your
+endpoint answered. Ignore event types you don't handle, as the examples above do. If deliveries
+failed while your bot was down, `GET /stats` lists the last 20 failures and `POST /webhook/replay`
+sends one again with the same `X-Wame-Delivery`, so de-duplicating by that header stays correct.
+
 ## Option 2: polling (no open port)
 
 If you can't expose a port, pull messages instead. `GET /messages/wait` is a long-poll with a

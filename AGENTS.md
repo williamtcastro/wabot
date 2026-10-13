@@ -6,8 +6,9 @@ Guidance for AI coding agents working on this repo. Human-facing docs are in `RE
 
 `wame` (WhatsApp manager: TUI & bot, formerly `wabot`) is a single Go binary that links to a WhatsApp
 account through [whatsmeow](https://github.com/tulir/whatsmeow) and exposes it as an HTTP API, an MCP
-server, a Bubble Tea TUI and a one-shot CLI. All state lives in one SQLite file (default
-`~/.config/wame/wame.db`).
+server, a Bubble Tea TUI and a one-shot CLI. `wame admin` is a second Bubble Tea app: a remote admin
+panel that talks to a running server only over the HTTP API. All server state lives in one SQLite file
+(default `~/.config/wame/wame.db`); it also ships as a Docker image.
 
 **Kept from the old name, on purpose:** SQLite tables stay `wabot_*` (renaming them would need a
 migration of live databases), `WABOT_*` env vars are read as a fallback (`envOr`), a pre-rename
@@ -20,7 +21,7 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 
 | Path | Package | Responsibility |
 |---|---|---|
-| `main.go` | `main` | subcommands (`login`, `serve`, `tui`, `send`, `token`, `mcp`, `version`, `logout`), flags, env vars, `usage`, the default DB path (`defaultDB`, `legacyDBNotice`), `newLogger` (slog setup), wiring of limiters/webhook, the startup guard `guardPublicAddr` (owner secret ≥ 16 chars; non-loopback needs an owner secret or any token ever created; `isLoopbackAddr`), `tokenCommand`, `mcpCommand` (stdio MCP), resolving a `-webhook-filter` chat number after login (`resolveWebhookChat`) |
+| `main.go` | `main` | subcommands (`login`, `serve`, `tui`, `send`, `token`, `mcp`, `admin`, `version`, `logout`), flags, env vars, `usage`, the default DB path (`defaultDB`, `legacyDBNotice`), `newLogger` (slog setup), wiring of limiters/webhook and then `Bot.InitSettings` (stored runtime settings win over flags), `adminCommand` (`-profile`, flags → env → `./.env` → `admin.env`, never opens the DB), the startup guard `guardPublicAddr` (owner secret ≥ 16 chars; non-loopback needs an owner secret or any token ever created; `isLoopbackAddr`), `tokenCommand`, `mcpCommand` (stdio MCP), resolving a `-webhook-filter` chat number after login (`resolveWebhookChat`, via `SetChatIf` so a runtime filter change wins) |
 | `docs/docs.go` | `docs` | `//go:embed openapi.yaml` as `docs.OpenAPI` (embed can't reach a parent directory, so it lives next to the file) |
 | `internal/store/store.go` | `store` | `Store` (wraps `*sql.DB`, owns the LID relink cache key), `Open`, `wabot_messages` table and its migration from the old rowid schema, `Save`, `Import` (history sync, incl. edits), `Query`/`Messages`/`Get`/`GetBySeq`/`LastSeq`, `MarkEdited`/`MarkDeleted`, `RelinkLIDs`, `Chats` |
 | `internal/store/message.go` | `store` | `Message` (raw fields exported but `json:"-"`), `Media`, `MessageUpdate`, `Chat`, `ChatsChanged`, `ErrNotFound`, `Message.MediaFileName` |
@@ -44,8 +45,8 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `internal/bot/webhook.go` | `bot` | webhook queue and workers, retries with backoff, HMAC signing (`Sign`), `WebhookStats` (in memory), `SetFilter`/`SetChatIf`, `TestWebhook`, `ReplayWebhook` (only ids in the recent failures) |
 | `internal/bot/settings.go` | `bot` | runtime settings: `Settings`, `SettingKeys`, `InitSettings` (flags + stored overrides), `UpdateSettings` (validate all, store, apply, audit once), `SettingsView`, `ParseWebhookFilter`, the auto-reply switch (`SetAutoReply`/`AutoReplyOn`, atomic) |
 | `internal/bot/usage.go` | `bot` | per-caller usage in hourly buckets for 24 h (`RecordRequest` from the API/MCP auth, sends from `audited`), `Usage` |
-| `internal/api/api.go` | `api` | `NewHandler` (the route table: every route wrapped in `need(scope, …)`), handlers, long-poll, SSE (with token re-checks), `/media`, `/mcp` mount, the `/docs` page |
-| `internal/api/authz.go` | `api` | `withAuth` (header/`?token=` rules, failed-login throttle), `need`, `unrestricted`, `visibleStatus`, `authorizeChat`, `restrictFilter`, `sendGuard` (allowlist + per-token rate), stream cap and `stillValid`, `/tokens` handlers, `NormalizeChats` |
+| `internal/api/api.go` | `api` | `NewHandler` (the route table: every route wrapped in `need(scope, …)`), handlers, long-poll, SSE (with token re-checks), `/media`, `/mcp` mount, the `/docs` page, and the admin-only `/stats` (`Stats`, `CallerStats`), `/settings` (GET/PATCH; values may be strings, numbers, booleans or null) and `/webhook/test`, `/webhook/replay` (`webhookResult`: 200 with the attempt's outcome even when the receiver failed) |
+| `internal/api/authz.go` | `api` | `withAuth` (header/`?token=` rules, failed-login throttle, `seen` callback → `Bot.RecordRequest`), `need`, `unrestricted`, `visibleStatus`, `authorizeChat`, `restrictFilter`, `sendGuard` (allowlist + per-token rate), stream cap (per token ID) and open-stream counts (per name, owner included) and `stillValid`, `/tokens` handlers, `NormalizeChats` |
 | `internal/api/mcp.go` | `api` | `/mcp`: streamable HTTP MCP handler; bearer verification puts the `Principal` in the SDK's `TokenInfo`; token-less mode via `localOnly` |
 | `internal/api/middleware.go` | `api` | `localOnly` (token-less mode: loopback RemoteAddr and Host, no cross-site), request logging |
 | `internal/mcpserver/server.go` | `mcpserver` | MCP tools (`status`, `list_chats`, `read_messages`, `search_messages`, `find_contact`, `send_message`, `react`, `mark_read`), server instructions, `require`/`chat` checks, `clean()` of untrusted text |
@@ -57,8 +58,8 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `internal/tui/complete.go` | `tui` | autocomplete (`suggest`, `pathSuggestions`, `chatTarget`) |
 | `internal/tui/view.go` | `tui` | rendering: panes, sidebar, context bar, footer, styles |
 | `internal/tui/format.go` | `tui` | text helpers and `safe()` sanitizing of untrusted text |
-| `internal/admin/client.go` | `admin` | `wame admin`: HTTP client for a remote server (`NewClient` refuses plain http beyond loopback), typed on `bot.Status`, `store.Token`, `store.AuditEntry` |
-| `internal/admin/config.go` | `admin` | `ReadEnvFile` (`WAME_SERVER`/`WAME_TOKEN` from `./.env`, `~/.config/wame/admin.env`) and `Resolve` (precedence; a file's server needs that file's token) |
+| `internal/admin/client.go` | `admin` | `wame admin`: HTTP client for a remote server (`NewClient` refuses plain http beyond loopback), typed on the server's own types (`bot.Status`, `bot.SettingView`, `bot.WebhookResult`, `store.*`, `api.Stats`), `APIError`, and `Events`: the SSE reader (separate client without a timeout, 60 s idle cut-off; the server pings every 25 s) |
+| `internal/admin/config.go` | `admin` | `ReadEnvFile` (`WAME_SERVER`, `WAME_TOKEN`, `WAME_INSECURE`), `Resolve` (precedence; a file's server and insecure flag need that file's token), `Profiles` (`~/.config/wame/servers/*.env`, both keys required) |
 | `internal/admin/model.go` | `admin` | the panel's Bubble Tea model: `Options`, tabs, modes, polling, `call` (every server answer is tagged with the client generation in a `genMsg`, so answers from a server the user switched away from are dropped), `applyStatus` (bell on a healthy → unhealthy change), server switching |
 | `internal/admin/live.go` | `admin` | the `/events` follower: reconnects with backoff, feeds `liveMsg`/`eventMsg` through a channel closed on stop; keeps time/chat/sender (never text) of the last hour's messages for the counts |
 | `internal/admin/chats.go` | `admin` | Chats tab: list, messages, search, sending, and `safe()` for text other people wrote |
@@ -69,15 +70,17 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `Dockerfile`, `compose.yaml` | | static build into distroless `nonroot`; `/data` volume with `WAME_DB=/data/wame.db`, `WAME_ADDR=0.0.0.0:8080` (so a token is required). CI builds it and smoke-tests `version` and the no-token refusal. Docs: `docs/DOCKER.md` |
 | `_demo/` | `main` | README screenshot: seeds a scratch DB with fake chats and opens the TUI without connecting; `screenshot.sh` records it with VHS into `docs/wame-tui.png`. Ignored by `./...`, built by CI. Rerun it after visible TUI changes |
 | `docs/openapi.yaml` | | OpenAPI 3 spec, embedded into the binary (rebuild after editing) |
-| `docs/*.md` | | user docs: CLI, API, TUI, MCP, writing bot logic |
+| `docs/*.md` | | user docs: CLI, API, TUI, MCP, ADMIN (the panel), DOCKER, writing bot logic |
 | `docs/security/` | | security reviews (`SCOPED-TOKENS.md`: token system threat model, findings and fixes) |
-| `docs/proposed-features/` | | deferred proposals (admin panel, TUI image previews); nothing there is built |
-| `.github/workflows/ci.yml` | | CI on every push to `main` and every PR: gofmt, `go vet`, `go test -race` on Ubuntu and macOS, `CGO_ENABLED=0` build |
+| `docs/proposed-features/` | | deferred proposals: a web admin panel (its terminal counterpart, `wame admin`, is built; the doc also holds the audit action table), TUI image previews, LLM context, drafts approval, rules and state |
+| `.github/workflows/ci.yml` | | CI on every push to `main` and every PR: gofmt, `go vet`, `go test -race` on Ubuntu and macOS, `CGO_ENABLED=0` build plus `_demo`; a `docker` job builds the image and smoke-tests it |
+| `.env.example` | | the keys Compose reads (`.env` itself is git-ignored) and `WAME_SERVER` for `wame admin` |
 | `.github/workflows/release.yml`, `.goreleaser.yaml` | | on a `v*` tag: tests, then GoReleaser builds linux/darwin × amd64/arm64 `tar.gz` archives plus `checksums.txt` on the GitHub release, stamping `main.version` via `-ldflags` |
 
-**Dependency direction:** `main` → `api`, `mcpserver`, `auth`, `tui`, `bot`, `store`; `api` → `mcpserver`,
-`auth`, `bot`, `store`, `docs`; `mcpserver` → `auth`, `bot`, `store`; `tui` → `bot`, `store`; `auth` →
-`store`; `bot` → `store`; `store` → nothing internal. Never import upwards (Go
+**Dependency direction:** `main` → `admin`, `api`, `mcpserver`, `auth`, `tui`, `bot`, `store`; `admin` →
+`api`, `bot`, `store` (for their types only: it never opens a database or a WhatsApp connection);
+`api` → `mcpserver`, `auth`, `bot`, `store`, `docs`; `mcpserver` → `auth`, `bot`, `store`; `tui` → `bot`,
+`store`; `auth` → `store`; `bot` → `store`; `store` → nothing internal. Never import upwards (Go
 rejects cycles anyway). `store` knows nothing about whatsmeow's client: it deals in plain strings.
 
 **Where new code goes:**
@@ -88,7 +91,8 @@ rejects cycles anyway). `store` knows nothing about whatsmeow's client: it deals
 - HTTP concerns (parsing requests, status codes, headers, scopes per route): `internal/api`. Handlers
   stay thin and call `Bot` methods.
 - Token issuing and verification: `internal/auth`. MCP tools: `internal/mcpserver`.
-- Screen and keys: `internal/tui`.
+- Screen and keys: `internal/tui`. The remote admin panel: `internal/admin`, one file per tab; anything
+  it shows must come from an API endpoint, so a new panel feature usually starts as a route.
 - Helpers that both `api` and `tui` need belong in the lowest package that makes sense (e.g.
   `store.Message.MediaFileName`), never copied.
 - Export only what another package uses; keep the rest unexported. Avoid stutter (`bot.Status`,
@@ -117,13 +121,14 @@ numbers and names below.
 
 - `internal/store`: v1 → current migration keeps rowids as `seq` and is idempotent, `Filter` SQL vs
   `Match`, `ChatOnly`, edit/delete/import, chats and audit.
-- `internal/bot`: `Limiter` (`ReserveN` is all-or-nothing), `ParseRecipient`, `handleProtocol`
+- `internal/bot`: `Limiter` (`ReserveN` is all-or-nothing, `Stats`), `ParseRecipient`, `handleProtocol`
   ignoring forged edits and non-admin revokes, `audited`, `cappedBody` / `limitedTransport`, media
-  checks, webhook signing and filtering.
+  checks, webhook signing, filtering and stats (never the URL or message text).
 - `internal/api`: token auth, token-less `localOnly`, idempotency (replay, 409, panic), error
   mapping, `/messages` cursors, `/events` `Last-Event-ID` replay, scoped tokens and allowlists
   (`TestScopedTokens`, `TestPerTokenRate`, `TestTokenAdminEndpointsAndRevocation`), MCP over HTTP with
-  token scopes, and one regression test per security finding in `security_test.go` (`TestF1…`–`TestF10…`).
+  token scopes, `/stats` (admin only, callers), `/settings` and the webhook routes, and one regression
+  test per security finding in `security_test.go` (`TestF1…`–`TestF10…`).
 - `internal/auth`: token issuing/parsing, `TestF2RequiredFailsClosed`.
 - `internal/mcpserver`: read-only and restricted callers, cleaning of untrusted text.
 - `internal/tui`: 110×24 renders exactly 24 lines (with and without the context bar), autocomplete,
@@ -136,7 +141,7 @@ numbers and names below.
   (stale answers dropped) and that Status cards line up at 120 and 180 columns. Tests that build a
   model use `newTestModel`, which stops the live stream on cleanup (otherwise the test server
   can't close).
-- `main`: default DB path, `isLoopbackAddr`.
+- `main`: default DB path, `isLoopbackAddr`, env fallbacks.
 - Also: `internal/store/state_test.go` (read positions, upgrade marks history read, FTS search incl.
   accents/prefix/deleted/edited, group cache) and `internal/bot/state_test.go` (read-self receipts,
   group cache loading); the TUI tests cover the new-messages divider, search jump and badges.
@@ -155,7 +160,9 @@ The `release` workflow runs the tests and then GoReleaser, which publishes the a
 (without the `v`); local builds print `dev`. Don't edit `version` in `main.go` by hand.
 
 Add a test with every behavior change. To eyeball the TUI, print `ansi.Strip(m.View())` from a
-throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `internal/tui/tui_test.go`.
+throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `internal/tui/tui_test.go`;
+for the admin panel, `newServer` + `newTestModel` + `press` in `internal/admin/admin_test.go` give a
+real API with fake data (run with `-v` to see the output).
 
 ## Conventions
 
@@ -216,7 +223,7 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
 - Schema changes to `wabot_messages`: new columns only need to be added to `messagesTable` (`internal/store/store.go`)
   (`addMissingColumns` adds them to existing databases on startup, so give them a DEFAULT). Anything else
   needs an upgrade step in `migrate` that keeps the `seq` numbers. Other tables go through
-  `migrateState` (`internal/store/state.go`) or `migrateAudit`: create them idempotently and handle the
+  `migrateState` (`internal/store/state.go`), `migrateAudit`, `migrateTokens` or `migrateSettings`: create them idempotently and handle the
   first-run backfill there (as `wabot_chat_state` does: existing history counts as read). Upgrades must
   run automatically on startup; there is no separate migrate command.
 - Tables: `wabot_messages`, `wabot_messages_fts` (FTS5 over `text`, external content, kept in sync by
@@ -228,7 +235,19 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
   values a `Cmd` needs (chat, message) before returning it instead of reading or changing `m` inside the
   goroutine. Chat loads carry `openSeq` so only the latest one is applied.
 - Pass any text that strangers control (message text, push names, file names, group names) through `safe()`
-  before rendering it in the TUI.
+  before rendering it in the TUI, and through `admin.safe()` in the admin panel.
+- **Admin panel (`internal/admin`):** every server call goes through `m.call`, which runs on a
+  captured client and tags the answer with the client generation; never read `m.c` or change `m`
+  inside a `Cmd`. Switching servers bumps `gen` and replaces the model, so late answers are dropped.
+  The live stream sends through a channel that's closed on stop; tests must stop it (`newTestModel`
+  does). What the panel keeps from streamed messages is time, chat and sender name, never text.
+  Layout: `grid` for cards side by side (equal heights), `besides` only for a tall card like the QR;
+  the header drops detail by width instead of truncating. Older servers answer 404 on newer routes:
+  show "update the server" rather than an error.
+- **Runtime settings** (`/settings`) are stored in `wabot_settings` and win over flags at every start
+  until reset; `InitSettings` must run after the limiters and webhook are built. Limits change through
+  `Limiter.Set` only, and `Limiter` reads its fields under its lock; auto-reply is atomic
+  (`SetAutoReply` / `AutoReplyOn`), never a plain field.
 
 ## WhatsApp gotchas (learned the hard way)
 
@@ -289,9 +308,21 @@ throwaway `zz_*_test.go` (ignored by `.gitignore`) using the helpers in `interna
 - `/docs` loads `swagger-ui-dist` from jsDelivr with Subresource Integrity hashes (`docsPage` in `internal/api/api.go`).
   Bumping the version means recomputing both `integrity` attributes, e.g.
   `curl -fsSL URL | openssl dgst -sha384 -binary | openssl base64 -A`, otherwise the page won't load.
+- In-memory admin data (`/stats`: webhook failures, limiter counts, per-caller usage with last IP)
+  never holds the webhook URL, its secret or message text, and resets on restart. `/webhook/replay`
+  only accepts delivery ids from the recent failures, so it can't push messages the filter excluded.
+- `wame admin` sends the token on every request: keep `NewClient`'s refusal of plain http beyond
+  loopback, and `Resolve`'s rule that a server (or insecure flag) read from a file is only used with
+  a token from that same file, so a stray `.env` can't redirect a token from elsewhere.
 - Webhook signing is HMAC-SHA256 over `"<timestamp>.<body>"`. Changing that breaks every receiver; if it
   must change, add a new header version instead.
 
 ## Commits
 
 Small, focused commits with a plain summary line. The repo is public under MIT.
+
+- **Stage files by path, never `git add -A` / `git add .`.** The owner keeps private, uncommitted
+  files in the working tree (deployment configs such as `unraid/`, `.env`); both are git-ignored now,
+  but check `git status --short` for anything you didn't write before every commit.
+- Before committing, grep the staged diff for real phone numbers, names, tokens, hostnames, private
+  IPs and domains.

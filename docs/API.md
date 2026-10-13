@@ -33,6 +33,10 @@ Base URL: whatever you passed to `-addr` (default `http://127.0.0.1:8080` for `s
 | GET | `/groups` | your groups |
 | POST | `/check` | which numbers have WhatsApp |
 | GET | `/audit` | log of control actions (sends, edits, logins…) |
+| GET | `/stats` | limiter and webhook health, per-token usage |
+| GET, PATCH | `/settings` | read or change rate limits, auto-replies and the webhook filter without a restart |
+| POST | `/webhook/test` | send a signed test delivery |
+| POST | `/webhook/replay` | send a recently failed delivery again |
 | GET | `/tokens` | list API tokens |
 | POST | `/tokens` | create an API token |
 | DELETE | `/tokens/{name}` | revoke a token (and the tokens it created) |
@@ -878,6 +882,11 @@ wame spaces out everything it sends: texts, files, reactions, edits, deletes and
   always wait.
 - `-typing`: show "typing…" for a moment (scaled to the text length, 0.8–4 s) before each text.
 
+`-rate`, `-chat-gap`, `-max-wait` and `-autoreply` can also be changed while wame runs with
+[`PATCH /settings`](#get-settings-patch-settings) (or the admin panel); a change applies to the
+next send and is kept over restarts. [`GET /stats`](#get-stats) shows how much of each limit is in
+use and how many 429s were answered.
+
 The limiter is shared by every client in the process (API, TUI, CLI, MCP, auto-replies). API
 tokens also have their own per-token rate, 10 per minute by default (see [Tokens and scopes](#rate-expiry-revocation)). `/read`
 isn't limited.
@@ -912,7 +921,7 @@ Headers on every request:
 | Header | |
 |---|---|
 | `Content-Type` | `application/json` |
-| `X-Wame-Event` | `message` or `update` |
+| `X-Wame-Event` | `message` or `update`; `test` for a [test delivery](#post-webhooktest-post-webhookreplay), whose body has no message. Ignore event types you don't know |
 | `X-Wame-Delivery` | unique ID for this delivery, the same on every retry. Use it to dedupe |
 | `X-Wame-Timestamp` | Unix seconds when this attempt was sent |
 | `X-Wame-Signature` | `sha256=<hex>`, only with `-webhook-secret` |
@@ -931,6 +940,10 @@ when the queue is full, new deliveries are dropped and logged. So delivery is **
 and unordered**, and anything still queued is lost when the process stops. If you can't afford
 gaps, use `/messages/wait` or `/events` with a cursor instead, or as a backfill.
 
+[`GET /stats`](#get-stats) counts deliveries and keeps the last 20 failed attempts (since the last
+start); [`POST /webhook/replay`](#post-webhooktest-post-webhookreplay) sends one of those again,
+with the same `X-Wame-Delivery`.
+
 **Filter.** `-webhook-filter` takes the [filter](#filters) syntax as a query string:
 
 ```sh
@@ -941,4 +954,6 @@ gaps, use `/messages/wait` or `/events` with a cursor instead, or as a backfill.
 `since` is ignored there. A `chat` given as a phone number is looked up on WhatsApp once the bot
 is logged in, the same way `/send` resolves recipients (so Brazil's optional 9th digit and hidden
 `@lid` IDs are handled). Until then, or if the lookup fails, it's matched as typed and a warning
-is logged. A JID (`…@s.whatsapp.net`, `…@g.us`) is used as is.
+is logged. A JID (`…@s.whatsapp.net`, `…@g.us`) is used as is. The filter can also be changed at
+runtime as the `webhook_filter` [setting](#get-settings-patch-settings); a number set that way is
+used as typed, so prefer the JID there.

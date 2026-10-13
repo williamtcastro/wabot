@@ -145,6 +145,12 @@ themselves: stop the container first (`docker stop wame`), or use the HTTP API o
 running one. Server flags go after `serve`, e.g. `docker run … wame serve -rate 10 -autoreply=false`,
 or as environment variables (`WAME_RATE`, `WAME_WEBHOOK`, …; see [CLI.md](CLI.md)).
 
+The rate limits, auto-replies and webhook filter can also be changed without recreating the
+container, from the [admin panel](ADMIN.md#changing-settings)'s Settings tab or
+`PATCH /settings`. Those changes are stored in `/data` and **win over the container's environment
+variables** on every restart until they're reset there, so check the Settings tab if a changed
+`WAME_RATE` seems to be ignored.
+
 ## Moving an existing database in
 
 Stop whatever uses it, and copy `wame.db` with its `-wal` and `-shm` files if they exist.

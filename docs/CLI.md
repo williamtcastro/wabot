@@ -230,6 +230,7 @@ wame's own tables:
 | `wabot_groups` | cached group names and admin lists (`jid`, `name`, `admins` as JSON, `updated`), so names show before connecting |
 | `wabot_audit` | one row per control action (send, react, edit, delete, read, pair, logout…), served by `GET /audit` |
 | `wabot_tokens` | API tokens: id, name, SHA-256 hash of the token (never the token itself), scopes, chats, rate, created/expires/last-used times, revoked flag, `created_by`. Rows are never deleted |
+| `wabot_settings` | runtime overrides from `PATCH /settings` or the admin panel (`key`, `value`, `updated_by`, `updated_at`). They win over the flags on every start; deleting a row (or resetting it there) brings the flag back |
 
 `wabot_messages` columns:
 

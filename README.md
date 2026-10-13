@@ -25,6 +25,7 @@ It's one Go binary and one SQLite file, with no cgo and no external services. Bu
 | 🔌 **Script it over HTTP** | Send texts and files, reply, react, edit, delete and mark as read. Query history with filters and full-text search, long-poll or stream new messages, receive signed webhooks. Interactive docs at `/docs` |
 | 🤖 **Hand it to an AI agent** | A built-in MCP server (HTTP at `/mcp` or `wame mcp` on stdio) for Claude Code, Claude Desktop and other MCP clients. Message text comes back marked as untrusted |
 | 🔐 **Stay in control** | One token per agent or bot, with `read` / `send` / `admin` scopes, a chat allowlist, its own send rate, expiry and instant revocation. Every action is audited |
+| 🛰️ **Run it on a server** | A Docker image, and `wame admin`: a live terminal panel for a remote server with QR login, chats, token rotation and usage, the audit log, limiter and webhook health, and settings you can change without a restart |
 | 🐢 **Avoid bans** | Sends are spaced out by default: 20 per minute and 1 s between messages to the same chat. Number lookups and auto-replies have their own caps |
 
 > [!WARNING]
@@ -205,7 +206,9 @@ The most used global flags:
 | `-autoreply` | | `true` | answer `!ping` / `!time` / `!help` |
 | `-log-format` / `-log-file` / `-debug` | `WAME_LOG_*` | `text` / stderr | logging |
 
-All flags and commands: [docs/CLI.md](docs/CLI.md).
+`-rate`, `-chat-gap`, `-max-wait`, `-autoreply` and `-webhook-filter` can also be changed while it
+runs (`PATCH /settings` or the admin panel); such changes are saved and win over the flags until
+reset. All flags and commands: [docs/CLI.md](docs/CLI.md).
 
 ## Documentation
 

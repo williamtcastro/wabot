@@ -1,12 +1,10 @@
 # Admin panel (proposal)
 
-> **Deferred proposal.** Nothing in this document is built yet, except what the
-> [Logging today](#logging-today) section describes. It's kept here as a plan we may pick up later;
-> see the [list of proposals](README.md).
-
-A terminal version now exists: `wame admin` ([ADMIN.md](../ADMIN.md)) covers status, remote
-login, chats, tokens, the audit log and limiter / webhook health (`GET /stats`, in memory) over the
-API. The persistent delivery log, config and log views below would serve both.
+> **Partly built.** The web panel itself isn't built. A terminal panel, `wame admin`
+> ([ADMIN.md](../ADMIN.md)), covers status and remote login, chats, tokens, the audit log, limiter
+> and webhook health, and runtime settings, all over the API. The server pieces it needed are built
+> too (marked **Built** below), so a web panel would reuse them. The [Logging today](#logging-today)
+> section describes what exists; the rest is a plan. See the [list of proposals](README.md).
 
 This is a plan for a small web admin panel served by `wame serve`, and a description of the
 logging and audit groundwork that already exists for it.
@@ -53,14 +51,17 @@ logging and audit groundwork that already exists for it.
 
 ## What's missing
 
-1. **Webhook delivery log.** Today delivery results only go to the log. Add a
+1. **Webhook delivery log.** *Partly built:* `GET /stats` has delivery counters, queue depth and
+   the last 20 failed attempts in memory, and `POST /webhook/replay` resends one of them. Still
+   missing: a persistent log. Add a
    `wabot_webhook_deliveries` table (`delivery`, `event`, `seq`, `attempt`, `status`, `error`,
    `at`, `done`), written by `Webhook.send`, pruned to the last N days, served by
    `GET /admin/webhook` together with queue length (`len(w.queue)`) and capacity.
-2. **Limiter snapshot.** A `Limiter.Snapshot()` returning reservations in the last minute, the
-   next free slot, and a counter of `RateLimitError`s, for `Bot.Limiter`, `Bot.Lookups` and the
-   auto-reply limiter; served by `GET /admin/limits`.
-3. **Config snapshot.** Keep the parsed `config` on the `Bot` (or pass it to the panel) and serve
+2. **Limiter snapshot.** **Built** as `Limiter.Stats()` (use in the last minute, next free slot,
+   rejections since startup) for the send, lookup and auto-reply limiters, served by `GET /stats`
+   together with per-caller usage.
+3. **Config snapshot.** *Partly built:* `GET /settings` shows the runtime-editable settings with
+   their flag values and who changed them. For the rest of the configuration: keep the parsed `config` on the `Bot` (or pass it to the panel) and serve
    it with secrets (`token`, `webhookSecret`) replaced by `"set"` / `""`, plus where each value
    came from.
 4. **Log ring buffer.** A `slog.Handler` that tees the last ~1000 records into memory, served by
@@ -83,10 +84,9 @@ logging and audit groundwork that already exists for it.
    panel user could be audited the same way, by a name that can't collide with a token name (e.g.
    `maria` for a panel login, with token names and panel names sharing one namespace). Current scopes are
    `read`, `send` and `admin`; a viewer maps to `read`.
-8. **Settings persistence.** If runtime-editable settings are added (rate limit, chat gap,
-   auto-reply on/off, webhook filter), store them in a `wabot_settings` key/value table that
-   overrides flags on startup, and audit every change (`action=settings`, `detail` = key names,
-   never values of secrets).
+8. **Settings persistence.** **Built:** `GET`/`PATCH /settings` for `rate`, `chat_gap`,
+   `max_wait`, `auto_reply` and `webhook_filter`, stored in `wabot_settings`, overriding flags on
+   startup until reset, each change audited (`action=settings`; none of these are secrets).
 
 ## Logging today
 
@@ -183,7 +183,7 @@ the table agree.
 
 ## Implementation phases
 
-**Phase 1: read-only panel.** A new `internal/admin` package with static HTML, a little CSS and
+**Phase 1: read-only panel.** A new `internal/web` package (`internal/admin` is the terminal panel) with static HTML, a little CSS and
 [htmx](https://htmx.org) (vendored, not from a CDN), embedded with `//go:embed` and mounted by
 `internal/api` at `/admin/`. Pages: status & QR, chats & messages (live via `EventSource`), audit log.
 Auth: an API token (ideally a `read`-only one for this phase), entered once and kept in `sessionStorage`; without a token the
@@ -195,10 +195,11 @@ pass. No new tables.
 react/delete buttons, pair/logout. Panel actions audited under the panel user's name.
 
 **Phase 3: operational views.** Webhook delivery table and page, limiter snapshot, config
-snapshot, audit filters, optional log ring buffer.
+snapshot, audit filters, optional log ring buffer. (The API side of the limiter snapshot and of
+in-memory webhook health exists: `GET /stats`.)
 
-**Phase 4: runtime settings.** `wabot_settings` table, edit form for limiter, auto-reply and
-webhook filter, applied without a restart, each change audited.
+**Phase 4: runtime settings.** Edit form for limiter, auto-reply and webhook filter. (The API side
+exists: `GET`/`PATCH /settings` and the `wabot_settings` table.)
 
 No JavaScript build step at any phase. Server-rendered fragments for htmx can use
 `html/template`.

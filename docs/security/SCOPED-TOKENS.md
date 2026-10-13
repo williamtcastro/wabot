@@ -15,6 +15,9 @@ where it differs today, a **Now:** note says so.
   allowlists; see [MCP.md](../MCP.md).
 - 2026-10-11: follow-up pass over `/mcp` and `wame mcp` found F13–F16 (the MCP surface didn't carry
   over every F-fix); all fixed with regression tests. See [Follow-up: MCP](#follow-up-mcp-f13f16).
+- 2026-10-12: new admin-only routes (`/stats`, `/settings`, `/webhook/test`, `/webhook/replay`) and
+  the remote panel `wame admin`; reviewed under [Follow-up: admin routes](#follow-up-admin-routes).
+  No new way to authenticate.
 
 ## Summary
 
@@ -112,6 +115,7 @@ make the same choice for their generated tokens. This does **not** cover the own
 | `GET /contacts`, `/groups` | read | forbidden to restricted tokens |
 | `POST /check` | send | forbidden to restricted tokens |
 | `GET /audit`, `GET/POST /tokens`, `DELETE /tokens/{name}` | admin | n/a |
+| `GET /stats`, `GET/PATCH /settings`, `POST /webhook/test`, `/webhook/replay` | admin | n/a (added later, see [Follow-up: admin routes](#follow-up-admin-routes)) |
 | `GET /docs`, `/openapi.yaml` | public | n/a |
 
 `admin` implies every scope. Admin tokens can't have an allowlist.
@@ -521,6 +525,27 @@ is a misleading error, not a security issue.
   comment on `NewHandler` was removed. `/typing` was checked and already goes through `sendGuard` (allowlist
   and per-token rate), so its presence lookup is bounded per token.
 
+## Follow-up: admin routes
+
+Added after the review; all require `admin` (so they're never reachable by a restricted token) and
+go through the same `withAuth` and failed-login throttle.
+
+- **`GET /stats`** exposes, per caller name, requests and sends in the last 24 h, last seen time,
+  last client IP and open streams; plus limiter and webhook counters. All in memory, reset on
+  restart. It never includes the webhook URL, its secret or message text (`TestWebhookStats`).
+- **`PATCH /settings`** can raise `rate` (up to 1000/min, or 0 = unlimited) and change the webhook
+  filter, so an admin token can loosen the anti-ban limits; the change is audited with its values
+  and persists across restarts until reset. Every value is validated before any is applied
+  (`TestRuntimeSettings`). Per-token rates still apply on top.
+- **`POST /webhook/replay`** only accepts delivery ids from the recent failures list, so it can't be
+  used to push arbitrary stored messages, including ones the filter excluded, to the webhook. The
+  body is rebuilt from the stored message (`TestWebhookTestAndReplay`).
+- **`wame admin`** sends the token on every request: it refuses plain http beyond loopback unless
+  told otherwise, and a server address read from an env file is only used with a token from the
+  same file, so a stray `.env` can't redirect a token from the shell to another host
+  (`TestResolve`, `TestNewClientGuardsTheToken`). Text other people wrote is stripped of control
+  characters before it's drawn (`TestSafe`).
+
 ## Residual risks (accepted by design)
 
 - Per-token rates default to 10/min against a global 20/min, so two busy `send` tokens can still fill
@@ -547,7 +572,8 @@ is a misleading error, not a security issue.
 - **One token per agent.** Use the narrowest scopes (`read` alone if it only reads), an allowlist
   (`-chats 5511999999999`), a per-token `-rate`, and an `-expires` (for example `720h`).
 - **Rotate** by creating `agent-v2`, switching the agent over, then revoking `agent`. Names can't be
-  reused.
+  reused. The admin panel's `R` does create-then-revoke in one step (`agent` → `agent-2`), keeping
+  scopes, allowlist, rate and lifetime; tokens unused for 30 days are flagged there.
 - **Revoke immediately** on any suspected leak (`wame token revoke NAME`). Open streams close within
   10 s, and tokens that token created are revoked with it.
 - **On a LAN listener**, an owner secret or any token ever created keeps the API locked; there is no
