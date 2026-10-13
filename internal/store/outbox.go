@@ -44,6 +44,7 @@ type OutboxItem struct {
 	Status    string    `json:"status"`
 	Attempts  int       `json:"attempts"`
 	Due       time.Time `json:"due"`
+	SendAt    int64     `json:"-"` // send_at as asked, in Unix ms: 0 for none, -1 on items stored before it was kept
 	Created   time.Time `json:"created_at"`
 	Updated   time.Time `json:"updated_at"`
 	Chat      string    `json:"chat,omitempty"`
@@ -172,7 +173,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS wame_outbox_key ON wame_outbox (actor, key) WH
 }
 
 // outboxReceiptColumns came after the table did, so they're added to older databases on startup.
-var outboxReceiptColumns = []string{"delivered_at INTEGER NOT NULL DEFAULT 0", "read_at INTEGER NOT NULL DEFAULT 0"}
+var outboxReceiptColumns = []string{"delivered_at INTEGER NOT NULL DEFAULT 0", "read_at INTEGER NOT NULL DEFAULT 0", "send_at INTEGER NOT NULL DEFAULT -1"}
 
 // addColumns adds each "name type…" definition that table doesn't have yet.
 func addColumns(ctx context.Context, db *sql.DB, table string, defs []string) error {
@@ -215,7 +216,7 @@ func addColumn(ctx context.Context, db *sql.DB, table, def string) error {
 	return err
 }
 
-const outboxColumns = `id, batch, actor, token_id, key, recipient, text, reply_to, status, attempts, due, created_at, updated_at, chat, message_id, error, delivered_at, read_at`
+const outboxColumns = `id, batch, actor, token_id, key, recipient, text, reply_to, status, attempts, due, created_at, updated_at, chat, message_id, error, delivered_at, read_at, send_at`
 
 // outboxColumnsNoText reads an item without its text, where it isn't needed.
 var outboxColumnsNoText = strings.Replace(outboxColumns, " text,", " '',", 1)
@@ -231,7 +232,7 @@ func scanOutbox(row interface{ Scan(...any) error }) (OutboxItem, error) {
 	var it OutboxItem
 	var due, created, updated, delivered, read int64
 	err := row.Scan(&it.ID, &it.Batch, &it.Actor, &it.TokenID, &it.Key, &it.To, &it.Text, &it.ReplyTo, &it.Status,
-		&it.Attempts, &due, &created, &updated, &it.Chat, &it.MessageID, &it.Error, &delivered, &read)
+		&it.Attempts, &due, &created, &updated, &it.Chat, &it.MessageID, &it.Error, &delivered, &read, &it.SendAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = ErrNotFound
 	}
@@ -257,9 +258,14 @@ func (s *Store) queryOutbox(query string, args ...any) ([]OutboxItem, error) {
 	return out, rows.Err()
 }
 
+// EnqueueCheck sees Enqueue's result before it commits, and an error from it rolls everything back.
+// replayed[i] is true when items[i] was already stored under its key (out[i] is then the stored
+// one); open is how many queued or sending items the actor of items[0] has, the new ones included.
+type EnqueueCheck func(out []OutboxItem, replayed []bool, open int) error
+
 // Enqueue stores items in one transaction. An item whose (Actor, Key) is already stored isn't added
 // again; the stored one is returned in its place, so a retried request doesn't send twice.
-func (s *Store) Enqueue(items []OutboxItem) ([]OutboxItem, error) {
+func (s *Store) Enqueue(items []OutboxItem, check EnqueueCheck) ([]OutboxItem, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
@@ -267,14 +273,30 @@ func (s *Store) Enqueue(items []OutboxItem) ([]OutboxItem, error) {
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
 	out := make([]OutboxItem, len(items))
+	replayed := make([]bool, len(items))
 	for i, it := range items {
-		out[i], err = scanOutbox(tx.QueryRow(`INSERT INTO wame_outbox (batch, actor, token_id, key, recipient, text, reply_to, status, due, created_at, updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING `+outboxColumns,
-			it.Batch, it.Actor, it.TokenID, it.Key, it.To, it.Text, it.ReplyTo, OutboxQueued, max(it.Due.UnixMilli(), now), now, now))
+		sendAt := int64(0)
+		if !it.Due.IsZero() {
+			sendAt = it.Due.UnixMilli()
+		}
+		out[i], err = scanOutbox(tx.QueryRow(`INSERT INTO wame_outbox (batch, actor, token_id, key, recipient, text, reply_to, status, due, created_at, updated_at, send_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING `+outboxColumns,
+			it.Batch, it.Actor, it.TokenID, it.Key, it.To, it.Text, it.ReplyTo, OutboxQueued, max(sendAt, now), now, now, sendAt))
 		if errors.Is(err, ErrNotFound) {
+			replayed[i] = true
 			out[i], err = scanOutbox(tx.QueryRow(`SELECT `+outboxColumns+` FROM wame_outbox WHERE actor = ? AND key = ?`, it.Actor, it.Key))
 		}
 		if err != nil {
+			return nil, err
+		}
+	}
+	if check != nil && len(items) > 0 {
+		var open int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM wame_outbox WHERE actor = ? AND status IN (?, ?)`,
+			items[0].Actor, OutboxQueued, OutboxSending).Scan(&open); err != nil {
+			return nil, err
+		}
+		if err := check(out, replayed, open); err != nil {
 			return nil, err
 		}
 	}

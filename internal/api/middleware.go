@@ -49,7 +49,7 @@ func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter 
 // successful GET of one logs at debug and doesn't push everything else out of the /logs buffer.
 var quietPaths = map[string]bool{
 	"/status": true, "/messages/wait": true, "/events": true, "/logs": true, "/stats": true, "/metrics": true,
-	"/queue": true, "/tokens": true, "/settings": true, "/audit": true,
+	"/queue": true, "/tokens": true, "/settings": true, "/audit": true, "/optouts": true,
 }
 
 // withRequestLog logs one line per request. The query string is left out because it may hold the token.

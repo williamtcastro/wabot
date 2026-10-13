@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/williamtcastro/wame/internal/auth"
 	"github.com/williamtcastro/wame/internal/store"
@@ -33,9 +35,10 @@ func errorOf(w *httptest.ResponseRecorder) string {
 }
 
 type queued struct {
-	Batch  string             `json:"batch"`
-	Queued int                `json:"queued"`
-	Items  []store.OutboxItem `json:"items"`
+	Batch    string             `json:"batch"`
+	Queued   int                `json:"queued"`
+	Replayed int                `json:"replayed"`
+	Items    []store.OutboxItem `json:"items"`
 }
 
 func TestQueueCSV(t *testing.T) {
@@ -74,7 +77,7 @@ func TestQueueCSV(t *testing.T) {
 		{"empty to", "/queue", "to,text\n5511999999999,hi\n,hi\n", 400, "line 3: invalid recipient"},
 		{"bad number after a multi-line text", "/queue", "to,text\n5511999999999,\"a\nb\nc\"\n12,hi\n", 400, "line 5: invalid recipient"},
 		{"no text and no default", "/queue", "to\n5511999999999\n", 400, "line 2: text is empty"},
-		{"field count", "/queue", "to,text\n5511999999999,hi,extra\n", 400, "line 2: wrong number of fields"},
+		{"value outside the columns", "/queue", "to,text\n5511999999999,hi,extra\n", 400, "line 2: field 3 is outside the named columns"},
 		{"bad send_at column", "/queue", "to,text,send_at\n5511999999999,hi,soon\n", 400, "line 2: send_at"},
 		{"bad send_at default", "/queue?send_at=soon", "to,text\n5511999999999,hi\n", 400, "?send_at"},
 		{"bad batch", "/queue?batch=no%20spaces", "to,text\n5511999999999,hi\n", 400, "batch must be"},
@@ -129,8 +132,8 @@ func TestQueueCSVIdempotency(t *testing.T) {
 		t.Fatalf("first: %d %s", w.Code, w.Body)
 	}
 	if w := doCSV(h, "/queue?batch=promo", body, keyed); w.Code != 202 || json.Unmarshal(w.Body.Bytes(), &again) != nil ||
-		again.Items[0].ID != first.Items[0].ID || again.Items[1].ID != first.Items[1].ID {
-		t.Fatalf("a retry must return the same items: %d %s", w.Code, w.Body)
+		again.Items[0].ID != first.Items[0].ID || again.Items[1].ID != first.Items[1].ID || first.Replayed != 0 || again.Replayed != 2 {
+		t.Fatalf("a retry must return the same items, counted as replayed: %d %s", w.Code, w.Body)
 	}
 	if n, _ := b.Store.CountOutbox(store.OutboxFilter{}); n.Queued != 2 {
 		t.Fatalf("a retry queued again: %+v", n)
@@ -140,5 +143,30 @@ func TestQueueCSVIdempotency(t *testing.T) {
 	}
 	if w := doCSV(h, "/queue?batch=other", body, keyed); w.Code != 409 {
 		t.Fatalf("same key, other batch: %d %s", w.Code, w.Body)
+	}
+	longer := body + "552187654321,hi Ana\n"
+	if w := doCSV(h, "/queue?batch=promo", strings.Replace(longer, "hi John", "hi again", 1), keyed); w.Code != 409 {
+		t.Fatalf("same key, a changed row and a new one: %d %s", w.Code, w.Body)
+	}
+	if n, _ := b.Store.CountOutbox(store.OutboxFilter{}); n.Queued != 2 {
+		t.Fatalf("a 409 must not keep the new row: %+v", n)
+	}
+	if w := doCSV(h, "/queue?batch=promo&send_at="+url.QueryEscape(time.Now().Add(48*time.Hour).Format(time.RFC3339)), body, keyed); w.Code != 409 {
+		t.Fatalf("same key, other send_at: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestQueueCSVFormats(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "s3cret-owner-secret")
+	sender := bearer(issue(t, b, "promo-bot", []auth.Scope{auth.Send}, nil, 0))
+	sender["Content-Type"] = "application/csv"
+	var res queued
+	w := doCSV(h, "/queue", "to;text;;\n5511999999999;Olá Maria, tudo bem?;;\n   \n5511988887777;Hi John\n", sender)
+	if w.Code != 202 || json.Unmarshal(w.Body.Bytes(), &res) != nil || res.Queued != 2 {
+		t.Fatalf("application/csv with ';' and empty columns: %d %s", w.Code, w.Body)
+	}
+	if it, _ := b.Store.OutboxItem(res.Items[0].ID); it.Text != "Olá Maria, tudo bem?" {
+		t.Fatalf("text = %q", it.Text)
 	}
 }

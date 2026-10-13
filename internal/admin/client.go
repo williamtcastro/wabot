@@ -368,9 +368,10 @@ func (c *Client) QueueCounts(ctx context.Context, batch string) (store.OutboxCou
 
 // QueueResult is the answer of POST /queue; items come without their text.
 type QueueResult struct {
-	Batch  string             `json:"batch"`
-	Queued int                `json:"queued"`
-	Items  []store.OutboxItem `json:"items"`
+	Batch    string             `json:"batch"`
+	Queued   int                `json:"queued"`
+	Replayed int                `json:"replayed"` // of Queued, items an earlier request with the same key already queued
+	Items    []store.OutboxItem `json:"items"`
 }
 
 // QueueCSV queues the messages of a CSV file (at most 1000 rows, see docs/QUEUE.md) under batch;

@@ -25,6 +25,8 @@ func TestRequestLogLevels(t *testing.T) {
 		{"GET", "/tokens", "DEBUG"},
 		{"GET", "/settings", "DEBUG"},
 		{"GET", "/audit", "DEBUG"},
+		{"GET", "/optouts", "DEBUG"},
+		{"POST", "/optouts", "INFO"},
 		{"GET", "/stats?fail=1", "WARN"},
 		{"POST", "/queue", "INFO"},
 		{"PATCH", "/settings", "INFO"},

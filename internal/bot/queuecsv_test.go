@@ -35,6 +35,16 @@ func TestReadQueueCSV(t *testing.T) {
 		}
 	}
 
+	loose := "to,text,,\n5511999999999,Hi Maria,,\n  \t \n5511988887777\n+55 21 98765-4321,Hi Ana\n"
+	rows, err = ReadQueueCSV(strings.NewReader(loose), 0)
+	if err != nil || len(rows) != 3 || rows[1].To != "5511988887777" || rows[1].Text != "" || rows[2].To != "+55 21 98765-4321" {
+		t.Fatalf("short rows, blank lines, empty trailing columns: %+v %v", rows, err)
+	}
+	semi := "to;text;send_at\r\n5511999999999;\"Olá Maria, tudo bem?\";2026-10-13T09:00:00-03:00\r\n"
+	if rows, err := ReadQueueCSV(strings.NewReader(semi), 0); err != nil || len(rows) != 1 || rows[0].Text != "Olá Maria, tudo bem?" || rows[0].SendAt.IsZero() {
+		t.Fatalf("';' separated: %+v %v", rows, err)
+	}
+
 	only := "\xef\xbb\xbf\"to\"\n5511999999999\n"
 	if rows, err := ReadQueueCSV(strings.NewReader(only), 0); err != nil || len(rows) != 1 || rows[0].Text != "" {
 		t.Fatalf("to only: %+v %v", rows, err)
@@ -51,7 +61,11 @@ func TestReadQueueCSVErrors(t *testing.T) {
 		{"missing to", "text\nhello\n", `"to" column is required`, 0},
 		{"duplicate column", "to,TO\n", `column "to" appears twice`, 0},
 		{"bad time", "to,send_at\n5511999999999,tomorrow\n", "line 2: send_at", 0},
-		{"field count", "to,text\n5511999999999,a\n5511988887777,b,c\n", "line 3: wrong number of fields", 0},
+		{"value outside the columns", "to,text\n5511999999999,a\n5511988887777,Hi, John\n", "line 3: field 3 is outside the named columns", 0},
+		{"value under an unnamed column", "to,,text\n5511999999999,x,a\n", "line 2: field 2 is outside", 0},
+		{"decimal number", "to,text\n5511999999999.0,hi\n", "line 2: \"5511999999999.0\" is a number with decimals", 0},
+		{"decimal comma", "to;text\n5511999999999,0;hi\n", "number with decimals", 0},
+		{"mixed separators", "to;text,x\n", "export the file as comma-separated", 0},
 		{"bare quote", "to,text\n5511999999999,a\"b\n", "line 2:", 0},
 		{"scientific notation", "to,text\n5.511999E+12,hi\n", "line 2: \"5.511999E+12\" is a number in scientific notation", 0},
 		{"over the limit", "to,text\n5511999999999,a\n5511988887777,b\n552187654321,c\n", "line 4: at most 2 messages", 2},

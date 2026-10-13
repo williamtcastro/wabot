@@ -19,7 +19,7 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/queue -d '{
 ```
 
 ```json
-{ "batch": "promo-october", "queued": 3, "items": [ { "id": 41, "status": "queued", "to": "5511999999999", … }, … ] }
+{ "batch": "promo-october", "queued": 3, "replayed": 0, "items": [ { "id": 41, "status": "queued", "to": "5511999999999", … }, … ] }
 ```
 
 ## What it guarantees
@@ -50,7 +50,7 @@ token, so a misbehaving client can't fill the disk.
 ## CSV import
 
 A spreadsheet export works too. `POST /queue` takes the same messages as a CSV file when sent with
-`Content-Type: text/csv`, and `wame queue import` sends a file of any length from the command line.
+`Content-Type: text/csv` (or `application/csv`), and `wame queue import` sends a file of any length from the command line.
 
 ```csv
 to,text,send_at,reply_to
@@ -65,27 +65,37 @@ See you at 9.",2026-10-13T09:00:00-03:00,
   `txet` can't silently drop the text. Leave out the columns you don't need.
 - **One message per line.** Fields with commas, quotes or line breaks go in double quotes (`""` for
   a quote inside), as every spreadsheet writes them. A UTF-8 BOM, Windows line ends, spaces around
-  fields and blank lines are all fine.
-- A row without `text` (like Ana's above) gets the default text; without `send_at`, the default time
-  or as soon as the limits allow.
+  fields, blank lines, rows shorter than the header and empty columns without a name (the trailing
+  `,,` some spreadsheets add) are all fine. A value outside the named columns is refused: it's
+  usually text with a comma that wasn't quoted.
+- **Commas or semicolons.** Spreadsheets set to a language with a decimal comma (Portuguese, for
+  one) export with `;` between fields. When the header line has `;` and no `,`, the file is read
+  with `;`.
+- A row without `text` (like the last row above) gets the default text; without `send_at`, the
+  default time or as soon as the limits allow.
 - **Errors name the line** of the file, like `line 7: invalid recipient "12"`, and nothing in the
   request is queued.
-- A number a spreadsheet turned into scientific notation (`5.511999E+12`) has lost digits and is
-  refused; format the `to` column as text before exporting.
+- A number a spreadsheet turned into scientific notation (`5.511999E+12`) has lost digits, and one
+  written with decimals (`5511999999999.0`, as pandas and some exports do) isn't the number you
+  meant: both are refused. Format the `to` column as text before exporting.
 
 ```sh
 curl -H "Authorization: Bearer $T" -H "Content-Type: text/csv" -H "Idempotency-Key: promo-oct-1" \
-  --data-binary @promo.csv "localhost:8080/queue?batch=promo-october&text=Hi!%20Our%20store%20opens%20at%209."
+  --data-binary @promo.csv "localhost:8080/queue?batch=promo-october"
 ```
 
-The query takes `batch`, `text` and `send_at` (the defaults, like the JSON body's top-level fields);
+The query takes `batch`, `send_at` and `text` (the defaults, like the JSON body's top-level fields);
 the limits are the JSON form's: 1000 rows and 16 MB per request, the token's allowlist checked on
 every row, and `Idempotency-Key` to make a retry safe. Use `--data-binary`, not `-d`, which drops
-the line breaks.
+the line breaks. Put the message text in the file's `text` column rather than in `?text=`: query
+strings end up in proxy logs, shell history and browser history. `?text=` still works, for short
+defaults that aren't private.
 
 **From the command line**, `wame queue import` reads the file, checks every row locally (columns,
 numbers, times, text length) and sends it to the server in requests of 1000 rows, all under one
-batch:
+batch. What only the server knows (the token's allowlist, its limit of 10,000 waiting messages) is
+checked per request, after the earlier requests were queued, so an import can stop halfway; see
+[running it again](#running-an-import-again).
 
 ```sh
 wame queue import -batch promo-october -text "Hi! Our store opens at 9." promo.csv
@@ -102,16 +112,29 @@ It talks to the server over the API, like [`wame admin`](ADMIN.md) (same `-profi
 Docker or on another machine; the token needs the `send` scope. `-dry-run` checks the file and
 shows how it would be split, without sending anything.
 
-**Running it again is safe.** Each request carries an idempotency key, `-key` plus the request's
-number (`promo-oct.1`, `promo-oct.2`, …) or, without `-key`, one taken from a hash of the file;
-without `-batch`, the batch name comes from the key, so a rerun lands in the same batch. If an import stops halfway (the network
-dropped, the token hit its limit), run the same command again: the requests that already went
-through return what they queued instead of queuing it twice, and the rest are sent. A changed file
-gets new keys (a new import). Under the same `-key`, a request whose rows differ from what was
-queued under its key is refused with 409 (rows only added at the end go through, so a file that
-grew can be sent again). The server remembers the keys as long as it keeps the items, 7 days after
-they finish. `-text` and `-send-at` are filled in before sending, so changing them is a change of
-the rows too.
+### Running an import again
+
+Each request carries an idempotency key: `-key` plus the request's number (`promo-oct.1`,
+`promo-oct.2`, …) or, without `-key`, one taken from the file's full path (`csv-…`). Without
+`-batch`, the batch name comes from that key too, so a rerun lands in the same batch. A request
+whose key was used before returns what it queued instead of queuing it again; the CLI prints the
+key in its error when an import stops.
+
+- **It stopped halfway** (the network dropped, a row the token may not send to, the 10,000 waiting
+  limit): fix what the error names, in that request's lines or later ones, and run the same
+  command again (the error message spells it out, `-key` included). Requests whose rows didn't
+  change are recognized and not queued twice; the rest are sent. Don't edit, add or remove lines
+  before the request that failed: those were queued already.
+- **Rows that were already queued can't be changed** by rerunning: a request whose rows (text,
+  number, `reply_to`, `send_at`, batch) differ from what was queued under its key is refused with
+  409, and nothing of it is queued. Cancel the batch and import again under a new `-key`
+  instead. Rows only added at the end of the last request go through, so a file that grew can be
+  sent again.
+- **A new import from the same path** (next month's `promo.csv`) needs a new `-key`, or it's
+  refused with 409; the same file sent again unchanged queues nothing new. Moving the
+  file changes the derived key, so pass the `-key` from the error when resuming a moved file.
+- `-text` and `-send-at` are filled in before sending, so changing them is a change of the rows.
+- The server remembers the keys as long as it keeps the items, until 7 days after they finish.
 
 ## States
 
@@ -186,15 +209,17 @@ queued itself; with `admin`, every item (`?actor=` narrows it).
 
 | Route | |
 |---|---|
-| `POST /queue` | queue up to 1000 messages. Body: `messages` (each `to`, `text`, optional `reply_to` and `send_at`), optional `batch` (letters, digits, `.`, `_`, `-`; generated when left out), and top-level `text` / `send_at` used by messages that leave theirs out. Or a [CSV file](#csv-import) as `text/csv`. Answers 202 with the items (without text) |
+| `POST /queue` | queue up to 1000 messages. Body: `messages` (each `to`, `text`, optional `reply_to` and `send_at`), optional `batch` (letters, digits, `.`, `_`, `-`; generated when left out), and top-level `text` / `send_at` used by messages that leave theirs out. Or a [CSV file](#csv-import) as `text/csv` or `application/csv`. Answers 202 with the items (without text), `queued` (how many items) and `replayed` (how many of them were already queued under the idempotency key) |
 | `GET /queue` | items, newest first, plus `counts` by state. Query: `status`, `batch`, `actor` (admin), `before` (id, to page), `limit` (≤ 500) |
 | `GET /queue/{id}` | one item, with its text |
 | `DELETE /queue/{id}` | cancel a queued item (409 when it's already sending or finished) |
 | `DELETE /queue?batch=NAME` | cancel every queued item of a batch |
 
 A request is safe to retry with an `Idempotency-Key` header (or `idempotency_key` in the body):
-the same key from the same token returns the items it already queued instead of adding them again.
-The same key with different messages is refused with 409, like on `/send`. A body over 16 MB gets
+the same key from the same token returns the items it already queued instead of adding them again
+(counted in `replayed`). The same key with different messages (any of `to`, `text`, `reply_to`,
+`send_at`, or a named `batch`) is refused with 409, like on `/send`, and nothing of that request is
+queued. Replayed items don't count toward the 10,000 waiting limit. A body over 16 MB gets
 413.
 
 **Following progress.** `GET /queue?batch=promo-october` shows the counts. Or listen:

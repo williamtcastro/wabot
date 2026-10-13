@@ -20,10 +20,11 @@ import (
 
 const (
 	MaxQueueBatch    = 1000
-	maxQueueOpen     = 10000
 	maxQueueText     = 65536
 	maxQueueAhead    = 30 * 24 * time.Hour
 	MaxKeyLength     = 200
+	maxQueueTo       = 64
+	maxQueueReplyTo  = 128
 	outboxAttempts   = 5
 	outboxKeep       = 7 * 24 * time.Hour
 	outboxIdle       = time.Minute
@@ -35,6 +36,8 @@ const (
 )
 
 var (
+	maxQueueOpen = 10000 // per actor; tests lower it
+
 	batchName    = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 	errBatchName = BadInput("batch must be 1-64 letters, digits, '.', '_' or '-'")
 
@@ -173,9 +176,23 @@ func (b *Bot) wakeOutbox() {
 	}
 }
 
-// Enqueue validates and stores messages for the outbox worker. key makes the request safe to retry:
-// the same key from the same actor returns the items already queued.
-func (b *Bot) Enqueue(actor, tokenID, batch, key string, reqs []QueueRequest) (items []store.OutboxItem, err error) {
+// Enqueued is what QueueMessages stored: Items in the request's order, Replayed of them already
+// queued under the same idempotency key before.
+type Enqueued struct {
+	Items    []store.OutboxItem
+	Replayed int
+}
+
+// Enqueue is QueueMessages without the replay count.
+func (b *Bot) Enqueue(actor, tokenID, batch, key string, reqs []QueueRequest) ([]store.OutboxItem, error) {
+	res, err := b.QueueMessages(actor, tokenID, batch, key, reqs)
+	return res.Items, err
+}
+
+// QueueMessages validates and stores messages for the outbox worker. key makes the request safe to
+// retry: the same key from the same actor returns the items already queued, and the same key for a
+// different request is ErrKeyReused, with nothing stored.
+func (b *Bot) QueueMessages(actor, tokenID, batch, key string, reqs []QueueRequest) (res Enqueued, err error) {
 	named := batch != ""
 	if !named {
 		batch = "b-" + randomHex(6)
@@ -183,42 +200,55 @@ func (b *Bot) Enqueue(actor, tokenID, batch, key string, reqs []QueueRequest) (i
 	defer func() { b.Audit(actor, "queue", batch, fmt.Sprintf("%d messages", len(reqs)), err) }()
 	switch {
 	case len(reqs) == 0:
-		return nil, BadInput("no messages given")
+		return res, BadInput("no messages given")
 	case len(reqs) > MaxQueueBatch:
-		return nil, BadInput("at most %d messages per request", MaxQueueBatch)
+		return res, BadInput("at most %d messages per request", MaxQueueBatch)
 	case !batchName.MatchString(batch):
-		return nil, errBatchName
+		return res, errBatchName
 	case len(key) > MaxKeyLength:
-		return nil, BadInput("idempotency key is longer than %d characters", MaxKeyLength)
+		return res, BadInput("idempotency key is longer than %d characters", MaxKeyLength)
 	}
 	rows := make([]store.OutboxItem, len(reqs))
 	for i, r := range reqs {
 		if err := CheckQueueRequest(r); err != nil {
-			return nil, BadInput("%s: %v", r.Where(i), err)
+			return res, BadInput("%s: %v", r.Where(i), err)
 		}
-		rows[i] = store.OutboxItem{Batch: batch, Actor: actor, TokenID: tokenID, To: strings.TrimSpace(r.To), Text: r.Text, ReplyTo: r.ReplyTo, Due: r.SendAt}
+		rows[i] = store.OutboxItem{Batch: batch, Actor: actor, TokenID: tokenID, To: strings.TrimSpace(r.To), Text: r.Text, ReplyTo: strings.TrimSpace(r.ReplyTo), Due: r.SendAt}
 		if key != "" {
 			rows[i].Key = fmt.Sprintf("%s#%d", key, i)
 		}
 	}
-	c, err := b.Store.CountOutbox(store.OutboxFilter{Actor: actor})
-	if err != nil {
-		return nil, err
-	}
-	if open := c.Queued + c.Sending; open+len(reqs) > maxQueueOpen {
-		return nil, BadInput("%s already has %d messages waiting; at most %d may be", actor, open, maxQueueOpen)
-	}
-	if items, err = b.Store.Enqueue(rows); err != nil {
-		return nil, err
-	}
-	for i, it := range items {
-		r := rows[i]
-		if (named && it.Batch != r.Batch) || it.To != r.To || it.Text != r.Text || it.ReplyTo != r.ReplyTo {
-			return nil, ErrKeyReused
+	res.Items, err = b.Store.Enqueue(rows, func(out []store.OutboxItem, replayed []bool, open int) error {
+		for i, it := range out {
+			if !replayed[i] {
+				continue
+			}
+			res.Replayed++
+			if !sameRequest(it, rows[i], named) {
+				return ErrKeyReused
+			}
 		}
+		if added := len(rows) - res.Replayed; added > 0 && open > maxQueueOpen {
+			return BadInput("%s already has %d messages waiting; at most %d may be", actor, open-added, maxQueueOpen)
+		}
+		return nil
+	})
+	if err != nil {
+		return Enqueued{}, err
 	}
 	b.wakeOutbox()
-	return items, nil
+	return res, nil
+}
+
+// sameRequest reports whether stored was queued by the request that would queue want. Items stored
+// before send_at was kept (SendAt -1) are compared without it.
+func sameRequest(stored, want store.OutboxItem, named bool) bool {
+	sendAt := int64(0)
+	if !want.Due.IsZero() {
+		sendAt = want.Due.UnixMilli()
+	}
+	return (!named || stored.Batch == want.Batch) && stored.To == want.To && stored.Text == want.Text &&
+		strings.TrimSpace(stored.ReplyTo) == want.ReplyTo && (stored.SendAt == -1 || stored.SendAt == sendAt)
 }
 
 // CheckBatch accepts 1-64 letters, digits, '.', '_' or '-'.
@@ -232,6 +262,10 @@ func CheckBatch(name string) error {
 // CheckQueueRequest is Enqueue's check of one message, for callers that report errors their own way.
 func CheckQueueRequest(r QueueRequest) error {
 	switch {
+	case len(strings.TrimSpace(r.To)) > maxQueueTo:
+		return fmt.Errorf("to is longer than %d characters", maxQueueTo)
+	case len(strings.TrimSpace(r.ReplyTo)) > maxQueueReplyTo:
+		return fmt.Errorf("reply_to is longer than %d characters", maxQueueReplyTo)
 	case strings.TrimSpace(r.Text) == "":
 		return errors.New("text is empty")
 	case utf8.RuneCountInString(r.Text) > maxQueueText:

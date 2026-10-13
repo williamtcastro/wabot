@@ -135,13 +135,13 @@ func ParseRecipient(to string) (types.JID, error) {
 	if strings.Contains(to, "@") {
 		jid, err := types.ParseJID(to)
 		if err != nil || jid.User == "" {
-			return types.JID{}, BadInput("invalid JID %q", to)
+			return types.JID{}, BadInput("invalid JID %.40q", to)
 		}
 		return jid, nil
 	}
 	d := digits(to)
 	if len(d) < 8 || len(d) > 15 {
-		return types.JID{}, BadInput("invalid recipient %q", to)
+		return types.JID{}, BadInput("invalid recipient %.40q", to)
 	}
 	return types.NewJID(d, types.DefaultUserServer), nil
 }

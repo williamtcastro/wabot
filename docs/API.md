@@ -480,12 +480,18 @@ curl -H "$H" "localhost:8080/queue?batch=promo-october&status=failed"
 curl -H "$H" -X DELETE "localhost:8080/queue?batch=promo-october"     # cancel what hasn't gone out
 ```
 
-**As CSV.** With `Content-Type: text/csv` the body is a CSV file instead: a header line naming the
-columns (`to` required; `text`, `send_at`, `reply_to`; any order) and one message per line, with
-`batch`, `text` and `send_at` in the query as defaults. Same limits (1000 rows, 16 MB, allowlist per
-row, `Idempotency-Key`); an unknown column is a 400 that names it, and errors name the file's line
-(`line 7: invalid recipient "12"`). See [CSV import](QUEUE.md#csv-import), and `wame queue import`
-for files of any length.
+The answer has `batch`, the `items` (without text), `queued` (how many items) and `replayed` (how
+many of them were already queued under the same `Idempotency-Key`, so a retry shows what it
+didn't add). The same key with different messages (`to`, `text`, `reply_to`, `send_at` or a named
+`batch`) is a 409 and queues nothing.
+
+**As CSV.** With `Content-Type: text/csv` (or `application/csv`) the body is a CSV file instead: a
+header line naming the columns (`to` required; `text`, `send_at`, `reply_to`; any order; `,` or
+`;` between fields) and one message per line, with `batch`, `send_at` and `text` in the query as
+defaults. Same limits (1000 rows, 16 MB, allowlist per row, `Idempotency-Key`); an unknown column
+is a 400 that names it, and errors name the file's line (`line 7: invalid recipient "12"`). Put the
+text in the file rather than in `?text=`: query strings are kept in proxy logs and shell history.
+See [CSV import](QUEUE.md#csv-import), and `wame queue import` for files of any length.
 
 ```sh
 curl -H "$H" -H "Content-Type: text/csv" --data-binary @promo.csv "localhost:8080/queue?batch=promo-october"

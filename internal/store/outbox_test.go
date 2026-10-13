@@ -15,7 +15,7 @@ func TestOutboxLifecycle(t *testing.T) {
 	items, err := s.Enqueue([]OutboxItem{
 		{Batch: "promo", Actor: "ops", To: "5511999999999", Text: "Hi Maria", Due: later},
 		{Batch: "promo", Actor: "ops", To: "5511988887777", Text: "Hi John"},
-	})
+	}, nil)
 	if err != nil || len(items) != 2 {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestOutboxReceipts(t *testing.T) {
 	items, _ := s.Enqueue([]OutboxItem{
 		{Batch: "promo", Actor: "ops", To: "5511999999999", Text: "Hi Maria"},
 		{Batch: "promo", Actor: "ops", To: "5511988887777", Text: "Hi John"},
-	})
+	}, nil)
 	for i, it := range items {
 		if _, err := s.ClaimOutbox(it.ID, fmt.Sprintf("MSG%d", i)); err != nil {
 			t.Fatal(err)
@@ -93,7 +93,7 @@ func TestOutboxReceipts(t *testing.T) {
 	if none, err := s.MarkOutboxReceipt(nil, true, at); none != nil || err != nil {
 		t.Fatal("no ids, no query")
 	}
-	if _, err := s.Enqueue([]OutboxItem{{Batch: "promo", Actor: "ops", To: "552187654321", Text: "Hi Ana"}}); err != nil {
+	if _, err := s.Enqueue([]OutboxItem{{Batch: "promo", Actor: "ops", To: "552187654321", Text: "Hi Ana"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := s.MarkOutboxReceipt([]string{""}, true, at); len(got) != 0 {
@@ -172,7 +172,7 @@ func BenchmarkEnqueue(b *testing.B) {
 				batch[i] = OutboxItem{Batch: "bench", Actor: "ops", To: "5511999999999", Text: "Hello from the benchmark"}
 			}
 			for b.Loop() {
-				if _, err := s.Enqueue(batch); err != nil {
+				if _, err := s.Enqueue(batch, nil); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -188,7 +188,7 @@ func BenchmarkDueAndClaim(b *testing.B) {
 		batch[i] = OutboxItem{Batch: "bench", Actor: "ops", To: "5511999999999", Text: "Hello"}
 	}
 	for range 20 {
-		if _, err := s.Enqueue(batch); err != nil {
+		if _, err := s.Enqueue(batch, nil); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -203,5 +203,33 @@ func BenchmarkDueAndClaim(b *testing.B) {
 		if _, err := s.FinishOutbox(due[0].ID, OutboxResult{Status: OutboxSent}); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestEnqueueCheckRollsBack(t *testing.T) {
+	s := openStore(t)
+	at := time.Now().Add(time.Hour)
+	first, err := s.Enqueue([]OutboxItem{{Batch: "promo", Actor: "ops", Key: "k#0", To: "5511999999999", Text: "Hi Maria", Due: at}}, nil)
+	if err != nil || first[0].SendAt != at.UnixMilli() {
+		t.Fatalf("%v %+v", err, first)
+	}
+	refuse := errors.New("refused")
+	var seen []bool
+	var open int
+	_, err = s.Enqueue([]OutboxItem{
+		{Batch: "promo", Actor: "ops", Key: "k#0", To: "5511999999999", Text: "Hi Maria", Due: at},
+		{Batch: "promo", Actor: "ops", Key: "k#1", To: "5511988887777", Text: "Hi John"},
+	}, func(out []OutboxItem, replayed []bool, n int) error {
+		seen, open = replayed, n
+		return refuse
+	})
+	if !errors.Is(err, refuse) || len(seen) != 2 || !seen[0] || seen[1] || open != 2 {
+		t.Fatalf("%v %v %d", err, seen, open)
+	}
+	if c, _ := s.CountOutbox(OutboxFilter{}); c.Queued != 1 {
+		t.Fatalf("a refused check must roll back: %+v", c)
+	}
+	if it, _ := s.Enqueue([]OutboxItem{{Batch: "promo", Actor: "ops", To: "5511988887777", Text: "Hi John"}}, nil); it[0].SendAt != 0 || it[0].Due.IsZero() {
+		t.Fatalf("no send_at: %+v", it[0])
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -101,7 +102,7 @@ func TestQueueImportChunksAndRerun(t *testing.T) {
 	if n := counts(t, b, "promo"); n.Queued != 23 {
 		t.Fatalf("queued %+v", n)
 	}
-	if out, err := runQueue(t, "import", file, "-batch", "promo"); err != nil || !strings.Contains(out, "queued 23 messages") {
+	if out, err := runQueue(t, "import", file, "-batch", "promo"); err != nil || !strings.Contains(out, "queued 0 messages (already queued 23)") {
 		t.Fatalf("rerun: %v\n%s", err, out)
 	}
 	if n := counts(t, b, ""); n.Queued != 23 {
@@ -158,8 +159,11 @@ func TestQueueImportWithoutBatchOrKey(t *testing.T) {
 		t.Fatalf("the batch and keys must come from the file, so a rerun is a no-op: %+v %+v\n%s", n, items[0], out)
 	}
 	writeFile(t, file, "to,text\n5511999999999,changed\n")
-	if _, err := runQueue(t, "import", file); err != nil || counts(t, b, "").Queued != 4 {
-		t.Fatalf("a changed file is a new import: %v", err)
+	if _, err := runQueue(t, "import", file); err == nil || !strings.Contains(err.Error(), "pass another -key") || counts(t, b, "").Queued != 3 {
+		t.Fatalf("rows already queued from this file can't change silently: %v", err)
+	}
+	if _, err := runQueue(t, "import", "-key", "promo-nov", file); err != nil || counts(t, b, "").Queued != 4 {
+		t.Fatalf("a new import of the same path takes a new -key: %v", err)
 	}
 }
 
@@ -189,7 +193,8 @@ func TestQueueImportDryRun(t *testing.T) {
 		{"text\nhi\n", "", `"to" column is required`},
 		{"to,text\n", "", "no messages"},
 		{"to,text,send_at\n5511999999999,hi,2099-01-01T00:00:00Z\n", "", "line 2: send_at is more than 30 days ahead"},
-		{"to,text\n5511999999999,hi\n", "-send-at tomorrow", "-send-at must be"},
+		{"to,text\n5511999999999,hi\n", "-send-at tomorrow", `-send-at "tomorrow" isn't an RFC 3339 time`},
+		{"to,text\n5511999999999.0,hi\n", "", "line 2: \"5511999999999.0\" is a number with decimals"},
 		{"to,text\n5511999999999,hi\n", "-batch no/slash", "batch must be"},
 		{"to,text\n5511999999999,hi\n", "-key " + strings.Repeat("k", 200), "-key is longer"},
 	} {
@@ -229,10 +234,22 @@ func TestQueueImportReportsFileLines(t *testing.T) {
 		body.WriteString("5511999999999,\"hi\nMaria\"\n")
 	}
 	body.WriteString("5511999999999,hi\n5511988887777,hi John\n")
-	out, err := runQueue(t, "import", "-server", url, "-token", scoped, csvFileTo(t, body.String()))
+	file := csvFileTo(t, body.String())
+	out, err := runQueue(t, "import", "-server", url, "-token", scoped, file)
 	if err == nil || !strings.Contains(out, "2/2: lines 22-23: failed: this token can't do that (403): line 23: this token can't access that chat") ||
-		!strings.Contains(err.Error(), "stopped after 10 of 12 messages") {
+		!strings.Contains(err.Error(), "stopped after 10 of 12 messages") || !strings.Contains(err.Error(), "from line 22 on") {
 		t.Fatalf("%v\n%s", err, out)
+	}
+	items, _ := b.Store.ListOutbox(store.OutboxFilter{}, 1)
+	batch := items[0].Batch
+
+	writeFile(t, file, strings.Replace(body.String(), "5511988887777,hi John", "5511999999999,hi again", 1))
+	out, err = runQueue(t, "import", "-server", url, "-token", scoped, file)
+	if err != nil || !strings.Contains(out, "batch "+batch) {
+		t.Fatalf("a rerun after fixing the row must resume the same import: %v\n%s", err, out)
+	}
+	if n := counts(t, b, batch); n.Queued != 12 {
+		t.Fatalf("the first chunk must be replayed, not queued again: %+v", n)
 	}
 }
 
@@ -295,5 +312,19 @@ func TestChunkRowsBySize(t *testing.T) {
 	}
 	if chunks[1].first != chunks[0].last+1 {
 		t.Errorf("chunks must be contiguous: %+v %+v", chunks[0].last, chunks[1].first)
+	}
+}
+
+func TestQueueImportSanitizesServerErrors(t *testing.T) {
+	queueServer(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"line 2: \u001b[2J\u001b]0;pwned\u0007bad\nrow"}`)
+	}))
+	defer srv.Close()
+	out, err := runQueue(t, "import", "-server", srv.URL, "-token", testOwner, csvFile(t, 1))
+	if err == nil || strings.ContainsAny(out, "\x1b\x07") || !strings.Contains(out, "failed: line 2:") || strings.Count(out, "\n") != 1 {
+		t.Fatalf("%v\n%q", err, out)
 	}
 }

@@ -3,6 +3,8 @@ package bot
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -403,5 +405,70 @@ func TestQuietHoursSwitch(t *testing.T) {
 	}
 	if s := b.QueueStats(); s.QuietUntil.IsZero() || s.QuietOff {
 		t.Fatalf("back on (the default) must hold it again: %+v", s)
+	}
+}
+
+func TestEnqueueReplaysInsideTheLimit(t *testing.T) {
+	b := newTestBot(t)
+	defer func(n int) { maxQueueOpen = n }(maxQueueOpen)
+	maxQueueOpen = 3
+	at := time.Now().Add(time.Hour).Truncate(time.Second)
+	reqs := []QueueRequest{
+		{To: "5511999999999", Text: "Hi Maria", SendAt: at},
+		{To: "5511988887777", Text: "Hi John"},
+		{To: "552187654321", Text: "Hi Ana"},
+	}
+	first, err := b.QueueMessages("ops", "", "promo", "k1", reqs)
+	if err != nil || first.Replayed != 0 || len(first.Items) != 3 {
+		t.Fatalf("%v %+v", err, first)
+	}
+	if _, err := b.Store.ClaimOutbox(first.Items[1].ID, "MSG1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Store.FinishOutbox(first.Items[1].ID, store.OutboxResult{Status: store.OutboxSent}); err != nil {
+		t.Fatal(err)
+	}
+	again, err := b.QueueMessages("ops", "", "promo", "k1", reqs)
+	if err != nil || again.Replayed != 3 || again.Items[0].ID != first.Items[0].ID {
+		t.Fatalf("a replay at the limit (one item already sent) must pass: %v %+v", err, again)
+	}
+	if _, err := b.QueueMessages("ops", "", "promo", "k2", reqs[:2]); !isInputError(err) {
+		t.Fatalf("a new item over the limit = %v", err)
+	}
+	moved := slices.Clone(reqs)
+	moved[0].SendAt = at.Add(time.Hour)
+	if _, err := b.QueueMessages("ops", "", "promo", "k1", moved); !errors.Is(err, ErrKeyReused) {
+		t.Fatalf("same key, other send_at = %v", err)
+	}
+	moved[0].SendAt = time.Time{}
+	if _, err := b.QueueMessages("ops", "", "promo", "k1", moved); !errors.Is(err, ErrKeyReused) {
+		t.Fatalf("same key, send_at dropped = %v", err)
+	}
+	maxQueueOpen = 10
+	if _, err := b.QueueMessages("ops", "", "promo", "k1", append(slices.Clone(reqs), QueueRequest{To: "5511999999999", Text: "new"})); err != nil {
+		t.Fatalf("same key, a row added at the end: %v", err)
+	}
+	if c, _ := b.Store.CountOutbox(store.OutboxFilter{}); c.Queued != 3 {
+		t.Fatalf("counts %+v", c)
+	}
+}
+
+func TestQueueRequestFieldCaps(t *testing.T) {
+	long := "5511999999999" + strings.Repeat(" ", 10) + strings.Repeat("-", 60)
+	if err := CheckQueueRequest(QueueRequest{To: long, Text: "hi"}); err == nil || !strings.Contains(err.Error(), "to is longer than 64") {
+		t.Fatalf("long to = %v", err)
+	}
+	if err := CheckQueueRequest(QueueRequest{To: "5511999999999", Text: "hi", ReplyTo: strings.Repeat("A", 129)}); err == nil || !strings.Contains(err.Error(), "reply_to is longer than 128") {
+		t.Fatalf("long reply_to = %v", err)
+	}
+	if err := CheckQueueRequest(QueueRequest{To: " 5511999999999 ", Text: "hi", ReplyTo: " 3EB0C4 "}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseRecipient(strings.Repeat("x", 1<<20)); err == nil || len(err.Error()) > 100 {
+		t.Fatalf("a long recipient must not be echoed whole: %d bytes", len(err.Error()))
+	}
+	items, err := newTestBot(t).Enqueue("ops", "", "", "", []QueueRequest{{To: " 5511999999999 ", Text: "hi", ReplyTo: " 3EB0C4 "}})
+	if err != nil || items[0].To != "5511999999999" || items[0].ReplyTo != "3EB0C4" {
+		t.Fatalf("stored trimmed: %v %+v", err, items)
 	}
 }

@@ -28,15 +28,16 @@ type queueBody struct {
 	SendAt         time.Time      `json:"send_at"`
 	Messages       []queueMessage `json:"messages"`
 	IdempotencyKey string         `json:"idempotency_key"`
+	isCSV          bool
 	csv            []bot.QueueRequest
 }
 
 // enqueue takes {"batch", "text", "send_at", "messages": [{to, text, reply_to, send_at}], "idempotency_key"},
-// or a text/csv body with batch, text and send_at in the query (see readQueueCSV); the top-level
-// text and send_at are defaults for messages that leave them out.
+// or a text/csv (or application/csv) body with batch, text and send_at in the query (see
+// readQueueCSV); the top-level text and send_at are defaults for messages that leave them out.
 func (a *server) enqueue(w http.ResponseWriter, r *http.Request) {
 	var req queueBody
-	if ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); ct == "text/csv" {
+	if ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); ct == "text/csv" || ct == "application/csv" {
 		if !readQueueCSV(w, r, &req) {
 			return
 		}
@@ -49,26 +50,26 @@ func (a *server) enqueue(w http.ResponseWriter, r *http.Request) {
 	}
 	p := principal(r)
 	key := cmp.Or(r.Header.Get("Idempotency-Key"), req.IdempotencyKey)
-	items, err := a.b.Enqueue(p.Name, p.TokenID, req.Batch, key, reqs)
+	res, err := a.b.QueueMessages(p.Name, p.TokenID, req.Batch, key, reqs)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	for i := range items {
-		items[i].Text = ""
+	for i := range res.Items {
+		res.Items[i].Text = ""
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"batch": items[0].Batch, "queued": len(items), "items": items})
+	writeJSON(w, http.StatusAccepted, map[string]any{"batch": res.Items[0].Batch, "queued": len(res.Items), "replayed": res.Replayed, "items": res.Items})
 }
 
 // readQueueCSV reads a CSV body (bot.ReadQueueCSV) of at most maxQueueBody bytes and
 // bot.MaxQueueBatch rows, with ?batch, ?text and ?send_at as the body's top-level fields.
 func readQueueCSV(w http.ResponseWriter, r *http.Request, req *queueBody) bool {
 	q := r.URL.Query()
-	req.Batch, req.Text = q.Get("batch"), q.Get("text")
+	req.Batch, req.Text, req.isCSV = q.Get("batch"), q.Get("text"), true
 	if s := q.Get("send_at"); s != "" {
-		t, err := time.Parse(time.RFC3339, s)
+		t, err := bot.ParseSendAt(s)
 		if err != nil {
-			writeError(w, bot.BadInput("?send_at must be an RFC 3339 time like 2026-10-13T09:00:00-03:00"))
+			writeError(w, bot.BadInput("?send_at %v", err))
 			return false
 		}
 		req.SendAt = t
@@ -89,7 +90,7 @@ func readQueueCSV(w http.ResponseWriter, r *http.Request, req *queueBody) bool {
 // allowlist; Enqueue checks the rest.
 func (a *server) queueRequests(w http.ResponseWriter, r *http.Request, req queueBody) ([]bot.QueueRequest, bool) {
 	reqs := req.csv
-	if reqs == nil {
+	if !req.isCSV {
 		reqs = make([]bot.QueueRequest, len(req.Messages))
 		for i, m := range req.Messages {
 			reqs[i] = bot.QueueRequest{To: m.To, Text: m.Text, ReplyTo: m.ReplyTo, SendAt: m.SendAt}

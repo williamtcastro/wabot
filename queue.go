@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/williamtcastro/wame/internal/admin"
 	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/termui"
 )
 
 const (
@@ -82,8 +84,8 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 	var at time.Time
 	if *sendAt != "" {
 		var err error
-		if at, err = time.Parse(time.RFC3339, *sendAt); err != nil {
-			return errors.New("-send-at must be an RFC 3339 time like 2026-10-13T09:00:00-03:00")
+		if at, err = bot.ParseSendAt(*sendAt); err != nil {
+			return fmt.Errorf("-send-at %w", err)
 		}
 	}
 
@@ -104,10 +106,9 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 			return fmt.Errorf("%s: %s: %w", file, rows[i].Where(i), err)
 		}
 	}
-	sum := sha256.Sum256(data)
-	base := cmp.Or(*key, "csv-"+hex.EncodeToString(sum[:16]))
-	if len(base) > bot.MaxKeyLength-8 {
-		return fmt.Errorf("-key is longer than %d characters", bot.MaxKeyLength-8)
+	base, err := importKey(*key, file)
+	if err != nil {
+		return err
 	}
 	keySum := sha256.Sum256([]byte(base))
 	*batch = cmp.Or(*batch, "csv-"+hex.EncodeToString(keySum[:6]))
@@ -136,20 +137,27 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	queued := 0
+	queued, replayed := 0, 0
 	for i, ch := range chunks {
 		res, err := c.QueueCSV(ctx, ch.body, *batch, chunkKey(base, i))
 		if err != nil {
-			fmt.Fprintf(out, "%d/%d: lines %d-%d: failed: %v\n", i+1, len(chunks), ch.first, ch.last, ch.fileError(err))
-			if apiErr, ok := errors.AsType[*admin.APIError](err); ok && apiErr.Code == http.StatusConflict {
-				return fmt.Errorf("stopped after %d of %d messages: these rows differ from what was queued under key %s before; for a new import, pass another -key", queued, len(rows), chunkKey(base, i))
+			fmt.Fprintf(out, "%d/%d: lines %d-%d: failed: %s\n", i+1, len(chunks), ch.first, ch.last, termui.SafeLine(ch.fileError(err).Error()))
+			apiErr, ok := errors.AsType[*admin.APIError](err)
+			switch {
+			case ok && apiErr.Code == http.StatusConflict:
+				return fmt.Errorf("stopped after %d of %d messages: lines %d-%d differ from what was queued under key %s before. "+
+					"Rows that were already queued can't be changed (cancel them instead); for a new import, pass another -key", queued, len(rows), ch.first, ch.last, chunkKey(base, i))
+			case ok && (apiErr.Code == http.StatusBadRequest || apiErr.Code == http.StatusForbidden):
+				return fmt.Errorf("stopped after %d of %d messages. Fix the cause above (a row from line %d on: leave the lines before it as they are), then run: "+
+					"wame queue import -key %s -batch %s %s (what was already queued isn't queued twice)", queued, len(rows), ch.first, base, *batch, file)
 			}
-			return fmt.Errorf("stopped after %d of %d messages; run the same command again to retry: what was already queued isn't queued twice", queued, len(rows))
+			return fmt.Errorf("stopped after %d of %d messages; run the same command again (with -key %s) to retry: what was already queued isn't queued twice", queued, len(rows), base)
 		}
-		queued += res.Queued
-		fmt.Fprintf(out, "%d/%d: lines %d-%d: queued %d\n", i+1, len(chunks), ch.first, ch.last, res.Queued)
+		queued += res.Queued - res.Replayed
+		replayed += res.Replayed
+		fmt.Fprintf(out, "%d/%d: lines %d-%d: queued %d%s\n", i+1, len(chunks), ch.first, ch.last, res.Queued-res.Replayed, alreadyQueued(res.Replayed))
 	}
-	fmt.Fprintf(out, "queued %d messages, batch %s (follow it with: wame queue status -batch %s)\n", queued, *batch, *batch)
+	fmt.Fprintf(out, "queued %d messages%s, batch %s (follow it with: wame queue status -batch %s)\n", queued, alreadyQueued(replayed), *batch, *batch)
 	return nil
 }
 
@@ -231,6 +239,23 @@ func (c importChunk) fileError(err error) error {
 
 func chunkKey(base string, i int) string { return fmt.Sprintf("%s.%d", base, i+1) }
 
+// importKey is the base of the import's chunk keys: -key, or else one derived from the file's
+// absolute path, so a rerun after fixing a row resumes the same import (see docs/QUEUE.md).
+func importKey(key, file string) (string, error) {
+	if key != "" {
+		if len(key) > bot.MaxKeyLength-8 {
+			return "", fmt.Errorf("-key is longer than %d characters", bot.MaxKeyLength-8)
+		}
+		return key, nil
+	}
+	abs, err := filepath.Abs(file)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(abs))
+	return "csv-" + hex.EncodeToString(sum[:8]), nil
+}
+
 func recipients(rows []bot.QueueRequest) int {
 	seen := map[string]bool{}
 	for _, r := range rows {
@@ -270,4 +295,11 @@ func queueStatus(ctx context.Context, args []string, out io.Writer) error {
 		fmt.Fprintf(out, "next due %s\n", n.NextDue.Local().Format("2006-01-02 15:04"))
 	}
 	return nil
+}
+
+func alreadyQueued(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (already queued %d)", n)
 }

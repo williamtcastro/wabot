@@ -124,8 +124,10 @@ addresses unless you pass `-insecure`.
 
 Queues the messages of a CSV file on a running server ([format](QUEUE.md#csv-import): a header
 line with `to` and optionally `text`, `send_at`, `reply_to`; one message per line). It checks every
-row first, then sends them in requests of 1000 under one batch, printing each request's result and
-a summary:
+row's format locally first (columns, numbers, times, text length), then sends them in requests of
+1000 under one batch, printing each request's result and a summary. The token's allowlist and its
+limit of waiting messages are checked by the server per request, after the earlier requests were
+queued, so an import can still stop halfway:
 
 ```sh
 wame queue import -batch promo-october -text "Hi! Our store opens at 9." promo.csv
@@ -137,10 +139,14 @@ wame queue import -dry-run promo.csv          # check and show the requests, sen
 | `-batch NAME` | the batch for every row (letters, digits, `.`, `_`, `-`); default `csv-` plus a hash of the key (so reruns share it) |
 | `-text DEFAULT` | text for rows without one |
 | `-send-at TIME` | RFC 3339 time for rows without one, e.g. `2026-10-13T09:00:00-03:00` |
-| `-key KEY` | base of the idempotency keys (`KEY.1`, `KEY.2`, … per request); default from a hash of the file |
+| `-key KEY` | base of the idempotency keys (`KEY.1`, `KEY.2`, … per request); default `csv-` plus a hash of the file's full path |
 | `-dry-run` | parse and check the file locally and print how it would be sent |
 
-Running the same command again never queues a row twice, so after a failure just run it again. Like
+After a failure, fix what the error names (in the failed request's lines or later ones, never the
+lines before it) and run the command the error prints: requests that went through before are
+recognized by their key and not queued twice. Rows that were already queued can't be changed by
+a rerun (409), and a new import from the same path needs a new `-key`; see
+[running an import again](QUEUE.md#running-an-import-again). Like
 `wame admin`, it only talks to the HTTP API (the server may be in Docker or elsewhere) and takes
 `-profile`, `-server`, `-token` and `-insecure`, or `WAME_SERVER` / `WAME_TOKEN` from the
 environment, `./.env` or `~/.config/wame/admin.env`; the token needs the `send` scope. Files up to
@@ -262,7 +268,7 @@ set `-log-file`, so they don't break the screen or a script's output.
 Each HTTP request produces one line with `method`, `path`, `status`, `duration_ms` and
 `remote`. The query string is left out on purpose because it may contain the token.
 `GET` requests to the polled routes (`/status`, `/messages/wait`, `/events`, `/logs`, `/stats`,
-`/metrics`, `/queue`, `/tokens`, `/settings`, `/audit`) log at debug level unless they fail; writes
+`/metrics`, `/queue`, `/tokens`, `/settings`, `/audit`, `/optouts`) log at debug level unless they fail; writes
 to them, like `POST /queue` or `PATCH /settings`, stay at info.
 
 ```
