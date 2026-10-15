@@ -414,6 +414,11 @@ func (b *Bot) pruneOutbox() {
 	} else if n > 0 {
 		b.Log.Info("outbox: pruned finished items", "count", n)
 	}
+	if n, err := b.Store.PruneContactCache(time.Now().Add(-ProfileCacheKeep)); err != nil {
+		b.Log.Error("profile cache: prune", "err", err)
+	} else if n > 0 {
+		b.Log.Info("profile cache: pruned old profiles", "count", n)
+	}
 }
 
 // outboxStep sends at most one message and returns how long to wait before the next step.

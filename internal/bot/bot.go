@@ -75,6 +75,8 @@ type Bot struct {
 	contactsMu   sync.Mutex
 	tokenMu      sync.Mutex
 	tokenRate    map[string]*Limiter
+	profiles     profileClient
+	refreshes    map[string]time.Time
 
 	db            *sql.DB
 	groupsRefresh chan struct{}

@@ -31,11 +31,27 @@ func (b *Bot) handle(evt any) {
 		}
 	case *events.PushNameSetting, *events.AppStateSyncComplete:
 		b.announcePresence()
-	case *events.Contact, *events.PushName, *events.BusinessName:
+	case *events.Contact, *events.PushName:
 		b.namesChanged()
+	case *events.BusinessName:
+		b.cacheEvent(v.JID, func(jid string) (bool, error) {
+			return b.Store.CacheVerifiedName(jid, capRunes(cleanName(v.NewBusinessName), maxVerifiedName))
+		})
+		b.namesChanged()
+	case *events.Picture:
+		id := capRunes(v.PictureID, maxPictureID)
+		if v.Remove {
+			id = ""
+		}
+		b.cacheEvent(v.JID, func(jid string) (bool, error) { return b.Store.CachePicture(jid, id) })
+	case *events.UserAbout:
+		b.cacheEvent(v.JID, func(jid string) (bool, error) {
+			return b.Store.CacheAbout(jid, capRunes(StripInvisible(v.Status), maxAbout), v.Timestamp)
+		})
 	case *events.Disconnected:
 		b.setState("disconnected", "")
 	case *events.LoggedOut:
+		b.clearProfileCache()
 		b.setState("logged_out", "")
 		b.Audit("whatsapp", "logged_out", "", fmt.Sprint(v.Reason), nil)
 	case *events.PairSuccess:
@@ -172,4 +188,27 @@ func (b *Bot) autoReply(m store.Message) {
 			b.Log.Warn("auto-reply failed", "chat", m.Chat, "err", err)
 		}
 	})
+}
+
+// cacheEvent applies a profile notification to the person's cached profile, if there is one: the
+// update changes an existing row only, so strangers' notifications can't grow the table. Groups
+// are ignored.
+func (b *Bot) cacheEvent(from types.JID, update func(jid string) (bool, error)) {
+	if from.Server != types.DefaultUserServer && from.Server != types.HiddenUserServer {
+		return
+	}
+	if _, err := update(b.PhoneJID(from.ToNonAD()).String()); err != nil {
+		b.Log.Warn("profile cache: update", "err", err)
+	}
+}
+
+// clearProfileCache forgets every cached WhatsApp profile (it described what the logged-out
+// account could see). Your own contacts stay.
+func (b *Bot) clearProfileCache() {
+	if _, err := b.Store.ClearContactCache(); err != nil {
+		b.Log.Error("profile cache: clear", "err", err)
+	}
+	b.mu.Lock()
+	b.refreshes = nil
+	b.mu.Unlock()
 }

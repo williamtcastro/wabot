@@ -182,7 +182,11 @@ func (b *Bot) refreshGroups(ctx context.Context) {
 	for _, j := range joined {
 		info := groupInfo{name: j.Name, admins: map[string]bool{}}
 		var admins []string
+		members := make([]store.GroupMember, 0, len(j.Participants))
 		for _, p := range j.Participants {
+			if !p.JID.IsEmpty() {
+				members = append(members, store.GroupMember{JID: b.PhoneJID(p.JID.ToNonAD()).String(), Role: participantRole(p)})
+			}
 			if p.IsAdmin || p.IsSuperAdmin {
 				for _, id := range []types.JID{p.JID, p.PhoneNumber, p.LID} {
 					if !id.IsEmpty() {
@@ -194,7 +198,7 @@ func (b *Bot) refreshGroups(ctx context.Context) {
 			}
 		}
 		all[j.JID.String()] = info
-		cached = append(cached, store.Group{JID: j.JID.String(), Name: j.Name, Admins: admins})
+		cached = append(cached, store.Group{JID: j.JID.String(), Name: j.Name, Admins: admins, Members: members})
 	}
 	if err := b.Store.SaveGroups(cached); err != nil {
 		b.Log.Warn("cache groups failed", "err", err)
@@ -203,6 +207,16 @@ func (b *Bot) refreshGroups(ctx context.Context) {
 	b.groups, b.groupsAt = all, time.Now()
 	b.mu.Unlock()
 	b.publish(NamesChanged{})
+}
+
+func participantRole(p types.GroupParticipant) string {
+	switch {
+	case p.IsSuperAdmin:
+		return store.RoleSuperAdmin
+	case p.IsAdmin:
+		return store.RoleAdmin
+	}
+	return store.RoleMember
 }
 
 // NamesChanged is published when names may have changed (group names refreshed, your own contacts
