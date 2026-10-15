@@ -31,7 +31,8 @@ The recipient is `to` in `/send`, `/send/file` and `/queue`, and `chat` in `/rea
 | Group JID | `120363012345678901@g.us` |
 
 Numbers are checked with WhatsApp first, which also handles Brazil's optional 9th digit
-(`5521987654321` and `552187654321` reach the same person). A number that isn't on WhatsApp is a 400.
+(`5521987654321` and `552187654321` reach the same person). A number that isn't on WhatsApp is a 400;
+`GET /contacts/{number}` shows `on_whatsapp` before you send.
 
 **Groups** work everywhere a person does: put the group JID in `to`. Get it from `GET /groups`
 (`[{"jid": "120363012345678901@g.us", "name": "Family", "members": 12}]`) or `/groups` in the TUI.

@@ -82,8 +82,9 @@ keeps media for a limited time (weeks), after which `/media` answers 410 and the
 
 ## Contacts
 
-See [CONTACTS.md](CONTACTS.md): wame's own contact list (names, tags, notes) and a profile per
-person, plus tags, `{name}` templates and dedupe in the queue.
+Built: wame's own contact list, the profile per person (`GET /contacts/{number}`, MCP
+`contact_profile`, the admin card) and the wipe of contact data on logout. Still proposed: tags,
+`{name}` templates and dedupe in the queue; see [CONTACTS.md](CONTACTS.md) phase 3.
 
 ## Integrations
 

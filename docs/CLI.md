@@ -301,6 +301,11 @@ wame's own tables:
 | `wame_messages_fts` | full-text index of `wame_messages.text` (SQLite FTS5, accents folded) for `q=` and `/search`. Kept in sync by triggers on insert, update of `text` and delete |
 | `wame_chat_state` | per chat, `read_seq`: the read position behind `unread` in `/chats` and the TUI badges |
 | `wame_groups` | cached group names and admin lists (`jid`, `name`, `admins` as JSON, `updated`), so names show before connecting; deleted on logout |
+| `wame_group_members` | who is in each group: `group_jid`, `member`, `role`, `first_seen`, `last_seen`; deleted on logout |
+| `wame_contacts` | your own names, tags, notes, language and time zone per person; deleted on logout |
+| `wame_contact_cache` | what WhatsApp last said about a person (about, picture id, business info, LID), filled by an admin refresh; deleted on logout |
+| `wame_outbox` | the [send queue](QUEUE.md) |
+| `wame_optouts` | chats that asked not to get queued messages; kept on logout |
 | `wame_audit` | one row per control action (send, react, edit, delete, read, pair, logout…), served by `GET /audit` |
 | `wame_tokens` | API tokens: id, name, SHA-256 hash of the token (never the token itself), scopes, chats, rate, created/expires/last-used times, revoked flag, `created_by`. Rows are never deleted |
 | `wame_settings` | runtime overrides from `PATCH /settings` or the admin panel (`key`, `value`, `updated_by`, `updated_at`). They win over the flags on every start; deleting a row (or resetting it there) brings the flag back |

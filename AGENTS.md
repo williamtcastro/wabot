@@ -74,6 +74,7 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `internal/tui/model.go` | `tui` | `Run`, the Bubble Tea model, `Update`, loading chats and messages |
 | `internal/tui/keys.go` | `tui` | key routing (`key`), focus, per-panel keys |
 | `internal/tui/commands.go` | `tui` | `tuiHelp`, `tuiCommands`, slash commands, sending, saving media |
+| `internal/tui/clipboard.go` | `tui` | `copyTarget` / `copyNumber` (copy the selected chat's number) and `CopyToClipboard`, a wrapper of `termui.CopyToClipboard` |
 | `internal/tui/complete.go` | `tui` | autocomplete (`suggest`, `pathSuggestions`, `chatTarget`) |
 | `internal/tui/view.go` | `tui` | rendering: panes, sidebar, context bar, footer, styles |
 | `internal/tui/format.go` | `tui` | text helpers; `safe()` / `safeLine()` wrap `termui` |
@@ -96,7 +97,7 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `docs/openapi.yaml` | | OpenAPI 3 spec, embedded into the binary (rebuild after editing) |
 | `docs/*.md` | | user docs: CLI, API, TUI, MCP, ADMIN (the panel), DOCKER, writing bot logic, SENDING (a task-oriented guide to every message type) |
 | `docs/security/` | | security reviews (`SCOPED-TOKENS.md`: token system threat model, findings and fixes) |
-| `docs/proposed-features/` | | deferred proposals: a web admin panel (its terminal counterpart, `wame admin`, is built; the doc also holds the audit action table), TUI image previews, LLM context, drafts approval, rules and state |
+| `docs/proposed-features/` | | deferred proposals: a web admin panel (its terminal counterpart, `wame admin`, is built; the doc also holds the audit action table), TUI image previews, LLM context, drafts approval, rules and state, queue files, group tracking (`GROUPS.md`), contacts phase 3, and `BACKLOG.md`; contacts phases 1 and 2 are built |
 | `.github/workflows/ci.yml` | | CI on every push to `main` and every PR: gofmt, `go vet`, `go test -race` on Ubuntu and macOS, `CGO_ENABLED=0` build plus `_demo`; a `docker` job builds the image and smoke-tests it |
 | `.env.example` | | the keys Compose reads (`.env` itself is git-ignored) and `WAME_SERVER` for `wame admin` |
 | `.github/workflows/release.yml`, `.goreleaser.yaml` | | on a `v*` tag: tests, then GoReleaser builds linux/darwin × amd64/arm64 `tar.gz` archives plus `checksums.txt` on the GitHub release, stamping `main.version` via `-ldflags` |
