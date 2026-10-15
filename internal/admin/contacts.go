@@ -6,13 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/williamtcastro/wame/internal/bot"
 	"github.com/williamtcastro/wame/internal/store"
@@ -39,8 +43,14 @@ type (
 	contactViewMsg struct {
 		seq int
 		jid string
-		v   bot.ContactView
+		v   bot.Profile
 		err error
+	}
+	contactRefreshMsg struct {
+		seq        int
+		jid, label string
+		p          bot.Profile
+		err        error
 	}
 	// contactDoneMsg ends a write on the Contacts tab; missing is the notice for a 404.
 	contactDoneMsg struct {
@@ -116,16 +126,45 @@ func safeContact(c bot.Contact) bot.Contact {
 	return c
 }
 
-func safeView(v bot.ContactView) bot.ContactView {
-	v.Contact = safeContact(v.Contact)
-	if v.Own != nil {
-		o := *v.Own
-		o.Name, o.Notes, o.Language, o.TimeZone = safe(o.Name), safe(o.Notes), safe(o.Language), safe(o.TimeZone)
-		o.CreatedBy, o.UpdatedBy, o.Tags = safe(o.CreatedBy), safe(o.UpdatedBy), termui.SafeLines(o.Tags)
-		v.Own = &o
+// safeProfile cleans everything in a profile that people other than the admin wrote: names, about,
+// the business profile, group names, WhatsApp's error text, and the notes (folded onto one line).
+func safeProfile(p bot.Profile) bot.Profile {
+	p.Phone, p.LID = safe(p.Phone), safe(p.LID)
+	n := &p.Names
+	n.Display, n.Source, n.Own, n.Book, n.Business, n.Push = safe(n.Display), safe(n.Source), safe(n.Own), safe(n.Book), safe(n.Business), safe(n.Push)
+	o := &p.Own
+	o.Tags, o.Notes, o.Language, o.TimeZone = termui.SafeLines(o.Tags), safe(o.Notes), safe(o.Language), safe(o.TimeZone)
+	o.CreatedBy, o.UpdatedBy = safe(o.CreatedBy), safe(o.UpdatedBy)
+	w := &p.WhatsApp
+	w.About, w.VerifiedName, w.VerifiedLevel, w.Error = safe(w.About), safe(w.VerifiedName), safe(w.VerifiedLevel), safe(w.Error)
+	if w.Picture != nil {
+		pic := *w.Picture
+		pic.ID, pic.URL = safe(pic.ID), safe(pic.URL)
+		w.Picture = &pic
 	}
-	return v
+	if w.Business != nil {
+		bi := *w.Business
+		bi.Address, bi.Email, bi.TimeZone, bi.Categories = safe(bi.Address), safe(bi.Email), safe(bi.TimeZone), termui.SafeLines(bi.Categories)
+		bi.Options = make(map[string]string, len(w.Business.Options))
+		for k, v := range w.Business.Options {
+			bi.Options[safe(k)] = safe(v)
+		}
+		w.Business = &bi
+	}
+	if p.Activity != nil {
+		a := *p.Activity
+		a.GroupsInCommon = make([]store.GroupRef, len(p.Activity.GroupsInCommon))
+		for i, g := range p.Activity.GroupsInCommon {
+			a.GroupsInCommon[i] = store.GroupRef{JID: safe(g.JID), Name: safe(g.Name)}
+		}
+		p.Activity = &a
+	}
+	p.Tokens = termui.SafeLines(p.Tokens)
+	return p
 }
+
+// fullProfile reports an admin's answer: opted_out comes only with the whole profile.
+func fullProfile(p bot.Profile) bool { return p.OptedOut != nil }
 
 func (m *model) applyContactTags(msg contactTagsMsg) {
 	if !m.contactTagsReq.done(msg.seq) {
@@ -185,22 +224,81 @@ func (m *model) applyContactView(msg contactViewMsg) {
 	if !m.contactViewReq.done(msg.seq) {
 		return
 	}
-	if c, ok := m.selectedContact(); !ok || c.JID != msg.jid {
+	m.showProfile(msg.jid, msg.v, msg.err)
+}
+
+// showProfile puts a profile on the card if that person is still selected, and their names and
+// tags on their list row.
+func (m *model) showProfile(jid string, p bot.Profile, err error) {
+	if c, ok := m.selectedContact(); !ok || c.JID != jid {
 		return
 	}
-	m.contactViewErr, m.contactNotes = msg.err, ""
-	if msg.err != nil {
-		m.contactView = bot.ContactView{Contact: bot.Contact{JID: msg.jid}}
+	m.contactViewErr, m.contactNotes = err, ""
+	if err != nil {
+		m.contactView = bot.Profile{JID: jid}
 		return
 	}
-	if msg.v.Own != nil {
-		m.contactNotes = msg.v.Own.Notes
+	m.contactNotes = p.Own.Notes
+	m.contactView = safeProfile(p)
+	m.contactView.JID = jid
+	if i := slices.IndexFunc(m.contacts, func(c bot.Contact) bool { return c.JID == jid }); i >= 0 {
+		v := m.contactView
+		m.contacts[i] = bot.Contact{JID: jid, Phone: v.Phone, Names: v.Names, Tags: v.Own.Tags}
 	}
-	m.contactView = safeView(msg.v)
-	m.contactView.JID = msg.jid
-	if i := slices.IndexFunc(m.contacts, func(c bot.Contact) bool { return c.JID == msg.jid }); i >= 0 {
-		m.contacts[i] = m.contactView.Contact
+}
+
+// refreshContact asks the server to ask WhatsApp about the person, then shows the answer.
+func (m *model) refreshContact(c bot.Contact) tea.Cmd {
+	jid, label := c.JID, contactLabel(c)
+	seq := m.contactViewReq.start()
+	m.setNotice("asking WhatsApp about "+label+" (2-4 lookups)…", false)
+	return m.call(func(ctx context.Context, c *Client) tea.Msg {
+		p, err := c.RefreshContact(ctx, jid)
+		return contactRefreshMsg{seq, jid, label, p, err}
+	})
+}
+
+const profileRefreshEvery = 5 * time.Minute
+
+func (m *model) applyContactRefresh(msg contactRefreshMsg) tea.Cmd {
+	fresh := m.contactViewReq.done(msg.seq)
+	next := ""
+	if t := msg.p.NextRefreshAt; !t.IsZero() {
+		next = "; next refresh at " + stamp(t, "15:04")
 	}
+	w := msg.p.WhatsApp
+	apiErr, _ := errors.AsType[*APIError](msg.err)
+	switch {
+	case isForbidden(msg.err):
+		m.contactDenied = true
+		m.setNotice(contactsRefreshScope, true)
+		return nil
+	case isNotFound(msg.err):
+		m.setNotice(contactsUpdate, true)
+		return nil
+	case apiErr != nil && apiErr.Code == http.StatusTooManyRequests:
+		retry := "later"
+		if apiErr.RetryAfter > 0 {
+			retry = "in " + apiErr.RetryAfter.String()
+		}
+		m.setNotice("not refreshed: the server's lookup budget is spent; try W again "+retry, true)
+		return nil
+	case msg.err != nil:
+		m.setNotice("not refreshed: "+msg.err.Error(), true)
+		return nil
+	case msg.p.Refreshed == nil:
+		m.setNotice("this server can't ask WhatsApp about contacts yet: update wame on it", true)
+	case *msg.p.Refreshed:
+		m.setNotice("refreshed "+msg.label+" from WhatsApp"+next, false)
+	case w.Error != "" && !msg.p.NextRefreshAt.IsZero() && !w.ErrorAt.Before(msg.p.NextRefreshAt.Add(-profileRefreshEvery-10*time.Second)):
+		m.setNotice("WhatsApp answered with an error: "+w.Error+next, true)
+	default:
+		m.setNotice("not refreshed: one refresh per person every 5 minutes"+next, false)
+	}
+	if fresh {
+		m.showProfile(msg.jid, msg.p, nil)
+	}
+	return m.loadAudit(false)
 }
 
 func (m *model) visibleContacts() []bot.Contact {
@@ -236,6 +334,8 @@ func (m *model) contactsReadOnly() bool {
 const (
 	contactsScopeHint = "this token can't change contacts: it needs the admin scope"
 	contactsUpdate    = "this server doesn't have contacts yet: update wame on it"
+	// contactsRefreshScope is also what a read-only tab says to W.
+	contactsRefreshScope = "this token can't ask WhatsApp about contacts: it needs the admin scope"
 )
 
 // contactsErrText explains a failed contacts call; a 404 there means a server older than the routes.
@@ -249,7 +349,7 @@ func contactsErrText(err error) string {
 func (m *model) contactsKey(k string) tea.Cmd {
 	n := len(m.visibleContacts())
 	if why := m.contactsRefusal(); why != "" && k != "esc" {
-		if _, ok := termui.ListMove(k, m.contactSel, n, 1); ok || slices.Contains([]string{"/", "t", "e", "x", "I", "E", "enter"}, k) {
+		if _, ok := termui.ListMove(k, m.contactSel, n, 1); ok || slices.Contains([]string{"/", "t", "e", "x", "I", "E", "W", "enter"}, k) {
 			m.setNotice(why, true)
 			return nil
 		}
@@ -260,6 +360,10 @@ func (m *model) contactsKey(k string) tea.Cmd {
 	}
 	if m.contactsReadOnly() && slices.Contains([]string{"e", "x", "I", "E"}, k) || isForbidden(m.contactTagsErr) && k == "t" {
 		m.setNotice(contactsScopeHint, true)
+		return nil
+	}
+	if m.contactsReadOnly() && k == "W" {
+		m.setNotice(contactsRefreshScope, true)
 		return nil
 	}
 	c, ok := m.selectedContact()
@@ -295,6 +399,12 @@ func (m *model) contactsKey(k string) tea.Cmd {
 		m.confirmContact = c.JID
 		m.confirmContactLabel = contactLabel(c)
 		m.mode = modeConfirmDeleteContact
+	case "W":
+		if !ok {
+			m.setNotice("no contact marked", true)
+			return nil
+		}
+		return m.refreshContact(c)
 	case "I":
 		m.startPrompt(modeImportContacts, "path to a CSV file: number,name,tags,notes,language,time_zone")
 	case "E":
@@ -371,10 +481,8 @@ func (m *model) suggestTags() {
 
 func (m *model) startContactForm(c bot.Contact) {
 	f := contactForm{jid: c.JID, label: contactLabel(c), name: c.Own, tags: strings.Join(c.Tags, " ")}
-	if v := m.contactView; v.JID == c.JID && m.contactViewErr == nil {
-		if v.Own != nil {
-			f.name, f.tags, f.notes = v.Own.Name, strings.Join(v.Own.Tags, " "), m.contactNotes
-		}
+	if v := m.contactView; v.JID == c.JID && m.contactViewErr == nil && fullProfile(v) {
+		f.name, f.tags, f.notes = v.Names.Own, strings.Join(v.Own.Tags, " "), m.contactNotes
 		f.notesOK = true
 		if safe(f.notes) != f.notes {
 			f.notesOK, f.notesLocked, f.notes = false, true, ""
@@ -574,8 +682,11 @@ func (m *model) applyContactDone(msg contactDoneMsg) tea.Cmd {
 
 // resetContactView drops the card, so the next one shown (and the edit form) is loaded fresh.
 func (m *model) resetContactView() {
-	m.contactView, m.contactViewErr, m.contactNotes = bot.ContactView{}, nil, ""
+	m.contactView, m.contactViewErr, m.contactNotes = bot.Profile{}, nil, ""
 }
+
+// The profile card's width: the list keeps the rest of the screen.
+func (m *model) profileWidth() int { return min(max(m.width*2/5, 52), 84) }
 
 func (m *model) viewContacts() string {
 	switch {
@@ -598,34 +709,35 @@ func (m *model) viewContacts() string {
 	if m.contactsReadOnly() {
 		head += " · read-only: changes need the admin scope"
 	}
-	detail := m.contactDetail()
-	lines := []string{"   " + styleDim.Render(head)}
-	cols := []int{30, 9, 17}
-	lines = append(lines, "   "+styleHead.Render(table(cols, "NAME", "SOURCE", "NUMBER", "TAGS")))
+	head = "   " + styleDim.Render(fit(head, m.width-4))
+	cardW := m.profileWidth()
+	listW := m.width - cardW - 1
+	cols := []int{min(30, listW/3), 8, 16}
+	left := []string{"   " + styleHead.Render(table(cols, "NAME", "SOURCE", "NUMBER", "TAGS"))}
 	if len(vis) == 0 {
 		msg := "nobody yet: names come from the phone's address book, your edits and imports (I)"
 		if m.contactQuery != "" || m.contactTag != "" {
 			msg = "nothing matches"
 		}
-		return strings.Join(append(lines, "   "+styleDim.Render(msg)), "\n")
+		return strings.Join([]string{head, left[0], "   " + styleDim.Render(msg)}, "\n")
 	}
-	start, end := window(m.contactSel, len(vis), m.bodyHeight()-len(lines)-1-lipgloss.Height(detail))
+	h := m.bodyHeight() - 1
+	start, end := window(m.contactSel, len(vis), h-len(left))
 	for i := start; i < end; i++ {
 		c := vis[i]
 		line := table(cols, c.Display, styleDim.Render(c.Source), cmp.Or(c.Phone, displayJID(safe(c.JID))), styleDim.Render(strings.Join(c.Tags, " ")))
-		lines = append(lines, m.row(line, i == m.contactSel))
+		left = append(left, rowIn(line, i == m.contactSel, listW))
 	}
-	lines = append(lines, "", indent(detail, " "))
-	return strings.Join(lines, "\n")
+	list := lipgloss.NewStyle().Width(listW).Render(strings.Join(left, "\n"))
+	return head + "\n" + lipgloss.JoinHorizontal(lipgloss.Top, list, " ", m.contactDetail(cardW, h))
 }
 
-// contactDetail is the selected person's card: every name, your tags and, for an admin, your notes.
-func (m *model) contactDetail() string {
+// contactDetail is the selected person's profile card, at most h lines tall.
+func (m *model) contactDetail(w, h int) string {
 	c, ok := m.selectedContact()
 	if !ok {
 		return ""
 	}
-	w := m.cardWidth(cardDetail)
 	v := m.contactView
 	var rows [][2]string
 	switch {
@@ -636,28 +748,146 @@ func (m *model) contactDetail() string {
 	case m.contactViewErr != nil:
 		rows = [][2]string{{"", errText(m.contactViewErr)}}
 	default:
-		var names []string
-		for _, n := range [][2]string{{bot.SourceOwn, v.Names.Own}, {bot.SourceBook, v.Book}, {bot.SourceBusiness, v.Business}, {bot.SourcePush, v.Push}} {
-			if n[1] != "" {
-				names = append(names, n[1]+styleDim.Render(" ("+n[0]+")"))
-			}
-		}
-		rows = [][2]string{
-			{"Number", cmp.Or(v.Phone, displayJID(safe(v.JID)))},
-			{"Names", cmp.Or(strings.Join(names, styleFaint.Render(" · ")), styleDim.Render("none"))},
-			{"Tags", cmp.Or(strings.Join(v.Tags, " "), styleDim.Render("none"))},
-		}
-		if o := v.Own; o != nil {
-			rows = append(rows, [2]string{"Notes", cmp.Or(clipLines(o.Notes, w-14, notesLines), styleDim.Render("none"))})
-			if o.Language != "" || o.TimeZone != "" {
-				rows = append(rows, [2]string{"Language", strings.Join(nonEmpty(o.Language, o.TimeZone), styleFaint.Render(" · "))})
-			}
-			rows = append(rows, [2]string{"Updated", stamp(o.UpdatedAt, "2006-01-02 15:04") + styleDim.Render(" by "+o.UpdatedBy)})
-		} else if !m.contactsReadOnly() {
-			rows = append(rows, [2]string{"Notes", styleDim.Render("nothing of yours stored; e adds a name, tags or notes")})
+		rows = m.profileRows(v)
+	}
+	body := strings.Split(kvWrap(rows, w-4), "\n")
+	if len(body) > h-3 {
+		body = append(body[:max(h-4, 1)], styleDim.Render("…"))
+	}
+	return card(cmp.Or(c.Display, "Contact"), w, strings.Join(body, "\n"))
+}
+
+// profileRows lays out a profile already through safeProfile.
+func (m *model) profileRows(v bot.Profile) [][2]string {
+	dot := styleFaint.Render(" · ")
+	none := styleDim.Render("none")
+	var names []string
+	for _, n := range [][2]string{{bot.SourceOwn, v.Names.Own}, {bot.SourceBook, v.Names.Book}, {bot.SourceBusiness, v.Names.Business}, {bot.SourcePush, v.Names.Push}} {
+		if n[1] != "" {
+			names = append(names, n[1]+styleDim.Render(" ("+n[0]+")"))
 		}
 	}
-	return card(cmp.Or(c.Display, "Contact"), w, kv(rows))
+	rows := [][2]string{
+		{"Number", cmp.Or(v.Phone, displayJID(safe(v.JID)))},
+		{"LID", cmp.Or(v.LID, styleDim.Render("not known yet"))},
+		{"Names", cmp.Or(strings.Join(names, dot), none)},
+		{"Tags", cmp.Or(strings.Join(v.Own.Tags, " "), none)},
+	}
+	full := fullProfile(v)
+	o := v.Own
+	if full || o.Notes != "" {
+		rows = append(rows, [2]string{"Notes", cmp.Or(o.Notes, none)})
+	}
+	if o.Language != "" || o.TimeZone != "" {
+		rows = append(rows, [2]string{"Language", strings.Join(nonEmpty(o.Language, o.TimeZone), dot)})
+	}
+	if !o.UpdatedAt.IsZero() {
+		rows = append(rows, [2]string{"Updated", stamp(o.UpdatedAt, "2006-01-02 15:04") + styleDim.Render(" by "+o.UpdatedBy)})
+	} else if full && len(o.Tags) == 0 && o.Notes == "" && v.Names.Own == "" && !m.contactsReadOnly() {
+		rows = append(rows, [2]string{"", styleDim.Render("nothing of yours stored; e adds a name, tags or notes")})
+	}
+
+	wa := v.WhatsApp
+	on := styleDim.Render("unknown")
+	if wa.OnWhatsApp != nil {
+		on = map[bool]string{true: "yes", false: styleWarn.Render("no")}[*wa.OnWhatsApp]
+	}
+	if full {
+		switch {
+		case wa.AsOf.IsZero():
+			on += dot + styleDim.Render("never asked; W asks (2-4 lookups)")
+		case wa.Stale:
+			on += dot + styleWarn.Render("stale") + styleDim.Render(", as of "+stamp(wa.AsOf, "2006-01-02 15:04"))
+		default:
+			on += dot + styleDim.Render("as of "+stamp(wa.AsOf, "2006-01-02 15:04"))
+		}
+	}
+	rows = append(rows, [2]string{"WhatsApp", on})
+	if wa.About != "" {
+		rows = append(rows, [2]string{"About", wa.About})
+	}
+	if wa.VerifiedName != "" {
+		rows = append(rows, [2]string{"Verified", strings.Join(nonEmpty(wa.VerifiedName, wa.VerifiedLevel), dot)})
+	}
+	if p := wa.Picture; p != nil {
+		photo := none
+		switch {
+		case p.Hidden:
+			photo = styleDim.Render("hidden from this account")
+		case p.ID != "" && p.URL != "":
+			photo = "id " + p.ID + dot + styleDim.Render("a link is in the API answer")
+		case p.ID != "":
+			photo = "id " + p.ID
+		}
+		rows = append(rows, [2]string{"Photo", photo})
+	}
+	if b := wa.Business; b != nil {
+		var parts []string
+		parts = append(parts, nonEmpty(b.Address, b.Email, strings.Join(b.Categories, ", "), b.TimeZone)...)
+		for _, k := range slices.Sorted(maps.Keys(b.Options)) {
+			parts = append(parts, k+": "+b.Options[k])
+		}
+		rows = append(rows, [2]string{"Business", cmp.Or(strings.Join(parts, " · "), "a business account")})
+	}
+	if wa.Error != "" {
+		e := styleErr.Render(wa.Error)
+		if !wa.ErrorAt.IsZero() {
+			e += styleDim.Render(" (" + stamp(wa.ErrorAt, "2006-01-02 15:04") + ")")
+		}
+		rows = append(rows, [2]string{"Last error", e})
+	}
+
+	if a := v.Activity; a != nil {
+		msgs := fmt.Sprintf("%d sent%s%d received%s%d unread", a.Sent, dot, a.Received, dot, a.Unread)
+		if !a.FirstAt.IsZero() {
+			msgs += dot + styleDim.Render("first "+stamp(a.FirstAt, "2006-01-02")+", last "+stamp(a.LastAt, "2006-01-02 15:04"))
+		}
+		rows = append(rows, [2]string{"Messages", msgs})
+		groups := make([]string, len(a.GroupsInCommon))
+		for i, g := range a.GroupsInCommon {
+			groups[i] = cmp.Or(g.Name, displayJID(g.JID))
+		}
+		rows = append(rows, [2]string{"Groups", cmp.Or(strings.Join(groups, " · "), none)})
+	}
+	if q := v.Queue; q != nil {
+		text := none
+		if q.Total > 0 {
+			text = fmt.Sprintf("%d: %d open, %d sent, %d delivered, %d read, %d failed", q.Total, q.Open, q.Sent, q.Delivered, q.Read, q.Failed)
+			if !q.LastAt.IsZero() {
+				text += styleDim.Render(", last " + stamp(q.LastAt, "2006-01-02 15:04"))
+			}
+		}
+		rows = append(rows, [2]string{"Queue " + safe(cmp.Or(q.Window, "7d")), text})
+	}
+	if v.OptedOut != nil {
+		rows = append(rows, [2]string{"Opted out", map[bool]string{true: styleWarn.Render("yes: queued messages skip them"), false: "no"}[*v.OptedOut]})
+	}
+	if full {
+		rows = append(rows, [2]string{"Tokens", cmp.Or(strings.Join(v.Tokens, ", "), styleDim.Render("none limited to this chat"))})
+	} else {
+		rows = append(rows, [2]string{"", styleDim.Render("notes, activity and the WhatsApp profile need the admin scope")})
+	}
+	return rows
+}
+
+// kvWrap is kv with each value wrapped to fit w columns, continuation lines under the value.
+func kvWrap(rows [][2]string, w int) string {
+	lw := 0
+	for _, r := range rows {
+		lw = max(lw, ansi.StringWidth(r[0]))
+	}
+	vw := max(w-lw-2, 10)
+	var lines []string
+	for _, r := range rows {
+		for i, l := range strings.Split(clipLines(r[1], vw, notesLines), "\n") {
+			label := pad("", lw)
+			if i == 0 {
+				label = styleDim.Render(pad(r[0], lw))
+			}
+			lines = append(lines, label+"  "+strings.TrimRight(l, " "))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // clipLines wraps s to w columns and keeps the first n lines.

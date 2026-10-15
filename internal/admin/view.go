@@ -352,11 +352,11 @@ func (m *model) viewKeys() string {
 			}
 			keys = [][2]string{{"j/k", "move"}, {"f", "level"}, {"/", "filter"}, {"F", follow}}
 		case tabContacts:
-			keys = [][2]string{{"j/k", "move"}, {"/", "filter"}, {"t", "tag"}, {"e", "edit"}, {"x", "delete"}, {"I/E", "csv"}, {"enter", "chat"}}
+			keys = [][2]string{{"j/k", "move"}, {"/", "filter"}, {"t", "tag"}, {"e", "edit"}, {"x", "delete"}, {"I/E", "csv"}, {"W", "refresh (2-4 lookups)"}, {"enter", "chat"}}
 			if m.contactsReadOnly() {
 				keys = [][2]string{{"j/k", "move"}, {"/", "filter"}, {"t", "tag"}, {"enter", "chat"}}
 			}
-			optional = []string{"j/k", tabsKey, "enter"}
+			optional = []string{"j/k", tabsKey, "enter", "S", "W"}
 		}
 		keys = append(keys, [2]string{tabsKey, "tabs"})
 		if len(m.opts.Profiles) > 0 {
@@ -649,8 +649,14 @@ func table(cols []int, cells ...string) string {
 	return b.String()
 }
 
-func (m *model) selectedRow(line string) string {
-	return " " + styleAccent.Render("▌") + " " + lipgloss.NewStyle().Background(colSel).Width(m.width-3).Render(ansi.Truncate(line, m.width-3, "…"))
+func (m *model) selectedRow(line string) string { return rowIn(line, true, m.width) }
+
+// rowIn is a table row cut to w columns, highlighted when it's the selected one.
+func rowIn(line string, selected bool, w int) string {
+	if !selected {
+		return "   " + ansi.Truncate(line, max(w-3, 1), "…")
+	}
+	return " " + styleAccent.Render("▌") + " " + lipgloss.NewStyle().Background(colSel).Width(w-3).Render(ansi.Truncate(line, w-3, "…"))
 }
 
 var tokenCols = []int{18, 15, 8, 8, 10, 12, 7, 7, 4}

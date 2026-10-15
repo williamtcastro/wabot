@@ -95,7 +95,7 @@ func TestContactsTabListsAndEdits(t *testing.T) {
 	m := newTestModel(t, Options{Client: c})
 	press(m, "9")
 	view := flat(m.View())
-	for _, want := range []string{"9 Contacts", "contacts · 2 of 2", "John", "Maria", "own", "+5511999999999", "clients", "vip", "/ filter", "e edit", "x delete", "I/E csv", "enter chat"} {
+	for _, want := range []string{"9 Contacts", "contacts · 2 of 2", "John", "Maria", "own", "+5511999999999", "clients", "vip", "/ filter", "e edit", "x delete", "I/E csv", "W refresh (2-4 lookups)"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("contacts view lacks %q:\n%s", want, view)
 		}
@@ -257,12 +257,18 @@ func TestContactsSanitized(t *testing.T) {
 	m.Update(contactsMsg{seq: m.contactsReq.start(), list: []bot.Contact{
 		{JID: maria, Phone: "+5511999999999\x1b[2J", Names: bot.Names{Display: hostile, Source: "push\x1b[31m", Push: hostile}, Tags: []string{"vip\x1b[5m"}},
 	}})
-	m.Update(contactViewMsg{seq: m.contactViewReq.start(), jid: maria, v: bot.ContactView{
-		Contact: bot.Contact{JID: maria, Names: bot.Names{Display: hostile, Push: hostile}},
-		Own:     &store.OwnContact{Name: hostile, Notes: "line one\nline\x1b[2J two\u2066", UpdatedBy: "evil\x1b[1A"},
+	no := false
+	m.Update(contactViewMsg{seq: m.contactViewReq.start(), jid: maria, v: bot.Profile{
+		JID: maria, LID: "123456789@lid\x1b[3J", Names: bot.Names{Display: hostile, Own: hostile, Push: hostile},
+		Own: bot.ProfileOwn{Notes: "line one\nline\x1b[2J two\u2066", UpdatedBy: "evil\x1b[1A", UpdatedAt: time.Now()},
+		WhatsApp: bot.ProfileWhatsApp{About: "hi\x1b[4m", VerifiedName: "Shop\u202d", Error: "boom\x1b[6m",
+			Picture:  &bot.ProfilePicture{ID: "17\x1b[7m"},
+			Business: &bot.BusinessInfo{Address: "Rua\x1b[8m", Options: map[string]string{"k\x1b[9m": "v\u2067"}}},
+		Activity: &bot.ProfileActivity{GroupsInCommon: []store.GroupRef{{JID: "120363000000000000@g.us", Name: "Fam\x1b[0Kily"}}},
+		OptedOut: &no, Tokens: []string{"bot\x1b[1B"},
 	}})
 	raw := m.View()
-	for _, bad := range []string{"]52;", "[2J", "[31m", "[5m", "[1A", "\u202e", "\u2066"} {
+	for _, bad := range []string{"]52;", "[2J", "[31m", "[5m", "[1A", "[3J", "[4m", "[6m", "[7m", "[8m", "[9m", "[0K", "[1B", "\u202e", "\u2066", "\u202d", "\u2067"} {
 		if strings.Contains(raw, bad) {
 			t.Fatalf("contacts view not sanitized (%q):\n%s", bad, raw)
 		}
@@ -312,7 +318,7 @@ func TestContactsReadOnlyWithoutAdmin(t *testing.T) {
 	m.contactDenied, m.tokensErr = false, nil
 	m.startContactForm(m.contacts[slices.IndexFunc(m.contacts, func(c bot.Contact) bool { return c.JID == maria })])
 	m.form[0].SetValue("Mary")
-	press(m, "enter", "enter", "enter")
+	press(m, "enter", "enter")
 	if !m.contactDenied || !m.noticeErr || !strings.Contains(m.notice, "admin scope") || ownOf(t, b, "5511999999999").Name != "Maria" {
 		t.Fatalf("a 403 on a write must turn the tab read-only: %q", m.notice)
 	}
@@ -400,7 +406,7 @@ func TestContactsHeaderAndFootersFit(t *testing.T) {
 			if !strings.HasSuffix(keys, "r refresh q quit") || strings.Contains(keys, "…") || ansi.StringWidth(keys) > width {
 				t.Fatalf("tab %v: the footer is cut at %d columns: %q", m.tab, width, keys)
 			}
-			if m.tab == tabContacts && (!strings.Contains(keys, "/ filter") || width == 120 && !strings.Contains(keys, "enter chat") ||
+			if m.tab == tabContacts && (!strings.Contains(keys, "/ filter") || width == 120 && !m.contactsReadOnly() && !strings.Contains(keys, "W refresh (2-4 lookups)") ||
 				m.contactsReadOnly() && width == 120 && !strings.Contains(keys, "j/k move")) {
 				t.Fatalf("the footer drops keys that fit at %d columns: %q", width, keys)
 			}
@@ -475,7 +481,7 @@ func TestContactsCardDoesNotShowTheLastPersonsError(t *testing.T) {
 	seedContacts(t, b)
 	m := newTestModel(t, Options{Client: c})
 	press(m, "9")
-	m.contactView, m.contactViewErr = bot.ContactView{Contact: bot.Contact{JID: maria}}, errors.New("maria's card failed")
+	m.contactView, m.contactViewErr = bot.Profile{JID: maria}, errors.New("maria's card failed")
 	m.contactSel = slices.IndexFunc(m.visibleContacts(), func(c bot.Contact) bool { return c.JID == john })
 	if view := flat(m.View()); strings.Contains(view, "maria's card failed") || !strings.Contains(view, "loading") {
 		t.Fatalf("John's card shows Maria's error:\n%s", view)

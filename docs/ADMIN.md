@@ -20,7 +20,7 @@ wame admin -server https://wame.example.com
 | **5 Health** | the server's version and uptime; for sends, number lookups and auto-replies, a meter of the last minute's use against the limit, the per-chat gap and 429s (or dropped auto-replies) since startup; the webhook's queue, delivered / retried / replayed / given up / dropped counts and its latest failures; the [alerts](#alerts): backend, delay, sent (failed in red), the last one sent and the last error | `j`/`k` pick a failure, `R` replay it, `t` send a test delivery, `a` send a test alert |
 | **6 Settings** | the settings that change without a restart (send rate, chat gap, max wait, auto-replies, webhook filter, queue paused, queue jitter, queue quiet hours, quiet hours on/off, queue time zone): the value in effect, the server's flag, and who changed it and when | `j`/`k` move, `Enter` change (toggles on/off ones), `x` back to the flag |
 | **7 Queue** | the [send queue](QUEUE.md): whether it's sending, paused, in [quiet hours](QUEUE.md#quiet-hours) (until when, in which zone), backing off or has no worker, what's waiting and what was sent or failed in the last 7 days, how many sent ones were delivered and read, the quiet hours, the jitter and the last error; below, the items (batch, recipient, state, attempts, who queued it, when it's due, error), never their text. A sent item's state shows its receipts like WhatsApp: `✓ sent`, `✓✓ delivered`, and a blue `✓✓ read`. The card also counts the opt-outs: chats that get no queued messages (`GET /optouts`, see [API.md](API.md#get-optouts-post-optouts-delete-optoutschat)); `o` swaps the items for that list (number, name when known, reason such as `keyword STOP` or `added by api`, when; one stored under a `…@lid` id shows that id, without a name) | `j`/`k` move, `f` filter by state, `x` cancel the marked item, `X` cancel its whole batch (asks first), `P` pause / resume, `Q` quiet hours off / on (keeps the window), `o` opt-outs. In the opt-outs: `j`/`k` move, `/` filter, `a` add a number or JID, `x` remove the marked one (asks first), `o` back to the items (`Esc` too, once the filter is cleared) |
-| **9 Contacts** | the people in the phone's address book and the server's own contact list, merged (`GET /contacts`): unified name, where it comes from (`own`, `book`, `business`, `push`, `number`), number and tags; a card below shows the selected person (`GET /contacts/{number}`): every name with its source, tags and, for an admin, your notes, language, time zone and who changed them last ([details](#contacts)) | `j`/`k` move, `/` filter (name, number, tag), `t` show only some tags, `Esc` clear the filter, then the tags, `e` edit name, tags and notes, `x` delete your fields (asks first), `I` import a CSV (checks first), `E` export to a CSV file, `Enter` open the chat on Chats |
+| **9 Contacts** | the people in the phone's address book and the server's own contact list, merged (`GET /contacts`): unified name, where it comes from (`own`, `book`, `business`, `push`, `number`), number and tags; the profile card on the right shows the selected person (`GET /contacts/{number}`): number, LID, every name with its source, tags and, for an admin, your notes, language and time zone, what WhatsApp last said (about, verified name, photo, business profile), message counts, groups in common, the last 7 days of the queue, opt-out and the tokens limited to them ([details](#contacts)) | `j`/`k` move, `/` filter (name, number, tag), `t` show only some tags, `Esc` clear the filter, then the tags, `e` edit name, tags and notes, `x` delete your fields (asks first), `I` import a CSV (checks first), `E` export to a CSV file, `W` refresh the profile from WhatsApp (2-4 lookups), `Enter` open the chat on Chats |
 | **8 Logs** | the server's recent app logs, newest first: time, level (debug faint, info blue, warn amber, error red), message and attributes (dim); a card below shows the selected entry with every attribute. While the tab is open it follows new entries every 3 s ([details](#logs)) | `j`/`k` move, `f` level (all, info, warn, error), `/` filter, `Esc` clear the filter, `F` pause / follow |
 
 In every list, `j`/`k` or the arrows move, `Ctrl+D`/`Ctrl+U` or `PgDn`/`PgUp` page, and `g`/`G` or
@@ -74,6 +74,20 @@ Nothing is ever written to WhatsApp or to the phone.
   runs of spaces, control characters) are left out of the form, so saving it can't flatten them;
   change those through the API or a CSV export and import. The card folds the notes onto one
   line and wraps them to at most 3 lines.
+- **Profile card**: loads when you select someone and never asks WhatsApp, so moving through the
+  list costs nothing. It shows the number and the LID (WhatsApp's hidden ID for the person, once
+  known), every name with where it comes from, your own fields, then what WhatsApp said last time it
+  was asked: on WhatsApp or not, about, verified business name, the photo's id (or that it's hidden
+  from you; the photo's link is only in the API answer), the business profile, when that was
+  (`stale` once it's older than a day) and the last error. Below that, from the server's own tables:
+  messages sent, received and unread, first and last, groups in common, queue items of the last 7
+  days, whether they opted out, and the tokens limited to their chat. A token without the admin
+  scope gets only the names, tags and whether they're on WhatsApp.
+- **Refresh** (`W`): asks WhatsApp about the selected person now (`GET /contacts/{number}?refresh=1`,
+  admin only). It costs 2 to 4 lookups from the server's lookup budget and runs at most once per
+  person every 5 minutes: a second `W` inside that says when the next one may run. Over the budget
+  the server answers 429 and the panel says when to try again; while the server isn't logged in,
+  it says so. The card shows the answer.
 - **Delete** (`x`): removes your name, tags, notes, language and time zone for the person marked
   when you pressed it; the address book and WhatsApp names stay.
 - **Import** (`I`): a local CSV file with a `number` column and any of `name`, `tags`, `notes`,
@@ -94,7 +108,7 @@ Nothing is ever written to WhatsApp or to the phone.
 
 The tab loads when you open it, after each of its own changes and on `r`; it doesn't poll. Names,
 tags and notes are sanitized like messages. A token without the admin scope sees the list and the
-names but no notes, and `e`, `x`, `I` and `E` say they need the admin scope; a token limited to some
+names but no notes, and `e`, `x`, `I`, `E` and `W` say they need the admin scope; a token limited to some
 chats sees only those and can't filter by tag. A server older than the contact list says so
 instead of failing.
 
@@ -247,8 +261,8 @@ wame token create ops-laptop -scopes admin -expires 720h   # on the server
 
 The Health tab, the usage columns, webhook test and replay, the Settings, Queue and Logs tabs and the opt-outs
 need a recent server (`GET /stats`, `/settings`, `/webhook/*`, `/queue`, `/logs`, `/optouts`), and so do the
-Contacts tab and `p` (`/contacts/tags`, `/contacts/{number}`); an older one says so
-instead of failing.
+Contacts tab and `p` (`/contacts/tags`, `/contacts/{number}`), and the full profile card and `W`
+(`/contacts/{number}?refresh=1`); an older one says so instead of failing.
 
 ## What it doesn't do (yet)
 

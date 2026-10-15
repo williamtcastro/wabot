@@ -61,10 +61,11 @@ func isLoopback(host string) bool {
 // Server is the URL shown in the panel header.
 func (c *Client) Server() string { return c.base.String() }
 
-// APIError is a non-2xx answer from the server.
+// APIError is a non-2xx answer from the server; RetryAfter is its Retry-After (a 429), or 0.
 type APIError struct {
-	Code int
-	Msg  string
+	Code       int
+	Msg        string
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -141,7 +142,11 @@ func (c *Client) send(ctx context.Context, hc *http.Client, method, path string,
 			Error string `json:"error"`
 		}
 		_ = json.Unmarshal(data, &e)
-		return &APIError{Code: resp.StatusCode, Msg: e.Error}
+		apiErr := &APIError{Code: resp.StatusCode, Msg: e.Error}
+		if n, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && n > 0 {
+			apiErr.RetryAfter = time.Duration(n) * time.Second
+		}
+		return apiErr
 	}
 	switch {
 	case isRaw && int64(len(data)) > limit:
@@ -490,12 +495,50 @@ func (c *Client) ContactTags(ctx context.Context) ([]store.TagCount, error) {
 	return out, err
 }
 
-// Contact is one person by number or JID; Own (with the notes) comes only to an admin, and only
-// when something is stored about them.
-func (c *Client) Contact(ctx context.Context, number string) (bot.ContactView, error) {
-	var out bot.ContactView
-	err := c.do(ctx, "GET", "contacts/"+url.PathEscape(number), nil, nil, &out)
-	return out, err
+// Contact is one person's profile by number or JID: all of it for an admin token; names, tags and
+// whether they're on WhatsApp for others. It never asks WhatsApp.
+func (c *Client) Contact(ctx context.Context, number string) (bot.Profile, error) {
+	return c.profile(ctx, number, nil)
+}
+
+// RefreshContact asks WhatsApp about the person first (admin only; 2 to 4 lookups, once per person
+// per 5 minutes) and answers the profile with Refreshed set. A server without refreshes ignores the
+// parameter and answers Refreshed nil.
+func (c *Client) RefreshContact(ctx context.Context, number string) (bot.Profile, error) {
+	return c.profile(ctx, number, url.Values{"refresh": {"1"}})
+}
+
+func (c *Client) profile(ctx context.Context, number string, q url.Values) (bot.Profile, error) {
+	var raw []byte
+	if err := c.send(ctx, c.http, "GET", "contacts/"+url.PathEscape(number), q, nil, nil, &raw); err != nil {
+		return bot.Profile{}, err
+	}
+	var out struct {
+		bot.Profile
+		Names *bot.Names `json:"names"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return bot.Profile{}, fmt.Errorf("unexpected answer from contacts: %w", err)
+	}
+	if out.Names != nil {
+		out.Profile.Names = *out.Names
+		return out.Profile, nil
+	}
+	var old bot.ContactView
+	if err := json.Unmarshal(raw, &old); err != nil {
+		return bot.Profile{}, fmt.Errorf("unexpected answer from contacts: %w", err)
+	}
+	return oldProfile(old), nil
+}
+
+// oldProfile reads a server's answer from before profiles (a bot.ContactView).
+func oldProfile(v bot.ContactView) bot.Profile {
+	p := bot.Profile{JID: v.JID, Phone: v.Phone, Names: v.Names, Own: bot.ProfileOwn{Tags: v.Tags}}
+	if o := v.Own; o != nil {
+		p.Own = bot.ProfileOwn{Tags: o.Tags, Notes: o.Notes, Language: o.Language, TimeZone: o.TimeZone,
+			CreatedAt: o.CreatedAt, CreatedBy: o.CreatedBy, UpdatedAt: o.UpdatedAt, UpdatedBy: o.UpdatedBy}
+	}
+	return p
 }
 
 // PatchContact changes only the fields set in in; the answer is the person as the token may see them.
