@@ -458,6 +458,35 @@ func (c *Client) CancelQueued(ctx context.Context, id int64, batch string) (int,
 	return out.Canceled, err
 }
 
+// QueueFile is an uploaded queue file as GET /queue/files shows it. The panel never keeps the
+// file's name: ListQueueFiles blanks it.
+type QueueFile struct {
+	store.OutboxFile
+	Expires time.Time `json:"expires_at,omitzero"`
+}
+
+// QueueFiles is the answer of GET /queue/files: the live files and their usage (the caller's own,
+// or everyone's for an admin).
+type QueueFiles struct {
+	Files []QueueFile           `json:"files"`
+	Usage store.OutboxFileUsage `json:"usage"`
+}
+
+// ListQueueFiles lists the uploaded queue files with their usage, without their names.
+func (c *Client) ListQueueFiles(ctx context.Context) (QueueFiles, error) {
+	var out QueueFiles
+	err := c.do(ctx, "GET", "queue/files", nil, nil, &out)
+	for i := range out.Files {
+		out.Files[i].Name = ""
+	}
+	return out, err
+}
+
+// DeleteQueueFile deletes an uploaded file; the server answers 409 while queued messages use it.
+func (c *Client) DeleteQueueFile(ctx context.Context, id string) error {
+	return c.do(ctx, "DELETE", "queue/files/"+url.PathEscape(id), nil, nil, nil)
+}
+
 // OptOuts lists the chats that get no queued messages, newest first.
 func (c *Client) OptOuts(ctx context.Context) ([]store.OptOut, error) {
 	var out []store.OptOut

@@ -97,6 +97,8 @@ func (m *model) View() string {
 		body = m.modal(styleModal, m.viewAddOptOut())
 	case m.mode == modeConfirmRemoveOptOut:
 		body = m.modal(styleDanger, m.viewConfirmRemoveOptOut())
+	case m.mode == modeConfirmDeleteQueueFile:
+		body = m.modal(styleDanger, m.viewConfirmDeleteQueueFile())
 	case m.mode == modeEditContact:
 		body = m.modal(styleModal, m.viewContactForm())
 	case m.mode == modeConfirmDeleteContact:
@@ -310,7 +312,7 @@ func (m *model) viewKeys() string {
 	case modeSetting:
 		keys = [][2]string{{"enter", "save"}, {"esc", "cancel"}}
 	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch, modeConfirmRemoveOptOut,
-		modeConfirmDeleteContact, modeConfirmImport:
+		modeConfirmDeleteContact, modeConfirmImport, modeConfirmDeleteQueueFile:
 		keys = [][2]string{{"y", "confirm"}, {"any key", "cancel"}}
 	default:
 		tabsKey := fmt.Sprintf("1-%d", len(tabNames))
@@ -340,11 +342,18 @@ func (m *model) viewKeys() string {
 				}
 				break
 			}
+			if m.queueFiles {
+				keys = [][2]string{{"/", "filter"}, {"d", "delete"}, {"F/esc", "queue"}}
+				if m.qfileQuery != "" {
+					keys = [][2]string{{"/", "filter"}, {"d", "delete"}, {"esc", "clear"}, {"F", "queue"}}
+				}
+				break
+			}
 			pause := "pause"
 			if m.stats.Queue.Paused {
 				pause = "resume"
 			}
-			keys = [][2]string{{"f", "filter"}, {"x", "cancel"}, {"X", "batch"}, {"P", pause}, {"Q", "quiet"}}
+			keys = [][2]string{{"f", "filter"}, {"x", "cancel"}, {"X", "batch"}, {"P", pause}, {"Q", "quiet"}, {"F", "files"}}
 		case tabLogs:
 			follow := "pause"
 			if !m.logsFollow {

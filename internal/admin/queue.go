@@ -79,6 +79,9 @@ func (m *model) queueKey(k string) tea.Cmd {
 	if m.queueOptOuts {
 		return m.optOutsKey(k)
 	}
+	if m.queueFiles {
+		return m.queueFilesKey(k)
+	}
 	if sel, ok := termui.ListMove(k, m.queueSel, len(m.queue.Items), m.bodyHeight()/2); ok {
 		m.queueSel = sel
 		return nil
@@ -113,6 +116,9 @@ func (m *model) queueKey(k string) tea.Cmd {
 	case "o":
 		m.queueOptOuts = true
 		return m.loadOptOuts()
+	case "F":
+		m.queueFiles = true
+		return m.loadQueueFiles()
 	case "X":
 		if !ok {
 			return nil
@@ -205,6 +211,9 @@ func (m *model) viewQueue() string {
 	lines := []string{indent(card("Send queue", m.cardWidth(cardWide), queueBody(m.stats.Queue, m.optOutCount(), optOutsKey)), " "), ""}
 	if m.queueOptOuts {
 		return m.viewOptOuts(lines)
+	}
+	if m.queueFiles {
+		return m.viewQueueFiles(lines)
 	}
 	filter := "all"
 	if m.queueStatus != "" {
