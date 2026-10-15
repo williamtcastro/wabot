@@ -319,6 +319,7 @@ func TestQueueUploadReuse(t *testing.T) {
 	}
 
 	// A send error after a reused upload drops the cache, so the retry uploads again.
+	setOnline(t, true)
 	b.clearAllReady()
 	m, _ := b.queueMediaFor(ctx, items[2])
 	b.dropCachedUpload(ctx, m, errors.New("boom"))
@@ -830,8 +831,46 @@ func TestFailedSendDropsTheCachedUpload(t *testing.T) {
 	if !cached() {
 		t.Fatal("a sent message keeps the cached upload")
 	}
+	setOnline(t, false)
+	b.dropCachedUpload(t.Context(), m, errors.New("connection lost"))
+	if !cached() {
+		t.Fatal("a send that failed because WhatsApp was unreachable keeps the cached upload")
+	}
+	setOnline(t, true)
+	b.dropCachedUpload(t.Context(), m, RateLimitError{RetryAfter: time.Second})
+	if !cached() {
+		t.Fatal("a rate limit keeps the cached upload")
+	}
 	b.dropCachedUpload(t.Context(), m, errors.New("boom"))
 	if cached() {
 		t.Fatal("a failed send of a fresh upload must drop it")
+	}
+}
+
+func TestFailedSendDropsOtherItemsReadyUpload(t *testing.T) {
+	b := newTestBot(t)
+	if _, err := b.InitSettings(Settings{}); err != nil {
+		t.Fatal(err)
+	}
+	setOnline(t, true)
+	fakeUploads(b, nil)
+	f := addFile(t, b, "promo-bot", "flyer.png", pngBytes(t, 8, 8))
+	other := addFile(t, b, "promo-bot", "menu.pdf", pdfBytes(10))
+	items := append(queueOne(t, b, f, 2), queueOne(t, b, other, 1)...)
+	var media []*queueMedia
+	for _, it := range items {
+		m, err := b.queueMediaFor(t.Context(), it)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.setReady(it.ID, m)
+		media = append(media, m)
+	}
+	b.dropCachedUpload(t.Context(), media[0], errors.New("media expired"))
+	if b.readyFor(items[1].ID) != nil {
+		t.Fatal("another item kept an upload of the same file after a send with it failed")
+	}
+	if b.readyFor(items[2].ID) == nil {
+		t.Fatal("an upload of another file was dropped")
 	}
 }

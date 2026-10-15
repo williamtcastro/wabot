@@ -914,15 +914,19 @@ func (b *Bot) sendQueuedItem(ctx context.Context, it store.OutboxItem, media *qu
 }
 
 // dropCachedUpload forgets a file's cached upload after a send that used it failed, whether the
-// upload was reused or fresh: the CDN object may be the problem, so the retry uploads again. A
-// shutdown isn't such a failure.
+// upload was reused or fresh: the CDN object may be the problem, so the retry uploads again. Other
+// items holding the same upload forget it too. A shutdown, a rate limit or a dropped connection
+// isn't such a failure.
 func (b *Bot) dropCachedUpload(ctx context.Context, m *queueMedia, err error) {
-	if err == nil || ctx.Err() != nil {
-		return
+	if _, limited := errors.AsType[RateLimitError](err); err == nil || ctx.Err() != nil || limited || !clientOnline(b) {
+		return // the upload wasn't what failed
 	}
 	if cerr := b.Store.SetOutboxUpload(m.file.ID, nil, time.Time{}); cerr != nil {
 		b.Log.Error("outbox: drop cached upload", "err", cerr)
 	}
+	b.outbox.mu.Lock()
+	b.outbox.ready = slices.DeleteFunc(b.outbox.ready, func(r readyMedia) bool { return r.media.file.ID == m.file.ID })
+	b.outbox.mu.Unlock()
 }
 
 // fileMessage builds the message for an uploaded file: a photo, or a document with its name.

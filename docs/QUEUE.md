@@ -152,7 +152,12 @@ key in its error when an import stops.
 - **`-file`** is part of the derived key (the file's id, or for a path the hash of its bytes), so the
   same CSV with another file is a new import. Running it again with the same file uploads nothing
   twice: the server answers 200 with the same id. An explicit `-key` with another file is a 409, as
-  for any change of the rows.
+  for any change of the rows. Rerun with `-file` given the same way: a path and the id it was
+  uploaded as derive different keys, so switching between them starts a new import (pass the
+  first run's `-key` to resume it). If the uploaded file was deleted in between (the admin
+  panel's files view, or cleanup an hour after its last message), a rerun uploads it again under a
+  new id and the requests already queued answer 409: they were queued, so don't rerun them under
+  another key.
 - The server remembers the keys as long as it keeps the items, until 7 days after they finish.
 
 ## Tags, templates and skips
@@ -320,8 +325,9 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/queue -d '{
   waiting on busy chats don't upload twice, even with `off`.
   The caption is the item's text.
 - **Retries.** An upload error counts as an attempt, backs off like any send error and counts toward
-  the whole-queue cooldown (unless the connection dropped: then the attempt is given back, as for text). A send error drops the file's cached upload (fresh or reused; not a
-  shutdown), so the retry uploads again. A file that is missing or changed on disk fails the item at once with "file is gone".
+  the whole-queue cooldown (unless the connection dropped: then the attempt is given back, as for text). A send error drops the file's cached upload (fresh or reused), also
+  for other messages waiting with it, so the retry uploads again; a shutdown, a rate limit or a
+  dropped connection doesn't, since the upload wasn't what failed. A file that is missing or changed on disk fails the item at once with "file is gone".
   A recipient who asks for expired media to be sent again isn't answered (wame doesn't do that for
   `/send/file` either); the TTL keeps that window small.
 - **Items.** Items that carry a file show `file` (its id), `kind` (`image` or `document`) and

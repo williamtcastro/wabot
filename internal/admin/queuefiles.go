@@ -48,7 +48,7 @@ func (m *model) applyQueueFiles(msg queueFilesMsg) {
 }
 
 // queueFilesOff reports a server without the route (404) or a token that can't list files (403):
-// asking again won't help, so the tick stops polling until r, F or a tab switch.
+// asking again won't help, so the tick stops polling until the view is opened again (F).
 func (m *model) queueFilesOff() bool {
 	return isNotFound(m.qfilesErr) || isForbidden(m.qfilesErr)
 }

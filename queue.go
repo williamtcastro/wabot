@@ -276,6 +276,12 @@ func uploadAttachment(ctx context.Context, c *admin.Client, a attachment, out io
 	if err != nil {
 		return "", fmt.Errorf("uploading %s: %s", termui.SafeLine(a.name()), termui.SafeLine(err.Error()))
 	}
+	switch {
+	case !bot.ValidQueueFileID(up.ID):
+		return "", fmt.Errorf("uploading %s: the server didn't answer with a file id", termui.SafeLine(a.name()))
+	case "sha256:"+up.SHA256 != a.identity:
+		return "", fmt.Errorf("-file: %s changed while it was being imported; run again once it's final", termui.SafeLine(a.name()))
+	}
 	if existed {
 		fmt.Fprintf(out, "%s: already uploaded (%s)\n", termui.SafeLine(a.name()), up.ID)
 	} else {
