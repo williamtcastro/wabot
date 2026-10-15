@@ -52,7 +52,7 @@
 | MCP | `internal/mcpserver/server.go:51-60` | no group tool; groups appear only as chats in `list_chats` |
 | Message indexes | `internal/store/store.go:55-77` `UNIQUE (chat, id)`, `wame_messages_ts (chat, ts)`; `state.go:35` `wame_messages_chat_seq (chat, seq)` | no index on `sender` |
 
-**From contacts phase 2 (being built in parallel; assumed, not redefined here):**
+**From contacts phase 2 (built; not redefined here):**
 `wame_group_members (group_jid, member, role member|admin|superadmin, first_seen, last_seen,
 PK (group_jid, member))`, indexed on `member`. `member` is a phone JID, or an `@lid` while unmapped.
 `SaveGroups` syncs it from `GetJoinedGroups`, `GroupsWith(keys)` lists a person's groups, and person
