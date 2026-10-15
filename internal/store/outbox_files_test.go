@@ -183,3 +183,25 @@ func TestOutboxFileMigrationKeepsOldItems(t *testing.T) {
 		}
 	}
 }
+
+func TestOutboxFileDedupeBeforeQuota(t *testing.T) {
+	s := openStore(t)
+	if _, _, err := s.InsertOutboxFile(testFile("f_1", "promo-bot", "a", 60), bigQuota); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []OutboxFileQuota{{ActorFiles: 1, ActorBytes: 500, TotalBytes: 500}, {ActorFiles: 50, ActorBytes: 60, TotalBytes: 500}, {ActorFiles: 50, ActorBytes: 500, TotalBytes: 0}} {
+		f, existed, err := s.InsertOutboxFile(testFile("f_2", "promo-bot", "a", 60), q)
+		if err != nil || !existed || f.ID != "f_1" {
+			t.Fatalf("a dedupe hit must never be refused for quota %+v: %v %v %+v", q, err, existed, f)
+		}
+		if _, _, err := s.InsertOutboxFile(testFile("f_3", "promo-bot", "b", 1), q); !errors.Is(err, ErrOutboxFileQuota) {
+			t.Fatalf("new bytes at quota %+v: %v", q, err)
+		}
+	}
+	if f, err := s.OutboxFileBySHA("promo-bot", "a"); err != nil || f.ID != "f_1" {
+		t.Fatalf("%v %+v", err, f)
+	}
+	if _, err := s.OutboxFileBySHA("maria-bot", "a"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("another actor's file: %v", err)
+	}
+}

@@ -195,6 +195,11 @@ func (b *Bot) AddQueueFile(actor, tokenID, name string, r io.Reader, limit int64
 	quota := b.currentSettings().QueueFilesQuota
 	// Checked again by the INSERT; this keeps a caller over its quota from writing to disk at all.
 	if err := b.quotaLeft(actor, quota); err != nil {
+		if _, full := errors.AsType[FileQuotaError](err); full {
+			if old, ok := b.sameQueueFile(actor, r, limit); ok {
+				return old, true, nil
+			}
+		}
 		return f, false, err
 	}
 	dir, err := b.makeQueueDir()
@@ -269,6 +274,29 @@ func (b *Bot) AddQueueFile(actor, tokenID, name string, r io.Reader, limit int64
 		}
 	}
 	return got, existed, nil
+}
+
+// sameQueueFile is the at-quota path of AddQueueFile: it hashes the upload without writing it
+// anywhere and returns the actor's live file with the same bytes, so a re-run import still works at
+// the cap. A file whose copy is missing from disk isn't returned: restoring it needs the bytes on
+// disk, which the quota forbids.
+func (b *Bot) sameQueueFile(actor string, r io.Reader, limit int64) (store.OutboxFile, bool) {
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(r, limit+1))
+	if err != nil || n == 0 || n > limit {
+		return store.OutboxFile{}, false
+	}
+	f, err := b.Store.OutboxFileBySHA(actor, hex.EncodeToString(h.Sum(nil)))
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			b.Log.Error("queue file: dedupe lookup", "err", err)
+		}
+		return store.OutboxFile{}, false
+	}
+	if _, err := os.Stat(b.queueFilePath(f.ID)); err != nil || f.Size != n {
+		return store.OutboxFile{}, false
+	}
+	return f, true
 }
 
 // startUpload takes one of the upload places (two per actor, eight in all) so parallel uploads
@@ -655,6 +683,10 @@ type readyMedia struct {
 	at    time.Time
 }
 
+// maxReadyMedia is how many items' uploads are kept at once (oldest dropped first), so items
+// waiting on busy chats don't evict each other's uploads.
+const maxReadyMedia = 4
+
 func mediaType(kind string) whatsmeow.MediaType {
 	if kind == store.FileImage {
 		return whatsmeow.MediaImage
@@ -724,20 +756,41 @@ func (b *Bot) queueMediaFor(ctx context.Context, it store.OutboxItem) (*queueMed
 func (b *Bot) readyFor(item int64) *queueMedia {
 	b.outbox.mu.Lock()
 	defer b.outbox.mu.Unlock()
-	if r := b.outbox.ready; r != nil && r.item == item && time.Since(r.at) < queueReadyFor {
-		return r.media
+	b.dropStaleReady()
+	for _, r := range b.outbox.ready {
+		if r.item == item {
+			return r.media
+		}
 	}
 	return nil
 }
 
 func (b *Bot) setReady(item int64, m *queueMedia) *queueMedia {
 	b.outbox.mu.Lock()
-	b.outbox.ready = &readyMedia{item: item, media: m, at: time.Now()}
-	b.outbox.mu.Unlock()
+	defer b.outbox.mu.Unlock()
+	b.dropStaleReady()
+	b.outbox.ready = slices.DeleteFunc(b.outbox.ready, func(r readyMedia) bool { return r.item == item })
+	if len(b.outbox.ready) >= maxReadyMedia {
+		b.outbox.ready = slices.Delete(b.outbox.ready, 0, len(b.outbox.ready)-maxReadyMedia+1)
+	}
+	b.outbox.ready = append(b.outbox.ready, readyMedia{item: item, media: m, at: time.Now()})
 	return m
 }
 
-func (b *Bot) clearReady() {
+// dropStaleReady forgets uploads kept longer than queueReadyFor; b.outbox.mu is held.
+func (b *Bot) dropStaleReady() {
+	b.outbox.ready = slices.DeleteFunc(b.outbox.ready, func(r readyMedia) bool { return time.Since(r.at) >= queueReadyFor })
+}
+
+// clearReady forgets the upload kept for item.
+func (b *Bot) clearReady(item int64) {
+	b.outbox.mu.Lock()
+	b.outbox.ready = slices.DeleteFunc(b.outbox.ready, func(r readyMedia) bool { return r.item == item })
+	b.outbox.mu.Unlock()
+}
+
+// clearAllReady forgets every kept upload (logout).
+func (b *Bot) clearAllReady() {
 	b.outbox.mu.Lock()
 	b.outbox.ready = nil
 	b.outbox.mu.Unlock()
@@ -832,7 +885,7 @@ func (b *Bot) sendQueuedItem(ctx context.Context, it store.OutboxItem, media *qu
 	if it.FileID == "" {
 		return b.SendText(ctx, it.Actor, it.To, it.Text, opt)
 	}
-	defer b.clearReady()
+	defer b.clearReady(it.ID)
 	return b.audited(it.Actor, "send_file", it.To, fmt.Sprintf("%s, %d bytes, queue #%d", it.FileKind, it.FileSize, it.ID), func() (store.Message, error) {
 		jid, quote, err := b.prepare(ctx, it.To, opt)
 		if err != nil {
@@ -855,15 +908,16 @@ func (b *Bot) sendQueuedItem(ctx context.Context, it store.OutboxItem, media *qu
 		msg, rec := fileMessage(media.up, f.Kind == store.FileImage, f.Mime, f.Name, it.Text, quote, uint64(f.Size))
 		rec.ReplyTo = it.ReplyTo
 		m, err := b.deliver(ctx, jid, msg, rec, opt)
-		b.dropReusedUpload(media, err)
+		b.dropCachedUpload(ctx, media, err)
 		return m, err
 	})
 }
 
-// dropReusedUpload forgets a file's cached upload after a send that used it failed: the CDN
-// object may have expired, so the next attempt uploads again.
-func (b *Bot) dropReusedUpload(m *queueMedia, err error) {
-	if err == nil || !m.reused {
+// dropCachedUpload forgets a file's cached upload after a send that used it failed, whether the
+// upload was reused or fresh: the CDN object may be the problem, so the retry uploads again. A
+// shutdown isn't such a failure.
+func (b *Bot) dropCachedUpload(ctx context.Context, m *queueMedia, err error) {
+	if err == nil || ctx.Err() != nil {
 		return
 	}
 	if cerr := b.Store.SetOutboxUpload(m.file.ID, nil, time.Time{}); cerr != nil {
@@ -963,7 +1017,7 @@ func (b *Bot) sweepQueueFiles(before time.Time) {
 func (b *Bot) wipeQueueFiles(actor string) {
 	n, err := b.Store.WipeOutboxFiles()
 	if err == nil {
-		b.clearReady()
+		b.clearAllReady()
 		err = b.removeQueueDir()
 	}
 	if n > 0 || err != nil {

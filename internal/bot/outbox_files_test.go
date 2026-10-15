@@ -301,7 +301,7 @@ func TestQueueUploadReuse(t *testing.T) {
 		if err != nil || m.up.DirectPath != "/v/x" || m.file.ID != f.ID {
 			t.Fatalf("%v %+v", err, m)
 		}
-		b.clearReady()
+		b.clearAllReady()
 	}
 	if uploads.Load() != 1 {
 		t.Fatalf("%d uploads for three items within the TTL", uploads.Load())
@@ -313,16 +313,16 @@ func TestQueueUploadReuse(t *testing.T) {
 	if m, _ := b.queueMediaFor(ctx, items[0]); m.reused || uploads.Load() != 2 {
 		t.Fatalf("an upload older than the TTL must be redone: %d", uploads.Load())
 	}
-	b.clearReady()
+	b.clearAllReady()
 	if m, _ := b.queueMediaFor(ctx, items[1]); !m.reused || uploads.Load() != 2 {
 		t.Fatal("the fresh upload is reused")
 	}
 
 	// A send error after a reused upload drops the cache, so the retry uploads again.
-	b.clearReady()
+	b.clearAllReady()
 	m, _ := b.queueMediaFor(ctx, items[2])
-	b.dropReusedUpload(m, errors.New("boom"))
-	b.clearReady()
+	b.dropCachedUpload(ctx, m, errors.New("boom"))
+	b.clearAllReady()
 	if m, _ := b.queueMediaFor(ctx, items[2]); m.reused || uploads.Load() != 3 {
 		t.Fatalf("after a send error the next attempt must upload: %d", uploads.Load())
 	}
@@ -336,7 +336,7 @@ func TestQueueUploadReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, it := range items {
-		b.clearReady()
+		b.clearAllReady()
 		if m, _ := b.queueMediaFor(ctx, it); m.reused {
 			t.Fatal("ttl off reuses nothing")
 		}
@@ -399,7 +399,7 @@ func TestQueueUploadErrorsAndGoneFiles(t *testing.T) {
 	if err := os.Remove(b.queueFilePath(f.ID)); err != nil {
 		t.Fatal(err)
 	}
-	b.clearReady()
+	b.clearAllReady()
 	_, _, err = b.queuedFile(ctx, more[0], nil, maria)
 	b.queuedFileFailed(ctx, more[0], err)
 	if it, _ := b.Store.OutboxItem(more[0].ID); it.Status != store.OutboxFailed || it.Error != "file is gone" {
@@ -680,5 +680,158 @@ func TestWebPSize(t *testing.T) {
 	}
 	if _, _, err := webpSize([]byte("RIFF")); err == nil {
 		t.Fatal("short header accepted")
+	}
+}
+
+// diskWatch reads data while noting whether more than want files were ever in the queue directory.
+func diskWatch(b *Bot, data []byte, want int) (io.Reader, *bool) {
+	wrote := new(bool)
+	inner := bytes.NewReader(data)
+	return readerFunc(func(p []byte) (int, error) {
+		if entries, _ := os.ReadDir(b.queueDir()); len(entries) > want {
+			*wrote = true
+		}
+		return inner.Read(p)
+	}), wrote
+}
+
+func TestReuploadAtTheQuota(t *testing.T) {
+	b := newTestBot(t)
+	first := addFile(t, b, "promo-bot", "menu.pdf", pdfBytes(10))
+	check := func(what string) {
+		t.Helper()
+		r, wrote := diskWatch(b, pdfBytes(10), 1)
+		got, existed, err := b.AddQueueFile("promo-bot", "", "menu-again.pdf", r, 1<<20)
+		if err != nil || !existed || got.ID != first.ID || got.Name != "menu.pdf" || *wrote {
+			t.Fatalf("%s: the same bytes must return the stored file: %v %v %+v (wrote %v)", what, err, existed, got, *wrote)
+		}
+		r, wrote = diskWatch(b, pdfBytes(11), 1)
+		if _, _, err := b.AddQueueFile("promo-bot", "", "new.pdf", r, 1<<20); !errorsAs[FileQuotaError](err) || *wrote {
+			t.Fatalf("%s: new bytes must be refused before the disk: %v (wrote %v)", what, err, *wrote)
+		}
+		if entries, _ := os.ReadDir(b.queueDir()); len(entries) != 1 {
+			t.Fatalf("%s: %d files on disk", what, len(entries))
+		}
+	}
+
+	oldFiles, oldBytes := maxQueueFiles, maxQueueFileBytes
+	t.Cleanup(func() { maxQueueFiles, maxQueueFileBytes = oldFiles, oldBytes })
+	maxQueueFiles = 1
+	check("file count")
+	maxQueueFiles = oldFiles
+
+	maxQueueFileBytes = first.Size
+	check("actor bytes")
+	maxQueueFileBytes = oldBytes
+
+	if err := b.UpdateSettings("ops", map[string]*string{"queue_files_quota": new(fmt.Sprint(first.Size))}); err != nil {
+		t.Fatal(err)
+	}
+	check("total")
+	if _, _, err := b.AddQueueFile("maria-bot", "", "menu.pdf", bytes.NewReader(pdfBytes(10)), 1<<20); !errorsAs[FileQuotaError](err) {
+		t.Fatalf("another token's copy is a new file: %v", err)
+	}
+	if _, _, err := b.AddQueueFile("promo-bot", "", "menu.pdf", bytes.NewReader(pdfBytes(10)), 5); !errorsAs[FileQuotaError](err) {
+		t.Fatalf("over the size limit: %v", err)
+	}
+
+	// The stored copy is gone: restoring it would write to disk, so the quota answers.
+	if err := os.Remove(b.queueFilePath(first.ID)); err != nil {
+		t.Fatal(err)
+	}
+	r, wrote := diskWatch(b, pdfBytes(10), 0)
+	if _, _, err := b.AddQueueFile("promo-bot", "", "menu.pdf", r, 1<<20); !errorsAs[FileQuotaError](err) || *wrote {
+		t.Fatalf("missing copy at the quota: %v (wrote %v)", err, *wrote)
+	}
+}
+
+func TestReadyUploadsPerItem(t *testing.T) {
+	b := newTestBot(t)
+	if _, err := b.InitSettings(Settings{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.UpdateSettings("ops", map[string]*string{"queue_media_ttl": new("off")}); err != nil {
+		t.Fatal(err)
+	}
+	uploads := fakeUploads(b, nil)
+	x := addFile(t, b, "promo-bot", "flyer.png", pngBytes(t, 8, 8))
+	y := addFile(t, b, "promo-bot", "menu.pdf", pdfBytes(10))
+	a, c := queueOne(t, b, x, 2), queueOne(t, b, y, 1)
+	ctx := t.Context()
+	step := func(it store.OutboxItem, want int64, fresh bool) {
+		t.Helper()
+		m, d, err := b.queuedFile(ctx, it, nil, maria)
+		if err != nil || uploads.Load() != want || (fresh && d != redoStep) || (!fresh && m == nil) {
+			t.Fatalf("item %d: %v %v %v, %d uploads, want %d", it.ID, m, d, err, uploads.Load(), want)
+		}
+	}
+	// A uploads, its chat is busy; B uploads; A must not upload again. TTL off: each item once.
+	step(a[0], 1, true)
+	step(c[0], 2, true)
+	step(a[1], 3, true)
+	step(a[0], 3, false)
+	step(c[0], 3, false)
+	step(a[1], 3, false)
+
+	// A failed send (here: not logged in) forgets only its own item's upload.
+	b.sendQueuedWith(ctx, a[0], nil)
+	if b.readyFor(a[0].ID) != nil || b.readyFor(c[0].ID) == nil || b.readyFor(a[1].ID) == nil {
+		t.Fatal("a send must clear only its own item's upload")
+	}
+
+	// Bounded: the oldest is dropped first; entries expire.
+	more := queueOne(t, b, x, maxReadyMedia)
+	for _, it := range more {
+		if _, err := b.queueMediaFor(ctx, it); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.outbox.mu.Lock()
+	n := len(b.outbox.ready)
+	b.outbox.mu.Unlock()
+	if n != maxReadyMedia || b.readyFor(c[0].ID) != nil || b.readyFor(more[0].ID) == nil {
+		t.Fatalf("%d kept uploads", n)
+	}
+	b.outbox.mu.Lock()
+	b.outbox.ready[0].at = time.Now().Add(-queueReadyFor)
+	b.outbox.mu.Unlock()
+	if b.readyFor(more[0].ID) != nil || b.readyFor(more[1].ID) == nil {
+		t.Fatal("an old upload must expire")
+	}
+	b.wipeQueueFiles("ops")
+	if b.readyFor(more[1].ID) != nil {
+		t.Fatal("logout must forget every kept upload")
+	}
+}
+
+func TestFailedSendDropsTheCachedUpload(t *testing.T) {
+	b := newTestBot(t)
+	if _, err := b.InitSettings(Settings{}); err != nil {
+		t.Fatal(err)
+	}
+	fakeUploads(b, nil)
+	f := addFile(t, b, "promo-bot", "flyer.png", pngBytes(t, 8, 8))
+	items := queueOne(t, b, f, 1)
+	cached := func() bool {
+		got, _ := b.Store.OutboxFile(f.ID)
+		return len(got.Upload) > 0
+	}
+	m, err := b.queueMediaFor(t.Context(), items[0])
+	if err != nil || m.reused || !cached() {
+		t.Fatalf("fresh upload: %v %+v", err, m)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	b.dropCachedUpload(ctx, m, context.Canceled)
+	if !cached() {
+		t.Fatal("a shutdown must keep the cached upload")
+	}
+	b.dropCachedUpload(t.Context(), m, nil)
+	if !cached() {
+		t.Fatal("a sent message keeps the cached upload")
+	}
+	b.dropCachedUpload(t.Context(), m, errors.New("boom"))
+	if cached() {
+		t.Fatal("a failed send of a fresh upload must drop it")
 	}
 }

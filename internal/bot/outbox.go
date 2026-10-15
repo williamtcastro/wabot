@@ -173,7 +173,7 @@ type outbox struct {
 	cooldown  time.Time
 	lastErr   string
 	lastErrAt time.Time
-	ready     *readyMedia
+	ready     []readyMedia   // uploads kept for items, oldest first, at most maxReadyMedia
 	uploading map[string]int // POST /queue/files in progress, by actor
 }
 

@@ -305,7 +305,9 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/queue -d '{
   `queue_files_quota` [setting](API.md#get-settings-patch-settings) (`2GB` by default; `500MB`, `64KB`,
   `1TB` or a byte count; `0` refuses new uploads). Over a quota is a 413 that says which one (your
   own usage, never other tokens'), checked before anything is written to disk; a server that can't
-  write the file answers 507. At most two uploads per token and eight in all run at once; more is a
+  write the file answers 507. At a quota, uploading bytes you already have still answers 200 with
+  that file (the body is hashed, never written), so running an import again keeps working; if the
+  server lost its copy of that file, the upload counts as new and gets the 413. At most two uploads per token and eight in all run at once; more is a
   429 with `Retry-After`. An upload must arrive within 5 minutes, so a stalled client can't keep
   its place.
 - **Sending.** A file item is one send for the limits, like text: the global limiter, the per-chat
@@ -313,11 +315,13 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/queue -d '{
   a slot (only when the slot is about to be free), one upload at a time, so a slow upload doesn't
   hold up interactive sends. That upload is **reused** for the later items of the same file while it
   is younger than `queue_media_ttl` (`24h` by default, up to `168h`; `off` uploads for every message).
-  After a fresh upload the worker checks pause, quiet hours and the token again before it sends.
+  After a fresh upload the worker checks pause, quiet hours and the token again before it sends;
+  the upload is kept in memory for that item (up to 4 items at once, 10 minutes each), so items
+  waiting on busy chats don't upload twice, even with `off`.
   The caption is the item's text.
 - **Retries.** An upload error counts as an attempt, backs off like any send error and counts toward
-  the whole-queue cooldown (unless the connection dropped: then the attempt is given back, as for text). A send error after a reused upload drops the cached upload, so the retry
-  uploads again. A file that is missing or changed on disk fails the item at once with "file is gone".
+  the whole-queue cooldown (unless the connection dropped: then the attempt is given back, as for text). A send error drops the file's cached upload (fresh or reused; not a
+  shutdown), so the retry uploads again. A file that is missing or changed on disk fails the item at once with "file is gone".
   A recipient who asks for expired media to be sent again isn't answered (wame doesn't do that for
   `/send/file` either); the TTL keeps that window small.
 - **Items.** Items that carry a file show `file` (its id), `kind` (`image` or `document`) and
