@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -19,7 +20,7 @@ const sendAtHelp = `send_at must be an RFC 3339 time with its offset (like 2026-
 
 func (s *server) addQueueTools(srv *mcp.Server) {
 	open, closed := true, false
-	mcp.AddTool(srv, &mcp.Tool{Name: "schedule_message", Description: "Queue a text message to send later (or as soon as the limits allow). Only when the user asked for it; confirm the time in the user's time zone first.",
+	mcp.AddTool(srv, &mcp.Tool{Name: "schedule_message", Description: "Queue a text message, or a file the user already uploaded (by its id), to send later (or as soon as the limits allow). Only when the user asked for it; confirm the time in the user's time zone first.",
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &open, OpenWorldHint: &open}}, s.scheduleMessage)
 	mcp.AddTool(srv, &mcp.Tool{Name: "list_scheduled", Description: "Queued messages, newest first, with counts by status: this connection's own (admins see all, but only their own text).",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &closed}}, s.listScheduled)
@@ -78,10 +79,11 @@ func ownFilter(p auth.Principal, f store.OutboxFilter) store.OutboxFilter {
 
 type scheduleIn struct {
 	To       string `json:"to" jsonschema:"chat JID, phone number with country code, or tag:NAME for everyone with that contact tag (needs the read scope)"`
-	Text     string `json:"text" jsonschema:"message text (WhatsApp formatting like *bold* works)"`
+	Text     string `json:"text,omitempty" jsonschema:"message text (WhatsApp formatting like *bold* works); with file, its caption; required without file"`
 	Template bool   `json:"template,omitempty" jsonschema:"fill {name}, {first_name} or {push_name} (with an optional |fallback, like {name|there}) per recipient; {{ and }} are literal braces. Needs the read scope"`
 	SendAt   string `json:"send_at,omitempty" jsonschema:"when to send: RFC 3339 with offset (2026-10-13T09:00:00-03:00) or a delay like 90m, 2h, 3d; omit to send as soon as the limits allow"`
 	Batch    string `json:"batch,omitempty" jsonschema:"group name for list_scheduled and cancel_scheduled (letters, digits, . _ -); generated when omitted"`
+	File     string `json:"file,omitempty" jsonschema:"id (f_…) of a file the user uploaded with POST /queue/files under this same token; text becomes its caption and may be empty"`
 }
 
 type scheduledOut struct {
@@ -108,7 +110,7 @@ func (s *server) scheduleMessage(ctx context.Context, req *mcp.CallToolRequest, 
 		return nil, scheduledOut{}, err
 	}
 	res, err := s.b.Queue(ctx, bot.QueueOptions{Actor: p.Name, TokenID: p.TokenID, Batch: in.Batch, Template: in.Template,
-		Read: p.Has(auth.Read), Allow: p.Chats}, []bot.QueueRequest{{To: to, Text: in.Text, SendAt: at}})
+		Read: p.Has(auth.Read), Allow: p.Chats}, []bot.QueueRequest{{To: to, Text: in.Text, SendAt: at, File: strings.TrimSpace(in.File)}})
 	if err != nil {
 		return nil, scheduledOut{}, err
 	}
@@ -152,6 +154,8 @@ type queueItemOut struct {
 	Error     string    `json:"error,omitempty"`
 	Delivered time.Time `json:"delivered_at,omitzero"`
 	Read      time.Time `json:"read_at,omitzero"`
+	Kind      string    `json:"kind"`
+	FileSize  int64     `json:"file_size,omitempty"`
 	Untrusted struct {
 		Text string `json:"text,omitempty"`
 	} `json:"untrusted"`
@@ -184,7 +188,7 @@ func (s *server) listScheduled(ctx context.Context, req *mcp.CallToolRequest, in
 	for _, it := range items {
 		o := queueItemOut{ID: it.ID, Batch: it.Batch, Actor: it.Actor, To: cleanID(it.To), Chat: it.Chat, Status: it.Status,
 			Attempts: it.Attempts, Due: it.Due, Created: it.Created, Updated: it.Updated, MessageID: it.MessageID, Error: clean(it.Error),
-			Delivered: it.Delivered, Read: it.Read}
+			Delivered: it.Delivered, Read: it.Read, Kind: cmp.Or(it.FileKind, "text"), FileSize: it.FileSize}
 		if it.Actor == p.Name {
 			o.Untrusted.Text = clean(it.Text)
 		}

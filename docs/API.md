@@ -24,9 +24,12 @@ Base URL: whatever you passed to `-addr` (default `http://127.0.0.1:8080` for `s
 | POST | `/delete` | delete a message for everyone |
 | POST | `/read` | send read receipts |
 | POST | `/typing` | show "typing…" / "recording…" in a chat |
-| POST | `/queue` | queue up to 1000 texts for paced sending in the background |
+| POST | `/queue` | queue up to 1000 texts, or a file with captions, for paced sending in the background |
 | GET | `/queue`, `/queue/{id}` | queued, sent and failed items with counts |
 | DELETE | `/queue/{id}`, `/queue?batch=` | cancel queued items |
+| POST | `/queue/files` | upload an image or document once, to queue it to many chats |
+| GET | `/queue/files` | your uploaded files and their usage |
+| DELETE | `/queue/files/{id}` | delete an uploaded file |
 | GET, POST | `/optouts` | chats that get no queued messages; add one |
 | DELETE | `/optouts/{chat}` | take a chat off that list |
 | GET | `/messages` | stored messages, filtered; newest first or cursor-paged |
@@ -200,12 +203,14 @@ Non-2xx responses always look like this:
 | 401 | missing, malformed, unknown, revoked or expired token; or `?token=` on a route that doesn't accept it |
 | 403 | the token lacks the scope, or is limited to chats and the request is outside them (or uses `/contacts/tags`, `/groups`, `/check`, `?refresh=1`); a token tried to create an admin token; or token-less mode and the request isn't a local same-origin one |
 | 404 | not found: no QR pending, unknown message `id` in that chat, unknown `seq`, a message without media, a deleted message's media, or `DELETE /contacts/{number}` for someone without your own fields |
-| 409 | an idempotency key was reused for a different request; canceling a queued message that is already sending or finished |
+| 409 | an idempotency key was reused for a different request (a different `file` counts); canceling a queued message that is already sending or finished; deleting a queue file that queued messages still need |
 | 410 | media expired on WhatsApp's servers (`/media`) |
-| 413 | the body is too large: over 1 MB of JSON (16 MB for `/queue`, 64 KB for `/contacts/{number}`), a contacts CSV over 4 MB, or a file over 64 MB |
+| 413 | the body is too large: over 1 MB of JSON (16 MB for `/queue`, 64 KB for `/contacts/{number}`), a contacts CSV over 4 MB, a file over 64 MB, or a queue file over a quota (the message says which one) |
+| 415 | a queue file whose content isn't an allowed type (see [queue files](#post-queuefiles-get-queuefiles-delete-queuefilesid)) |
 | 429 | rate limited (global sends or lookups, or the token's own rate), too many open streams for the token, or too many failed logins from your IP; see `Retry-After` (seconds) |
 | 500 | an internal error (the database, for instance). The message is just `internal error`; the details are in the server log |
 | 502 | WhatsApp rejected or failed the request (also "not logged in") |
+| 507 | the server couldn't write a queue file to disk |
 | 504 | the request timed out or was cancelled while waiting |
 
 ## The Message object
@@ -482,7 +487,7 @@ leave you online.
 
 ## `POST /queue`
 
-Queues texts in the database and answers **202** at once; a worker sends them in the background
+Queues texts (or a file with captions, see [queue files](#post-queuefiles-get-queuefiles-delete-queuefilesid)) in the database and answers **202** at once; a worker sends them in the background
 within the rate limits, retrying and backing off on errors, and keeps going after a restart. For
 bulk sends, where `POST /send` would hold the request open for minutes. Requires `send`; a token
 limited to some chats can only queue to those.
@@ -508,7 +513,7 @@ didn't add). The same key with different messages (`to`, `text`, `reply_to`, `se
   list (the others are dropped without a trace). An empty tag is a 400.
 - `"template": true` fills `{name}`, `{first_name}` and `{push_name}` (`{name|there}` for a
   fallback, `{{` and `}}` for braces) per recipient; a message's own `name` wins. Needs `read`.
-- `"dedupe": true` skips a row whose recipient and text appeared earlier in the request;
+- `"dedupe": true` skips a row whose recipient, file and text appeared earlier in the request;
   `"skip_sent": "48h"` (or `"3d"`, at most 90 days; 7 without `read`) or `"batch:promo-october"`
   skips recipients who already got a message.
 - Skipped rows are counted in `skipped` (`{"duplicate": 4, "recently_sent": 8}`) and listed in
@@ -528,13 +533,67 @@ strings are kept in proxy logs and shell history. See [CSV import](QUEUE.md#csv-
 curl -H "$H" -H "Content-Type: text/csv" --data-binary @promo.csv "localhost:8080/queue?batch=promo-october"
 ```
 
+**With a file.** `file` (the id from `POST /queue/files`) at the top level is the default for every
+message, or per message; with a file, `text` is the caption and may be empty. A CSV takes `?file=`
+as the default. The file must be your own (admin included), or the answer is 404; an id that isn't
+`f_` plus 32 hex digits is a 400. The idempotency check compares the file too.
+
+```sh
+curl -H "$H" -X POST localhost:8080/queue -d '{
+  "batch": "menu-october", "file": "f_0123456789abcdef0123456789abcdef", "text": "Our new menu",
+  "messages": [{"to": "5511999999999"}, {"to": "5511988887777", "text": "Hi John, the menu"}]
+}'
+```
+
 `GET /queue` lists items newest first (`status`, `batch`, `actor`, `before`, `limit` ≤ 500) with
 `counts` by state; `GET /queue/{id}` shows one; `DELETE /queue/{id}` cancels one (409 once it's
 sending or finished). Without `admin`, a token sees and cancels only its own items.
+Items that carry a file also have `file` (its id), `kind` (`image` or `document`) and `file_size`;
+text items have none of the three. Never the file's name.
 Sent items gain `delivered_at` and `read_at` as WhatsApp's receipts come in, and `counts` has
 `delivered` and `read` among the sent ones.
 [QUEUE.md](QUEUE.md) has the details: states, receipts, retries, pacing, pausing, quiet hours, and
 the webhook `queue` event.
+
+## `POST /queue/files`, `GET /queue/files`, `DELETE /queue/files/{id}`
+
+Files for the [send queue](QUEUE.md#files): upload an image or document once, then reference its
+id from `POST /queue` for any number of messages. Requires `send`. A file belongs to the token
+that uploaded it (its name); you only see, use and delete your own, and admin sees every actor's
+files, without the other actors' `name`. No route returns the content.
+
+```sh
+curl -H "$H" -F file=@menu.pdf localhost:8080/queue/files
+curl -H "$H" localhost:8080/queue/files
+curl -H "$H" -X DELETE localhost:8080/queue/files/f_0123456789abcdef0123456789abcdef
+```
+
+```json
+{ "id": "f_0123456789abcdef0123456789abcdef", "actor": "promo-bot", "sha256": "9f86d0…", "size": 482113,
+  "mime": "application/pdf", "kind": "document", "name": "menu.pdf", "created_at": "2026-10-15T10:00:00-03:00",
+  "items": 0, "open": 0, "expires_at": "2026-10-16T10:00:00-03:00" }
+```
+
+- **`POST`** takes `multipart/form-data` with one part named `file`, streamed to disk, up to 64 MB
+  (the same limit as `/send/file`). It answers **201** with the file, or **200** when you already
+  have a live file with the same `sha256` (never matched across tokens). The type comes from the
+  bytes, not the client's `Content-Type`: JPEG, PNG and WebP as images; PDF, plain text, CSV and
+  `.docx` `.xlsx` `.pptx` `.odt` `.ods` `.odp` as documents; anything else is a 415, text starting
+  with `<` (HTML, SVG, XML) too. The file name's extension has to match the content (415 if not;
+  a name without one gets one). Images over 16 MB, or over 16384 px a side or 100 MP, go as
+  documents.
+- **`GET`** answers `{"files": [...], "usage": {"files": 2, "bytes": 482900}}`: your live files and
+  what they take (admin: everyone's, and the total). `items` is how many queue items use the file,
+  `open` how many of those are still queued or sending, and `expires_at` appears only while no item
+  has used the file yet (24 hours after upload it is deleted; see [cleanup](QUEUE.md#files)).
+- **`DELETE`** answers `{"deleted": true}`. 409 while queued or sending items use it (cancel them
+  first); 404 for an unknown id or another token's file (not 403, so ids don't leak). Admin may
+  delete any.
+- **Errors**: 413 over 64 MB or over a quota (50 files and 500 MB per token, and `queue_files_quota`
+  in all; the message says which, checked before anything is written), 415 type (also text that
+  isn't UTF-8, and Office archives over 10,000 entries), 429 with `Retry-After` when two uploads of
+  this token (or eight in all) are already running, 507 when the server can't write the file.
+  Each upload is audited as `queue_file`, each delete as `queue_file_delete`.
 
 ## `GET /optouts`, `POST /optouts`, `DELETE /optouts/{chat}`
 
@@ -1030,12 +1089,13 @@ input (`ok: false` with the error). Message text is never stored here.
 
 `actor` is the token's name for API and MCP calls (`api` for the owner secret and token-less
 mode, `mcp` for `wame mcp` without a token), or `tui`, `cli`, `autoreply` or `whatsapp`.
-`action` is `send`, `send_file`, `react`, `edit`, `delete`, `read`, `pair`, `logout`,
+`action` is `send`, `send_file` (from the queue the detail is `kind, N bytes, queue #id`, without the name), `react`, `edit`, `delete`, `read`, `pair`, `logout`,
 `logged_out`, `contacts_wipe` (`detail` `N contacts`), `token_create`, `token_revoke` (for the token ones, `target` is the token name and
 `detail` the requested scopes), `settings` (`detail` lists the changes, e.g. `rate=10, chat_gap
 reset`), `webhook_test` or `webhook_replay` (`detail` is the delivery id), `alert_test`
 (`detail` is the backend, `gotify`), `qr`, `check`, `queue` (`target` is the batch, `detail` `N
-messages`, plus `, M skipped` when rows were skipped), `queue_cancel` (`target` is the batch or `#id`, `detail` `N canceled`), `optout_add`
+messages`, plus `, M skipped` when rows were skipped), `queue_cancel` (`target` is the batch or `#id`, `detail` `N canceled`),
+`queue_file` (`target` is the file id, `detail` `kind, N bytes`, plus `, already uploaded` for a repeat; never the name), `queue_file_delete` (same), `queue_files_wipe` (logout; `detail` `N files`), `optout_add`
 (`target` is the chat; `detail` is `added`, `already listed`, or `keyword STOP` with actor
 `whatsapp` when the chat sent the keyword), `optout_remove`, `contact_set` (`target` is the chat,
 `detail` the changed fields like `name, tags`, or `no change`), `contact_delete`, `contact_import`
@@ -1073,7 +1133,8 @@ when wame restarts. The webhook URL, its secret and message content are never in
     "queued": 120, "sending": 1, "sent": 880, "failed": 3, "canceled": 0, "delivered": 871, "read": 640,
     "oldest_queued": "2026-10-12T21:00:00-03:00", "next_due": "2026-10-12T21:41:03-03:00",
     "paused": false, "running": true, "jitter_ms": 2000,
-    "quiet_hours": "21:00-08:00", "timezone": "America/Sao_Paulo", "quiet_until": "2026-10-13T08:00:00-03:00"
+    "quiet_hours": "21:00-08:00", "timezone": "America/Sao_Paulo", "quiet_until": "2026-10-13T08:00:00-03:00",
+    "files": 2, "file_bytes": 482900, "files_quota": 2147483648
   },
   "alerts": {
     "configured": true, "backend": "gotify", "delay_ms": 120000, "sent": 2, "failed": 0,
@@ -1143,8 +1204,8 @@ and the admin panel's and Prometheus' `/stats`, `/metrics`, `/queue`, `/tokens`,
 ## `GET /settings`, `PATCH /settings`
 
 Some flags can be changed while wame runs, without a restart: `rate`, `chat_gap`, `max_wait`,
-`auto_reply`, `webhook_filter`, `queue_paused`, `queue_jitter`, `queue_quiet_hours`, `queue_quiet`
-and `queue_timezone`. Requires `admin`.
+`auto_reply`, `webhook_filter`, `queue_paused`, `queue_jitter`, `queue_quiet_hours`, `queue_quiet`,
+`queue_timezone`, `queue_media_ttl` and `queue_files_quota`. Requires `admin`.
 
 ```sh
 curl -H "$H" localhost:8080/settings
@@ -1163,7 +1224,9 @@ curl -H "$H" -X PATCH localhost:8080/settings -d '{"rate": null}'     # back to 
   { "key": "queue_jitter", "value": "2s", "default": "2s", "overridden": false },
   { "key": "queue_quiet_hours", "value": "21:00-08:00", "default": "", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" },
   { "key": "queue_quiet", "value": "true", "default": "true", "overridden": false },
-  { "key": "queue_timezone", "value": "America/Sao_Paulo", "default": "Local (UTC)", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" }
+  { "key": "queue_timezone", "value": "America/Sao_Paulo", "default": "Local (UTC)", "overridden": true, "updated_by": "ops-laptop", "updated_at": "2026-10-12T22:10:00-03:00" },
+  { "key": "queue_media_ttl", "value": "24h0m0s", "default": "24h0m0s", "overridden": false },
+  { "key": "queue_files_quota", "value": "2GB", "default": "2GB", "overridden": false }
 ]
 ```
 
@@ -1175,7 +1238,11 @@ curl -H "$H" -X PATCH localhost:8080/settings -d '{"rate": null}'     # back to 
   `21:00-08:00` (it may cross midnight; `""` turns it off) when the queue sends nothing, read on the
   clock of `queue_timezone`, an IANA name like `America/Sao_Paulo` (`Local`, the default, is the
   server's zone). `queue_quiet` (`true`/`false`) switches the window off and back on without losing
-  it. See [QUEUE.md](QUEUE.md#quiet-hours).
+  it. See [QUEUE.md](QUEUE.md#quiet-hours). `queue_media_ttl` is how long one upload to WhatsApp is
+  reused for later messages with the same file: a duration up to `168h`, default `24h`, `off` to
+  upload for every message. `queue_files_quota` caps the bytes of all [queue files](#post-queuefiles-get-queuefiles-delete-queuefilesid)
+  together: `2GB` (the default), `500MB`, `64KB`, `1TB` or a byte count, powers of 1024; `0`
+  refuses new uploads. Neither has a flag. See [QUEUE.md](QUEUE.md#files).
 - Every value is checked before any is applied, so a bad one changes nothing (400).
 - Changes apply at once and are stored in the `wame_settings` table, so they **win over the flags
   on the next start too**, until reset with `null`. `default` shows the flag's value.

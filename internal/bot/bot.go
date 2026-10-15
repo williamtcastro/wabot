@@ -80,6 +80,8 @@ type Bot struct {
 	joinedGroups func(ctx context.Context) ([]*types.GroupInfo, error)
 	refreshes    map[string]time.Time
 	wipes        atomic.Uint64
+	dataDir      string
+	uploadMedia  func(ctx context.Context, data []byte, kind whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 
 	db            *sql.DB
 	groupsRefresh chan struct{}
@@ -137,6 +139,7 @@ func New(ctx context.Context, dbPath string, waLogger waLog.Logger, log *slog.Lo
 		db:        db,
 	}
 	b.logout, b.joinedGroups = b.Client.Logout, b.Client.GetJoinedGroups
+	b.initQueueFiles(abs)
 	b.ctx, b.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	b.loadCachedGroups()
 	b.Client.AddEventHandler(b.handle)

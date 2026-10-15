@@ -1,7 +1,6 @@
 package bot
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -67,31 +66,17 @@ func (b *Bot) SendFile(ctx context.Context, actor, to string, data []byte, fileN
 
 func (b *Bot) sendFile(ctx context.Context, jid types.JID, quote *waE2E.ContextInfo, data []byte, fileName, caption string, opt SendOptions) (store.Message, error) {
 	mime := http.DetectContentType(data)
-	rec := store.Message{Type: "document", Text: cmp.Or(caption, fileName), ReplyTo: opt.ReplyTo,
-		Media: &store.Media{Mimetype: mime, FileName: fileName, Size: uint64(len(data))}}
+	photo := strings.HasPrefix(mime, "image/")
 	mediaType := whatsmeow.MediaDocument
-	if strings.HasPrefix(mime, "image/") {
-		rec.Type, rec.Text, rec.Media.FileName, mediaType = "image", caption, "", whatsmeow.MediaImage
+	if photo {
+		mediaType = whatsmeow.MediaImage
 	}
-	up, err := b.Client.Upload(ctx, data, mediaType)
+	up, err := b.uploadMedia(ctx, data, mediaType)
 	if err != nil {
-		return store.Message{}, err
+		return store.Message{}, uploadError(err)
 	}
-	msg := &waE2E.Message{}
-	if rec.Type == "image" {
-		msg.ImageMessage = &waE2E.ImageMessage{
-			Caption: new(caption), Mimetype: new(mime), ContextInfo: quote,
-			URL: new(up.URL), DirectPath: new(up.DirectPath), MediaKey: up.MediaKey,
-			FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256, FileLength: new(up.FileLength),
-		}
-	} else {
-		msg.DocumentMessage = &waE2E.DocumentMessage{
-			Caption: new(caption), Mimetype: new(mime), ContextInfo: quote,
-			FileName: new(fileName), Title: new(fileName),
-			URL: new(up.URL), DirectPath: new(up.DirectPath), MediaKey: up.MediaKey,
-			FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256, FileLength: new(up.FileLength),
-		}
-	}
+	msg, rec := fileMessage(up, photo, mime, fileName, caption, quote, uint64(len(data)))
+	rec.ReplyTo = opt.ReplyTo
 	return b.deliver(ctx, jid, msg, rec, opt)
 }
 

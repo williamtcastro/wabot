@@ -243,7 +243,11 @@ All flags are accepted by every command, so `-rate`, `-chat-gap` and `-typing` a
 
 `-rate`, `-chat-gap`, `-max-wait`, `-autoreply`, `-webhook-filter`, `-queue-jitter`,
 `-queue-quiet-hours` and `-queue-timezone` can also be changed while wame runs, with [`PATCH /settings`](API.md#get-settings-patch-settings) or the admin panel's
-Settings tab. Those changes are stored in the database and **win over the flags**, on later starts
+Settings tab. Two more runtime settings have no flag: `queue_media_ttl` (how long one upload to WhatsApp
+is reused for the later messages with the same [queue file](QUEUE.md#files): `24h` by default, up to
+`168h`, `off` to upload for every message) and `queue_files_quota` (the bytes all queue files may take
+together: `2GB` by default, also `500MB`, `64KB`, `1TB` or a byte count; `0` refuses new uploads).
+Those changes are stored in the database and **win over the flags**, on later starts
 too, until they're reset there. See [API.md → Rate limiting](API.md#rate-limiting) for how the limiter behaves
 and why it's on by default.
 
@@ -312,6 +316,7 @@ wame's own tables:
 | `wame_contacts` | your own names, tags, notes, language and time zone per person; deleted on logout |
 | `wame_contact_cache` | what WhatsApp last said about a person (about, picture id, business info, LID), filled by an admin refresh; deleted on logout |
 | `wame_outbox` | the [send queue](QUEUE.md) |
+| `wame_outbox_files` | metadata of the [files](QUEUE.md#files) uploaded for the queue (the bytes are in `outbox/` next to the database); deleted on logout |
 | `wame_optouts` | chats that asked not to get queued messages; kept on logout |
 | `wame_audit` | one row per control action (send, react, edit, delete, read, pair, logout…), served by `GET /audit` |
 | `wame_tokens` | API tokens: id, name, SHA-256 hash of the token (never the token itself), scopes, chats, rate, created/expires/last-used times, revoked flag, `created_by`. Rows are never deleted |

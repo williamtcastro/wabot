@@ -29,7 +29,7 @@ type EnqueueOptions struct {
 	Rows []EnqueueRow
 	// SkipSent skips an item whose recipient already got, or is about to get, a message; nil is off.
 	SkipSent *SkipSent
-	// Dedupe skips an item whose recipient and text were already queued (or replayed) by this call.
+	// Dedupe skips an item whose recipient, file and text were already queued (or replayed) by this call.
 	Dedupe bool
 }
 
@@ -134,7 +134,7 @@ func (o EnqueueOptions) skip(tx *sql.Tx, i int, it OutboxItem, seen map[string]b
 	}
 	if o.Dedupe {
 		for _, k := range keys {
-			if seen[k+"\x00"+it.Text] {
+			if seen[k+"\x00"+it.FileID+"\x00"+it.Text] {
 				return SkipDuplicate, nil
 			}
 		}
@@ -148,7 +148,7 @@ func (o EnqueueOptions) mark(i int, it OutboxItem, seen map[string]bool) {
 		return
 	}
 	for _, k := range o.recipients(i, it) {
-		seen[k+"\x00"+it.Text] = true
+		seen[k+"\x00"+it.FileID+"\x00"+it.Text] = true
 	}
 }
 

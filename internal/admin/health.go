@@ -131,6 +131,19 @@ func (m *model) viewHealth() string {
 		{"Webhook", m.webhookBody()},
 		{"Alerts", m.alertsBody(m.gridWidth() - 4)},
 		{"Recent webhook failures", m.webhookFailures(m.gridWidth() - 4)},
+		{"Queue files", queueFilesBody(s.Queue)},
+	})
+}
+
+// queueFilesBody is the files waiting in the send queue against the server's quota.
+func queueFilesBody(q bot.QueueStats) string {
+	if q.FilesQuota == 0 && q.Files == 0 {
+		return styleDim.Render("No files (or the server is too old to say).")
+	}
+	return kv([][2]string{
+		{"Files", styleBold.Render(fmt.Sprint(q.Files)) + styleDim.Render(" waiting on the server's disk")},
+		{"Stored", byteSize(q.FileBytes)},
+		{"Quota MB", bar(int(q.FileBytes>>20), int(q.FilesQuota>>20), 20)},
 	})
 }
 

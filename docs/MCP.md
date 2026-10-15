@@ -66,8 +66,8 @@ To send every kind of message (files, edits and deletes are API-only), see [SEND
 | `send_message` | send | `to`, `text`, `reply_to` (optional) | `seq`, `id`, `chat` |
 | `react` | send | `chat`, `message_id`, `emoji` (empty removes) | `seq`, `id`, `chat` |
 | `mark_read` | send | `chat`, `message_ids` (optional; omit for the whole chat) | `marked` |
-| `schedule_message` | send | `to` (or `tag:NAME`: everyone with that contact tag, needs read too), `text`, `send_at` (optional: RFC 3339 with offset, or a delay like `90m`, `2h`, `3d`), `batch` (optional), `template` (optional: fill `{name}`, `{first_name}`, `{push_name}`, with `{name\|fallback}`; needs read too) | `id` (one recipient only), `batch`, `to`, `status`, `due`, `queued` (how many items), `note` (when the queue is paused or no worker runs) |
-| `list_scheduled` | send | `status`, `batch`, `before` (id, to page), `limit` (default 50, max 200) | `items[]` newest first: `id`, `batch`, `actor`, `to`, `chat`, `status`, `attempts`, `due`, `created_at`, `updated_at`, `message_id`, `error`, `delivered_at` and `read_at` (once WhatsApp reports them), `untrusted.text` (own items only); `counts` by status (plus `delivered` and `read` among the sent); `note` |
+| `schedule_message` | send | `to` (or `tag:NAME`: everyone with that contact tag, needs read too), `text` (optional with `file`: then it's the caption), `file` (optional: id of a file uploaded with `POST /queue/files` under the same token), `send_at` (optional: RFC 3339 with offset, or a delay like `90m`, `2h`, `3d`), `batch` (optional), `template` (optional: fill `{name}`, `{first_name}`, `{push_name}`, with `{name\|fallback}`; needs read too) | `id` (one recipient only), `batch`, `to`, `status`, `due`, `queued` (how many items), `note` (when the queue is paused or no worker runs) |
+| `list_scheduled` | send | `status`, `batch`, `before` (id, to page), `limit` (default 50, max 200) | `items[]` newest first: `id`, `batch`, `actor`, `to`, `chat`, `status`, `attempts`, `due`, `created_at`, `updated_at`, `message_id`, `error`, `delivered_at` and `read_at` (once WhatsApp reports them), `kind` (`text`, `image` or `document`) and `file_size`, `untrusted.text` (own items only); `counts` by status (plus `delivered` and `read` among the sent); `note` |
 | `cancel_scheduled` | send | `id` **or** `batch` | `canceled` (ids) |
 
 Each message in `messages[]` has `seq`, `id`, `chat`, `from` (`me`/`them`), `sender`, `type`,
@@ -85,6 +85,13 @@ canceled"). A `tag:` recipient queues one item per tagged person, the same
 [rules](QUEUE.md#tags-templates-and-skips) as the API: a token limited to chats reaches only the
 members on its list, without learning about the rest. With `template`, `{name}` is never a push
 name; the filled text shows in `list_scheduled` under `untrusted.text`.
+
+**Files.** There is no upload tool: a model shouldn't push megabytes through its context. The user uploads
+the file through [`POST /queue/files`](API.md#post-queuefiles-get-queuefiles-delete-queuefilesid)
+(or `curl -F file=@menu.pdf`) with the same token and gives the model the id; `schedule_message` then
+queues it with the same scopes, allowlist and own-files rule as the API (an id that isn't the
+token's own is refused as not found). No tool returns a file's name or content.
+See [QUEUE.md](QUEUE.md#files).
 
 Read tools and `list_scheduled` are annotated read-only. `send_message` and `schedule_message` are
 marked destructive and open-world, `react` / `mark_read` open-world, and `cancel_scheduled`

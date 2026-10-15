@@ -200,7 +200,7 @@ func (b *Bot) Queue(ctx context.Context, opt QueueOptions, reqs []QueueRequest) 
 				text, err := renderTemplate(parts, b.namesForTemplate(ctx, jid, r.Name))
 				if errors.Is(err, errNoName) {
 					noName[i] = true
-				} else if err := CheckQueueRequest(QueueRequest{To: r.To, Text: text, ReplyTo: r.ReplyTo, SendAt: r.SendAt}); err != nil {
+				} else if err := CheckQueueRequest(QueueRequest{To: r.To, Text: text, ReplyTo: r.ReplyTo, SendAt: r.SendAt, File: r.File}); err != nil {
 					return res, BadInput("%s: %v", r.where(), err)
 				} else {
 					items[i].Text = text
@@ -210,6 +210,13 @@ func (b *Bot) Queue(ctx context.Context, opt QueueOptions, reqs []QueueRequest) 
 		if opt.Key != "" {
 			items[i].Key, extras[i].AltKeys, extras[i].Taken = rowKeys(opt.Key, r, extras[i].Recipients)
 		}
+	}
+	expanded := make([]QueueRequest, len(rows))
+	for i, r := range rows {
+		expanded[i] = r.QueueRequest
+	}
+	if err := b.attachQueueFiles(opt.Actor, expanded, func(i int) string { return rows[i].where() }, items); err != nil {
+		return res, err
 	}
 	replays := 0
 	stored, skipped, err := b.Store.EnqueueWith(items, store.EnqueueOptions{Rows: extras, SkipSent: skip, Dedupe: opt.Dedupe,
@@ -245,7 +252,7 @@ func (b *Bot) Queue(ctx context.Context, opt QueueOptions, reqs []QueueRequest) 
 		err = ErrKeyReused
 	}
 	if err != nil {
-		return Enqueued{}, err
+		return Enqueued{}, queueFileErr(err)
 	}
 	res = Enqueued{Batch: batch, Items: make([]store.OutboxItem, 0, len(stored)), Replayed: replays}
 	for i, it := range stored {

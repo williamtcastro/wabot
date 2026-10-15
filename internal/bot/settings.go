@@ -26,11 +26,15 @@ type Settings struct {
 	QuietHours    QuietHours
 	QuietOff      bool           // switches the window off without forgetting it
 	Timezone      *time.Location // nil means time.Local
+	// QueueMediaTTL is how long a queued file's WhatsApp upload is reused (0: upload per message).
+	QueueMediaTTL time.Duration
+	// QueueFilesQuota caps the bytes of all queued files together.
+	QueueFilesQuota int64
 }
 
 // SettingKeys are the names used by the API, the table and the audit log, in display order.
 var SettingKeys = []string{"rate", "chat_gap", "max_wait", "auto_reply", "webhook_filter", "queue_paused", "queue_jitter",
-	"queue_quiet_hours", "queue_quiet", "queue_timezone"}
+	"queue_quiet_hours", "queue_quiet", "queue_timezone", "queue_media_ttl", "queue_files_quota"}
 
 const maxSettingDuration = 10 * time.Minute
 
@@ -66,6 +70,13 @@ func (s Settings) get(key string) string {
 		return strconv.FormatBool(!s.QuietOff)
 	case "queue_timezone":
 		return zoneName(s.location())
+	case "queue_media_ttl":
+		if s.QueueMediaTTL == 0 {
+			return "off"
+		}
+		return s.QueueMediaTTL.String()
+	case "queue_files_quota":
+		return FormatBytes(s.QueueFilesQuota)
 	}
 	return ""
 }
@@ -133,6 +144,21 @@ func (s *Settings) set(key, value string) error {
 			return BadInput("queue_timezone: %v", perr)
 		}
 		s.Timezone = loc
+	case "queue_media_ttl":
+		if strings.EqualFold(value, "off") {
+			value = "0s"
+		}
+		d, perr := time.ParseDuration(value)
+		if perr != nil || d < 0 || d > maxQueueMediaTTL {
+			return BadInput("queue_media_ttl must be off or a duration up to %s, like 24h", maxQueueMediaTTL)
+		}
+		s.QueueMediaTTL = d
+	case "queue_files_quota":
+		n, perr := ParseBytes(value)
+		if perr != nil {
+			return BadInput("queue_files_quota %v", perr)
+		}
+		s.QueueFilesQuota = n
 	case "webhook_filter":
 		if _, err := ParseWebhookFilter(value); err != nil {
 			return BadInput("webhook_filter: %v", err)
@@ -162,6 +188,7 @@ func ParseWebhookFilter(raw string) (store.Filter, error) {
 func (b *Bot) InitSettings(base Settings) (Settings, error) {
 	b.settingsMu.Lock()
 	defer b.settingsMu.Unlock()
+	base = base.withFileDefaults()
 	b.baseSettings = base
 	overrides, err := b.Store.Settings()
 	if err != nil {

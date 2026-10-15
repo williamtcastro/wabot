@@ -43,7 +43,7 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/queue -d '{
 - **Token rules still apply.** A token limited to some chats can only queue to those. Items from a
   token that is revoked or expires before they go out fail with that reason instead of being sent.
 
-It doesn't send files, reactions or edits (use the direct routes). It takes at most 1000 messages
+It sends text and, since [files](#files), images and documents; reactions and edits go through the direct routes. It takes at most 1000 messages
 per request (repeat the request with the same `batch` for more), and at most 10,000 waiting per
 token, so a misbehaving client can't fill the disk.
 
@@ -85,7 +85,7 @@ curl -H "Authorization: Bearer $T" -H "Content-Type: text/csv" -H "Idempotency-K
   --data-binary @promo.csv "localhost:8080/queue?batch=promo-october"
 ```
 
-The query takes `batch`, `send_at` and `text` (the defaults, like the JSON body's top-level fields)
+The query takes `batch`, `send_at`, `text` and `file` (an uploaded [file](#files); the defaults, like the JSON body's top-level fields)
 and `template`, `dedupe` and `skip_sent` (see [below](#tags-templates-and-skips));
 the limits are the JSON form's: 1000 rows and 16 MB per request, the token's allowlist checked on
 every row, and `Idempotency-Key` to make a retry safe. Use `--data-binary`, not `-d`, which drops
@@ -189,7 +189,7 @@ placeholders are filled per recipient; without it, braces are plain text.
 
 | | `dedupe` | `skip_sent` |
 |---|---|---|
-| Skips | a row whose recipient and (filled) text already appeared earlier in the request | a recipient who already got a message: within a time (`48h`, `90m`, `3d`) or in a batch (`batch:promo-october`) |
+| Skips | a row whose recipient, file and (filled) text already appeared earlier in the request | a recipient who already got a message: within a time (`48h`, `90m`, `3d`) or in a batch (`batch:promo-october`) |
 | API | `"dedupe": true` / `?dedupe=1` | `"skip_sent": "48h"` / `?skip_sent=batch:promo-october` |
 | CLI | `-dedupe` (across the whole file) | `-skip-sent 48h` |
 
@@ -252,6 +252,84 @@ sends no event, so a failure is reported once.
 { "id": 41, "status": "sent", "message_id": "3EB0C4…", "delivered_at": "2026-10-12T21:41:05-03:00", "read_at": "2026-10-12T21:52:40-03:00", … }
 ```
 
+## Files
+
+Images and documents can be queued like text, and the usual case is one file to many people. Upload
+it once, then give its id to as many messages and batches as you like; `POST /queue` stays small
+JSON.
+
+```sh
+curl -H "Authorization: Bearer $T" -F file=@menu.pdf localhost:8080/queue/files
+# 201 {"id": "f_0123456789abcdef0123456789abcdef", "sha256": "…", "size": 482113, "mime": "application/pdf",
+#      "kind": "document", "name": "menu.pdf", "expires_at": "…", …}
+
+curl -H "Authorization: Bearer $T" -X POST localhost:8080/queue -d '{
+  "batch": "menu-october", "file": "f_0123456789abcdef0123456789abcdef", "text": "Our new menu",
+  "messages": [{"to": "5511999999999"}, {"to": "5511988887777", "text": "Hi John, the menu"}]}'
+```
+
+- **Referencing it.** `file` at the top level is the default for every message; a message can set
+  its own. With a file, `text` is the caption and may be empty. A CSV takes `?file=` as the
+  default. The file must be your own (admin included), or the answer is 404; an id that isn't
+  `f_` plus 32 hex digits is a 400. A retry with the same `Idempotency-Key` and a different file is a 409.
+- **Uploading.** `POST /queue/files` takes `multipart/form-data` with one part named `file`, up to
+  64 MB, like `/send/file`. The answer is 201, or 200 when you already have a live file with the
+  same `sha256` (per token: another token's copy is a separate file). `GET /queue/files` lists your
+  files with their usage (admin: everyone's, without other tokens' names). `DELETE /queue/files/{id}`
+  deletes one; 409 while queued or sending items need it (cancel them first), 404 for an unknown id
+  or someone else's file.
+- **Types.** Read from the bytes, never from the client's `Content-Type`. Images: JPEG, PNG,
+  WebP. Documents: PDF, plain text (`.txt`), CSV (`.csv`) and the Office formats `.docx` `.xlsx`
+  `.pptx` `.odt` `.ods` `.odp` (at most 10,000 entries in the archive). Anything else is 415,
+  including text that isn't UTF-8 or that starts with `<` (HTML, SVG, XML). The file name's
+  extension must match the content (415 otherwise); a name without one
+  gets one. An image over 16 MB, or over 16384 px a side or 100 MP, goes as a document. The name is
+  display metadata only: base name, invisible and control characters dropped, 255 bytes at most.
+- **Quotas.** 50 live files and 500 MB per token (its name), and a total over all tokens set by the
+  `queue_files_quota` [setting](API.md#get-settings-patch-settings) (`2GB` by default; `500MB`, `64KB`,
+  `1TB` or a byte count; `0` refuses new uploads). Over a quota is a 413 that says which one (your
+  own usage, never other tokens'), checked before anything is written to disk; a server that can't
+  write the file answers 507. At most two uploads per token and eight in all run at once; more is a
+  429 with `Retry-After`.
+- **Sending.** A file item is one send for the limits, like text: the global limiter, the per-chat
+  gap and the token's rate, with no discount. The worker uploads the file to WhatsApp before it takes
+  a slot (only when the slot is about to be free), one upload at a time, so a slow upload doesn't
+  hold up interactive sends. That upload is **reused** for the later items of the same file while it
+  is younger than `queue_media_ttl` (`24h` by default, up to `168h`; `off` uploads for every message).
+  After a fresh upload the worker checks pause, quiet hours and the token again before it sends.
+  The caption is the item's text.
+- **Retries.** An upload error counts as an attempt, backs off like any send error and counts toward
+  the whole-queue cooldown (unless the connection dropped: then the attempt is given back, as for text). A send error after a reused upload drops the cached upload, so the retry
+  uploads again. A file that is missing or changed on disk fails the item at once with "file is gone".
+  A recipient who asks for expired media to be sent again isn't answered (wame doesn't do that for
+  `/send/file` either); the TTL keeps that window small.
+- **Items.** Items that carry a file show `file` (its id), `kind` (`image` or `document`) and
+  `file_size`, in `GET /queue`, `GET /queue/{id}`, the enqueue answer, `queue` events and webhook
+  `queue` deliveries; text items have none of them. The file's name is never in any of these.
+  The message kept in history has the type, mime, size and, for documents, the name, as `/send/file`
+  does.
+- **Cleanup.** The worker prunes hourly and once when it starts. A file with no
+  open item is deleted 1 hour after its last item finished. A file no item ever used is deleted
+  24 hours after upload (`expires_at`; time with the queue paused counts toward that, only for
+  such files: a file that queued items need stays while those items are open, paused or not). Files
+  of a token that was revoked or expired are deleted, and its queued items then fail with "file is
+  gone". A deleted file's row keeps only its id, token, size, hash, mime and kind until its items are
+  pruned (7 days), so the item list still says what was sent. Files in `outbox/` without a row that
+  are older than 15 minutes (a crash during an upload) are swept.
+- **Privacy.** Queued files sit **unencrypted on the server's disk** in `outbox/` next to the
+  database (`/data/outbox/` in Docker; directory `0700`, files `0600`, named by random ids) until
+  they are sent or pruned. No route returns their content. Names count as text: they are never in
+  events, webhook deliveries, the audit log or the admin panel, which shows only the kind and size.
+  `wame logout` (and `POST /logout`, or WhatsApp logging the device out) deletes every file and
+  removes `outbox/`; items still pointing at one then fail with "file is gone". `wame backup`
+  copies the database only, not `outbox/`.
+- **Audit.** Uploads are `queue_file` and deletes `queue_file_delete` (target: the file id; detail
+  `kind, N bytes`, never the name), a logout that removed files `queue_files_wipe`, and each queued
+  file send `send_file` with `kind, N bytes, queue #id`.
+
+From an AI agent, `schedule_message` takes the `file` id of a file you uploaded with the same
+token; there is no upload tool ([MCP.md](MCP.md#tools)).
+
 ## Quiet hours
 
 `queue_quiet_hours` (`-queue-quiet-hours`, `WAME_QUEUE_QUIET_HOURS`, or the
@@ -299,16 +377,17 @@ queued itself; with `admin`, every item (`?actor=` narrows it).
 
 | Route | |
 |---|---|
-| `POST /queue` | queue up to 1000 messages. Body: `messages` (each `to`, `text`, optional `reply_to`, `send_at` and `name`), optional `batch` (letters, digits, `.`, `_`, `-`; generated when left out), top-level `text` / `send_at` used by messages that leave theirs out, and the options `template`, `dedupe` and `skip_sent` ([above](#tags-templates-and-skips)). Or a [CSV file](#csv-import) as `text/csv` or `application/csv`. Answers 202 with the items (without text), `queued` (how many items), `replayed` (how many of them were already queued under the idempotency key), `skipped` and `skipped_rows` |
+| `POST /queue` | queue up to 1000 messages. Body: `messages` (each `to`, `text`, optional `reply_to`, `send_at`, `name` and `file`), optional `batch` (letters, digits, `.`, `_`, `-`; generated when left out), top-level `text` / `send_at` / `file` used by messages that leave theirs out, and the options `template`, `dedupe` and `skip_sent` ([above](#tags-templates-and-skips)). Or a [CSV file](#csv-import) as `text/csv` or `application/csv`. Answers 202 with the items (without text), `queued` (how many items), `replayed` (how many of them were already queued under the idempotency key), `skipped` and `skipped_rows` |
 | `GET /queue` | items, newest first, plus `counts` by state. Query: `status`, `batch`, `actor` (admin), `before` (id, to page), `limit` (≤ 500) |
 | `GET /queue/{id}` | one item, with its text |
 | `DELETE /queue/{id}` | cancel a queued item (409 when it's already sending or finished) |
 | `DELETE /queue?batch=NAME` | cancel every queued item of a batch |
+| `POST /queue/files`, `GET /queue/files`, `DELETE /queue/files/{id}` | upload, list and delete [files](#files) |
 
 A request is safe to retry with an `Idempotency-Key` header (or `idempotency_key` in the body):
 the same key from the same token returns the items it already queued instead of adding them again
 (counted in `replayed`). The same key with different messages (any of `to`, `text`, `reply_to`,
-`send_at`, or a named `batch`) is refused with 409, like on `/send`, and nothing of that request is
+`send_at`, `file`, or a named `batch`) is refused with 409, like on `/send`, and nothing of that request is
 queued. Replayed items don't count toward the 10,000 waiting limit. A body over 16 MB gets
 413.
 
@@ -322,6 +401,10 @@ Neither includes the message text.
 { "id": 41, "batch": "promo-october", "actor": "promo-bot", "to": "5511999999999", "status": "sent",
   "attempts": 1, "chat": "5511999999999@s.whatsapp.net", "message_id": "3EB0C4…", "due": "…", "created_at": "…", "updated_at": "…" }
 ```
+
+An item with a [file](#files) also has `file`, `kind` (`image` or `document`) and `file_size`.
+
+**Settings.** `queue_media_ttl` and `queue_files_quota` (see [Files](#files)) are runtime settings without a flag, changed with `PATCH /settings` or the admin panel's Settings tab.
 
 **Pausing.** The `queue_paused` [setting](API.md#get-settings-patch-settings) holds everything
 (`PATCH /settings {"queue_paused": true}`, or `P` on the admin panel's Queue tab). Like other

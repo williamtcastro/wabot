@@ -56,6 +56,7 @@ type QueueRequest struct {
 	Line    int
 	// Name is the {name} for this message's template; it wins over every name wame knows.
 	Name string
+	File string // a queue file's id; Text is then its caption and may be empty
 }
 
 // Where names the i-th message of a request in errors: its CSV line, or its index.
@@ -83,6 +84,9 @@ type QueueStats struct {
 	CooldownUntil time.Time `json:"cooldown_until,omitzero"`
 	LastError     string    `json:"last_error,omitempty"`
 	LastErrorAt   time.Time `json:"last_error_at,omitzero"`
+	Files         int       `json:"files"`
+	FileBytes     int64     `json:"file_bytes"`
+	FilesQuota    int64     `json:"files_quota"`
 }
 
 // QuietHours is a daily window, in minutes since midnight, when the queue sends nothing. It may
@@ -169,6 +173,8 @@ type outbox struct {
 	cooldown  time.Time
 	lastErr   string
 	lastErrAt time.Time
+	ready     *readyMedia
+	uploading map[string]int // POST /queue/files in progress, by actor
 }
 
 func (b *Bot) wakeOutbox() {
@@ -215,7 +221,8 @@ func sameRequest(stored, want store.OutboxItem, named bool) bool {
 		sameText = stored.SourceHash == want.SourceHash
 	}
 	return (!named || stored.Batch == want.Batch) && stored.To == want.To && sameText &&
-		strings.TrimSpace(stored.ReplyTo) == want.ReplyTo && (stored.SendAt == -1 || stored.SendAt == sendAt)
+		strings.TrimSpace(stored.ReplyTo) == want.ReplyTo && (stored.SendAt == -1 || stored.SendAt == sendAt) &&
+		stored.FileID == want.FileID
 }
 
 // CheckBatch accepts 1-64 letters, digits, '.', '_' or '-'.
@@ -234,7 +241,9 @@ func CheckQueueRequest(r QueueRequest) error {
 		return fmt.Errorf("to is longer than %d characters", maxQueueTo)
 	case len(strings.TrimSpace(r.ReplyTo)) > maxQueueReplyTo:
 		return fmt.Errorf("reply_to is longer than %d characters", maxQueueReplyTo)
-	case strings.TrimSpace(r.Text) == "":
+	case r.File != "" && !ValidQueueFileID(r.File):
+		return errors.New("file must be an id from POST /queue/files (f_ and 32 hex digits)")
+	case strings.TrimSpace(r.Text) == "" && r.File == "":
 		return errors.New("text is empty")
 	case utf8.RuneCountInString(r.Text) > maxQueueText:
 		return fmt.Errorf("text is longer than %d characters", maxQueueText)
@@ -288,11 +297,13 @@ func (b *Bot) QueueStats() QueueStats {
 	}
 	s := b.currentSettings()
 	cooldown := b.queueCooldown()
+	files := b.queueFileUsage()
 	b.outbox.mu.Lock()
 	defer b.outbox.mu.Unlock()
 	return QueueStats{OutboxCounts: c, Paused: s.QueuePaused, Running: b.outbox.running, JitterMS: s.QueueJitter.Milliseconds(),
 		QuietHours: s.QuietHours.String(), Timezone: zoneName(s.location()), QuietUntil: s.quietUntil(time.Now()), QuietOff: s.QuietOff,
-		CooldownUntil: cooldown, LastError: b.outbox.lastErr, LastErrorAt: b.outbox.lastErrAt}
+		CooldownUntil: cooldown, LastError: b.outbox.lastErr, LastErrorAt: b.outbox.lastErrAt,
+		Files: files.Files, FileBytes: files.Bytes, FilesQuota: s.QueueFilesQuota}
 }
 
 // queueCooldown is when the queue's back-off after repeated errors ends, or zero.
@@ -390,6 +401,7 @@ func (b *Bot) pruneOutbox() {
 	} else if n > 0 {
 		b.Log.Info("profile cache: pruned old profiles", "count", n)
 	}
+	b.pruneQueueFiles()
 }
 
 // outboxStep sends at most one message and returns how long to wait before the next step.
@@ -452,6 +464,17 @@ func (b *Bot) outboxStep(ctx context.Context) time.Duration {
 			b.finishQueued(it, store.OutboxResult{Status: store.OutboxFailed, Chat: chat, Error: err.Error()})
 			continue
 		}
+		media, d, err := b.queuedFile(ctx, it, tok, chat)
+		switch {
+		case err != nil:
+			b.queuedFileFailed(ctx, it, err)
+			return jitter(s.QueueJitter)
+		case d == redoStep:
+			return outboxMinStep
+		case d > 0:
+			wait = min(wait, d)
+			continue
+		}
 		d, ok := b.outboxSlot(tok, chat)
 		if !ok {
 			wait = min(wait, d)
@@ -460,7 +483,7 @@ func (b *Bot) outboxStep(ctx context.Context) time.Duration {
 		if SleepUntil(ctx, time.Now().Add(d)) != nil {
 			return outboxIdle
 		}
-		b.sendQueued(ctx, it)
+		b.sendQueuedWith(ctx, it, media)
 		return jitter(s.QueueJitter)
 	}
 	return max(wait, outboxMinStep)
@@ -486,14 +509,7 @@ func (b *Bot) queueToken(id string, seen map[string]*store.Token) (*store.Token,
 // outboxSlot takes a send slot for chat if one is free now under both the token's own rate and the
 // global limiter; checking both first keeps one from being taken while the other is busy.
 func (b *Bot) outboxSlot(tok *store.Token, chat string) (time.Duration, bool) {
-	var own *Limiter
-	if tok != nil && tok.Rate > 0 {
-		own = b.tokenLimiter(tok.ID, tok.Rate)
-	}
-	wait := b.Limiter.Peek(chat)
-	if own != nil {
-		wait = max(wait, own.Peek(tok.ID))
-	}
+	own, wait := b.outboxPeek(tok, chat)
 	if wait > outboxSlotWithin {
 		return wait, false
 	}
@@ -505,7 +521,25 @@ func (b *Bot) outboxSlot(tok *store.Token, chat string) (time.Duration, bool) {
 	return b.Limiter.TryReserve(chat, outboxSlotWithin)
 }
 
-func (b *Bot) sendQueued(ctx context.Context, it store.OutboxItem) {
+// outboxPeek is how long until both the token's own rate and the global limiter have a slot for
+// chat, without taking one, and the token's limiter (nil without a rate).
+func (b *Bot) outboxPeek(tok *store.Token, chat string) (*Limiter, time.Duration) {
+	var own *Limiter
+	if tok != nil && tok.Rate > 0 {
+		own = b.tokenLimiter(tok.ID, tok.Rate)
+	}
+	wait := b.Limiter.Peek(chat)
+	if own != nil {
+		wait = max(wait, own.Peek(tok.ID))
+	}
+	return own, wait
+}
+
+func (b *Bot) sendQueued(ctx context.Context, it store.OutboxItem) { b.sendQueuedWith(ctx, it, nil) }
+
+// sendQueuedWith claims and sends an item; media is a file item's upload when it was made before
+// the slot was taken (nil uploads it here).
+func (b *Bot) sendQueuedWith(ctx context.Context, it store.OutboxItem, media *queueMedia) {
 	it, err := b.Store.ClaimOutbox(it.ID, string(b.Client.GenerateMessageID()))
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
@@ -514,7 +548,7 @@ func (b *Bot) sendQueued(ctx context.Context, it store.OutboxItem) {
 		return
 	}
 	b.queueEvent(it)
-	m, err := b.SendText(ctx, it.Actor, it.To, it.Text, SendOptions{ReplyTo: it.ReplyTo, queued: it.ID, messageID: types.MessageID(it.MessageID)})
+	m, err := b.sendQueuedItem(ctx, it, media)
 	if err == nil {
 		b.outboxResult(true, "")
 		b.finishQueued(it, store.OutboxResult{Status: store.OutboxSent, Chat: m.Chat})
