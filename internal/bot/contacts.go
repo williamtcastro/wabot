@@ -152,7 +152,7 @@ const groupsTTL = 10 * time.Minute
 
 // refreshGroups fetches every group we're in, caches names and admins in the database (so they show
 // instantly next start), and tells subscribers names may have changed. If a refresh is already
-// running it waits for that one instead.
+// running it waits for that one instead. A logout while it runs makes it keep nothing.
 func (b *Bot) refreshGroups(ctx context.Context) {
 	b.mu.Lock()
 	if running := b.groupsRefresh; running != nil {
@@ -173,7 +173,7 @@ func (b *Bot) refreshGroups(ctx context.Context) {
 		close(done)
 	}()
 	wipes := b.wipes.Load()
-	joined, err := b.Client.GetJoinedGroups(ctx)
+	joined, err := b.joinedGroups(ctx)
 	if err != nil {
 		b.Log.Warn("refresh groups failed", "err", err)
 		return
@@ -202,12 +202,13 @@ func (b *Bot) refreshGroups(ctx context.Context) {
 		cached = append(cached, store.Group{JID: j.JID.String(), Name: j.Name, Admins: admins, Members: members})
 	}
 	b.contactsMu.Lock()
-	if b.wipes.Load() == wipes {
-		if err := b.Store.SaveJoinedGroups(cached); err != nil {
-			b.Log.Warn("cache groups failed", "err", err)
-		}
+	defer b.contactsMu.Unlock()
+	if b.wipes.Load() != wipes {
+		return
 	}
-	b.contactsMu.Unlock()
+	if err := b.Store.SaveJoinedGroups(cached); err != nil {
+		b.Log.Warn("cache groups failed", "err", err)
+	}
 	b.mu.Lock()
 	b.groups, b.groupsAt = all, time.Now()
 	b.mu.Unlock()

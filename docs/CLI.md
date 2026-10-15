@@ -191,9 +191,9 @@ leaves the machine. To restore, stop wame and put the copy in place of `wame.db`
 ### `wame logout`
 
 Unlinks the device from your phone and deletes the session. If that worked, it also deletes your
-own contacts (names, tags, notes, language, time zone), the WhatsApp profile cache and group
-members. Messages, group names and the audit log are kept; delete the database file to remove
-everything. Run `wame backup` first if you want to keep your notes.
+own contacts (names, tags, notes, language, time zone), the WhatsApp profile cache, and group
+names, admins and members. Messages and the audit log are kept; delete the database file to remove
+everything. Opt-outs are kept, so a logout can't let anyone who opted out be messaged again. Run `wame backup` first if you want to keep your notes.
 
 ### `wame version`
 
@@ -300,7 +300,7 @@ wame's own tables:
 | `wame_messages` | every message the bot has seen or sent, which powers `/messages`, `/events`, `/chats` and the TUI (columns below) |
 | `wame_messages_fts` | full-text index of `wame_messages.text` (SQLite FTS5, accents folded) for `q=` and `/search`. Kept in sync by triggers on insert, update of `text` and delete |
 | `wame_chat_state` | per chat, `read_seq`: the read position behind `unread` in `/chats` and the TUI badges |
-| `wame_groups` | cached group names and admin lists (`jid`, `name`, `admins` as JSON, `updated`), so names show before connecting |
+| `wame_groups` | cached group names and admin lists (`jid`, `name`, `admins` as JSON, `updated`), so names show before connecting; deleted on logout |
 | `wame_audit` | one row per control action (send, react, edit, delete, read, pair, logout…), served by `GET /audit` |
 | `wame_tokens` | API tokens: id, name, SHA-256 hash of the token (never the token itself), scopes, chats, rate, created/expires/last-used times, revoked flag, `created_by`. Rows are never deleted |
 | `wame_settings` | runtime overrides from `PATCH /settings` or the admin panel (`key`, `value`, `updated_by`, `updated_at`). They win over the flags on every start; deleting a row (or resetting it there) brings the flag back |

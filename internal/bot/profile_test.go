@@ -371,16 +371,26 @@ func seedContactState(t *testing.T, b *Bot) {
 	if _, _, err := b.Store.Save(store.Message{ID: "W1", Chat: maria, Sender: maria, Type: "text", Text: "oi", Timestamp: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := b.Store.AddOptOut(store.OptOut{Chat: john, Reason: "stop", At: time.Now(), By: "ops"}); err != nil {
+		t.Fatal(err)
+	}
+	b.loadCachedGroups()
 }
 
+// contactStateLeft reports what survived of seedContactState; groups means the group's members,
+// its stored name or its name in memory.
 func contactStateLeft(t *testing.T, b *Bot) (own, cache, groups bool) {
 	t.Helper()
 	_, err := b.Store.Contact(maria)
 	own = err == nil
 	_, err = b.Store.CachedProfileOf(maria)
 	cache = err == nil
-	g, _ := b.Store.GroupsWith(maria)
-	return own, cache, len(g) > 0
+	members, _ := b.Store.GroupsWith(maria)
+	stored, _ := b.Store.Groups()
+	b.mu.RLock()
+	inMemory := b.groups[family].name != ""
+	b.mu.RUnlock()
+	return own, cache, len(members) > 0 || len(stored) > 0 || inMemory
 }
 
 func TestLogoutWipesContactState(t *testing.T) {
@@ -415,6 +425,9 @@ func TestLogoutWipesContactState(t *testing.T) {
 			}
 			if msgs, _ := b.Store.Messages(maria, 10); len(msgs) != 1 {
 				t.Fatalf("messages = %d, want them kept", len(msgs))
+			}
+			if out, err := b.Store.OptedOut(john); err != nil || !out {
+				t.Fatalf("opt-outs must survive a logout: %v, %v", out, err)
 			}
 			if !wiped {
 				return
@@ -519,5 +532,31 @@ func TestLogoutForgetsResolvedNumbers(t *testing.T) {
 	b.handle(&events.LoggedOut{})
 	if p, _ := b.Profile(t.Context(), maria, ProfileOptions{}); p.WhatsApp.OnWhatsApp != nil {
 		t.Fatal("on_whatsapp should be unknown after logout")
+	}
+}
+
+func TestGroupRefreshDuringLogoutKeepsNothing(t *testing.T) {
+	b := newTestBot(t)
+	gate, asked := make(chan struct{}), make(chan struct{})
+	b.joinedGroups = func(context.Context) ([]*types.GroupInfo, error) {
+		close(asked)
+		<-gate
+		return []*types.GroupInfo{{JID: jidOf(family), GroupName: types.GroupName{Name: "Family"},
+			Participants: []types.GroupParticipant{{JID: jidOf(maria)}}}}, nil
+	}
+	done := make(chan struct{})
+	go func() {
+		b.refreshGroups(context.Background())
+		close(done)
+	}()
+	<-asked
+	b.logout = func(context.Context) error { return nil }
+	if err := b.Logout(t.Context(), "ops"); err != nil {
+		t.Fatal(err)
+	}
+	close(gate)
+	<-done
+	if _, _, groups := contactStateLeft(t, b); groups {
+		t.Fatal("a group refresh that outlived the logout put the groups back")
 	}
 }

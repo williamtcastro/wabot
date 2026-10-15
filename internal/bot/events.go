@@ -202,9 +202,9 @@ func (b *Bot) cacheEvent(from types.JID, update func(jid string) (bool, error)) 
 	}
 }
 
-// wipeContacts deletes everything wame keeps about people when the account logs out: your own
-// contacts, the WhatsApp profile cache and group members (messages and the audit log stay). It is
-// audited as contacts_wipe with the number of own contacts.
+// wipeContacts deletes everything wame keeps about people and groups when the account logs out:
+// your own contacts, the WhatsApp profile cache, group names, admins and members (messages,
+// opt-outs and the audit log stay). It is audited as contacts_wipe with the number of own contacts.
 func (b *Bot) wipeContacts(actor string) {
 	b.contactsMu.Lock()
 	b.wipes.Add(1)
@@ -213,6 +213,7 @@ func (b *Bot) wipeContacts(actor string) {
 	b.own, b.ownLIDs, b.refreshes = nil, 0, nil
 	clear(b.jids)
 	b.allowlists = nil
+	b.groups, b.groupsAt = map[string]groupInfo{}, time.Time{}
 	b.mu.Unlock()
 	b.contactsMu.Unlock()
 	b.Audit(actor, "contacts_wipe", "", fmt.Sprintf("%d contacts", n), err)

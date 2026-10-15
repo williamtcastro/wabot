@@ -109,8 +109,9 @@ paths:
       summary: Unlink this device and delete the session
       description: >-
         Unlinks the device and, if that worked, also deletes your own contacts (names, tags, notes,
-        language, time zone), the WhatsApp profile cache and group members in one transaction.
-        Messages, group names and the audit log are kept. The same happens when the phone unlinks
+        language, time zone), the WhatsApp profile cache, and group names, admins and members in
+        one transaction. Messages and the audit log are kept. Opt-outs are kept, so a logout can't
+        let anyone who opted out be messaged again. The same happens when the phone unlinks
         the device; a disconnect or restart while logged in keeps everything. Audited as
         contacts_wipe (detail "N contacts", never names). Run `wame backup` first to keep your notes.
       responses:

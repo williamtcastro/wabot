@@ -77,6 +77,7 @@ type Bot struct {
 	tokenRate    map[string]*Limiter
 	profiles     profileClient
 	logout       func(ctx context.Context) error
+	joinedGroups func(ctx context.Context) ([]*types.GroupInfo, error)
 	refreshes    map[string]time.Time
 	wipes        atomic.Uint64
 
@@ -135,7 +136,7 @@ func New(ctx context.Context, dbPath string, waLogger waLog.Logger, log *slog.Lo
 		outbox:    outbox{wake: make(chan struct{}, 1)},
 		db:        db,
 	}
-	b.logout = b.Client.Logout
+	b.logout, b.joinedGroups = b.Client.Logout, b.Client.GetJoinedGroups
 	b.ctx, b.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	b.loadCachedGroups()
 	b.Client.AddEventHandler(b.handle)

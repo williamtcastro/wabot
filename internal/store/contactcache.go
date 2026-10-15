@@ -175,9 +175,10 @@ func (s *Store) PruneContactCache(before time.Time) (int64, error) {
 	return res.RowsAffected()
 }
 
-// ClearContactState deletes, in one transaction, everything wame keeps about people: your own
-// contacts, the WhatsApp profile cache and group members. It returns how many own contacts there
-// were. Messages, group names and the audit log stay. Used on logout.
+// ClearContactState deletes, in one transaction, everything wame keeps about people and groups:
+// your own contacts, the WhatsApp profile cache, group names and admins, and group members. It
+// returns how many own contacts there were. Messages, opt-outs and the audit log stay. Used on
+// logout.
 func (s *Store) ClearContactState() (int64, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -192,7 +193,7 @@ func (s *Store) ClearContactState() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	for _, stmt := range []string{`DELETE FROM wame_contact_cache`, `DELETE FROM wame_group_members`} {
+	for _, stmt := range []string{`DELETE FROM wame_contact_cache`, `DELETE FROM wame_group_members`, `DELETE FROM wame_groups`} {
 		if _, err := tx.Exec(stmt); err != nil {
 			return 0, err
 		}

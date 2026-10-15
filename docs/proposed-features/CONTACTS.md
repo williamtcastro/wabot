@@ -140,7 +140,8 @@ DELETE FROM wame_contact_cache WHERE jid <mapped>;   -- a cache copy, losing it 
 - **Retention.** `wame_contacts` rows live until deleted or until logout. `wame_contact_cache` rows
   not refreshed in 90 days are pruned (`Store.PruneContactCache(before)`, called from the existing
   daily `pruneOutbox` step). Logout (`wame logout`, `POST /logout`, or the phone unlinking the
-  device) deletes own contacts, the cache and group members in one transaction (see Decision 2).
+  device) deletes own contacts, the cache, `wame_groups` and group members in one transaction (see
+  Decision 2).
   Both tables are in `wame backup` like everything else.
 - **Groups in common** need members: add `members TEXT NOT NULL DEFAULT '[]'` to `wame_groups`
   (through `addColumns` in `migrateState`), filled by `refreshGroups` with the phone JIDs of all
@@ -531,12 +532,13 @@ LIMIT 1;
   700, business JSON 8 KB, error 200; bodies 64 KB for `PUT`/`PATCH`, 4 MB / 5000 rows for import
   (413 above). At most 100,000 own rows (400 beyond), so the table can't be filled by a script.
 - **Logout wipes contact data:** `Bot.Logout` (CLI and API) and `events.LoggedOut` both call
-  `Store.ClearContactState`, which deletes your own contacts, the WhatsApp profile cache and
-  `wame_group_members` in one transaction, and Bot drops its in-memory names, refresh slots and
-  resolved numbers. Messages, group names and admin lists (`wame_groups`), opt-outs and the audit
-  log stay. A disconnect or restart while still logged in keeps everything. A profile refresh or
-  group refresh still in flight when the wipe runs writes nothing (a wipe counter checked under
-  the contacts lock).
+  `Store.ClearContactState`, which deletes your own contacts, the WhatsApp profile cache,
+  `wame_groups` (group names and admins) and `wame_group_members` in one transaction, and Bot drops
+  its in-memory names, groups, refresh slots and resolved numbers. Messages and the audit log stay.
+  Opt-outs are kept, so a logout can't let anyone who opted out be messaged again. A disconnect or
+  restart while still logged in keeps everything. A profile refresh or group refresh still in
+  flight when the wipe runs writes nothing, in the database or in memory (a wipe counter checked
+  under the contacts lock).
   Audited as `contacts_wipe` (`N contacts`, never names). Run `wame backup` first to keep your notes.
 - **Export:** `wame backup` covers both tables; `GET /contacts/export` gives a CSV to admins.
 - **Templates** never use push names; tag expansion doesn't reveal sizes to restricted tokens;
@@ -697,8 +699,9 @@ photo previews.
 
 1. **Writes are admin only.** No separate `contacts` scope; a sync integration uses an admin token.
 2. ~~Logout keeps your own contacts~~ **Reversed (2026-10-15): logout wipes all contact data**:
-   own contacts (tags, notes, language, time zone), the WhatsApp profile cache and group members.
-   Messages and the audit log are kept. `wame backup` before logging out keeps a copy.
+   own contacts (tags, notes, language, time zone), the WhatsApp profile cache, and group names,
+   admins and members (`wame_groups` too, since 2026-10-15). Messages and the audit log are kept.
+   Opt-outs are kept, so a logout can't let anyone who opted out be messaged again. `wame backup` before logging out keeps a copy.
 3. **`-skip-sent` counts every message you sent**, not only queued ones: it uses `wame_messages`
    (from_me), so the phone, `/send` and the TUI count too, and the window may be longer than the
    queue's 7 days (cap it, e.g. 90 days).

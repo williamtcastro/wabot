@@ -92,19 +92,22 @@ func TestContactCachePruneAndClear(t *testing.T) {
 	if _, _, err := s.Save(Message{ID: "K1", Chat: maria, Sender: maria, Type: "text", Text: "kept", Timestamp: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.AddOptOut(OptOut{Chat: john, Reason: "stop", At: time.Now(), By: "ops"}); err != nil {
+		t.Fatal(err)
+	}
 	gen := s.ContactsGen()
 	if n, err := s.ClearContactState(); err != nil || n != 1 {
 		t.Fatalf("clear = %d, %v", n, err)
 	}
-	for _, table := range []string{"wame_contacts", "wame_contact_cache", "wame_group_members"} {
+	for _, table := range []string{"wame_contacts", "wame_contact_cache", "wame_group_members", "wame_groups"} {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil || n != 0 {
 			t.Errorf("%s has %d rows (%v)", table, n, err)
 		}
 	}
-	var msgs, groups int
-	if err := s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM wame_messages), (SELECT COUNT(*) FROM wame_groups)`).Scan(&msgs, &groups); err != nil || msgs != 1 || groups != 1 {
-		t.Errorf("messages %d groups %d should stay (%v)", msgs, groups, err)
+	var msgs, optouts int
+	if err := s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM wame_messages), (SELECT COUNT(*) FROM wame_optouts)`).Scan(&msgs, &optouts); err != nil || msgs != 1 || optouts != 1 {
+		t.Errorf("messages %d opt-outs %d should stay (%v)", msgs, optouts, err)
 	}
 	if s.ContactsGen() == gen {
 		t.Error("clearing must bump ContactsGen")

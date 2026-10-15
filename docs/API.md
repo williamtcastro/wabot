@@ -341,7 +341,8 @@ On the phone: **Linked devices → Link a device → Link with phone number inst
 
 Unlinks the device from your phone and wipes the session from `wame.db`. If the unlink worked, it
 also deletes your own contacts (names, tags, notes, language, time zone), the WhatsApp profile
-cache and group members, in one transaction (messages, group names and the audit log are kept).
+cache, and group names, admins and members, in one transaction (messages and the audit log are
+kept). Opt-outs are kept, so a logout can't let anyone who opted out be messaged again.
 The same happens when the phone unlinks the device. A disconnect or restart while still logged in
 keeps everything. The wipe is audited as `contacts_wipe` (detail `N contacts`, never names). Run
 `wame backup` first if you want to keep your notes. You'll need to log in again afterwards
@@ -710,7 +711,7 @@ curl -H "Authorization: Bearer $T" "localhost:8080/chats?limit=10"
 [`/contacts`](#contacts): your own name, the address-book name, the business name,
 `~ProfileName`, then `+number`. Group names and admin lists are cached in the database
 (`wame_groups`), so they're available right away at startup, even offline; they're refreshed
-in the background on connect and when older than 10 minutes. A group that was never fetched
+in the background on connect and when older than 10 minutes. Logout deletes them. A group that was never fetched
 shows as `group <id>` until then.
 
 `unread` counts incoming messages (not reactions, not deleted) stored after the chat's read
