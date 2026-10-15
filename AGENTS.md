@@ -158,6 +158,11 @@ the whole diff as an attacker and a skeptic would, then fix what holds up:
 4. **Fix with a test.** Every confirmed bug gets a regression test that fails without the fix.
 5. **Parallel work:** when several agents change the code at once, give each a disjoint set of files
    (or its own worktree), and review the merged result again: bugs often live where two changes meet.
+6. **Match the model to the work.** Always dispatch less demanding work to subagents on a smaller
+   model (Sonnet or Haiku): fact-checking docs against the code, adding links and doc rows, grepping
+   for leaked data, mechanical renames, running tests and reporting failures. Keep design,
+   security reviews and tricky fixes on the main model. Give the subagent a self-contained prompt
+   with this file's rules (fake data, explicit staging, no commit unless asked).
 
 ## Tests
 
