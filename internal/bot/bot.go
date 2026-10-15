@@ -76,6 +76,7 @@ type Bot struct {
 	tokenMu      sync.Mutex
 	tokenRate    map[string]*Limiter
 	profiles     profileClient
+	logout       func(ctx context.Context) error
 	refreshes    map[string]time.Time
 
 	db            *sql.DB
@@ -133,6 +134,7 @@ func New(ctx context.Context, dbPath string, waLogger waLog.Logger, log *slog.Lo
 		outbox:    outbox{wake: make(chan struct{}, 1)},
 		db:        db,
 	}
+	b.logout = b.Client.Logout
 	b.ctx, b.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	b.loadCachedGroups()
 	b.Client.AddEventHandler(b.handle)
@@ -222,6 +224,17 @@ func (b *Bot) PairPhone(ctx context.Context, actor, phone string) (code string, 
 		return "", BadInput("already logged in")
 	}
 	return b.Client.PairPhone(ctx, digits(phone), true, whatsmeow.PairClientChrome, "Chrome (Linux)")
+}
+
+// Logout unlinks this device from the account and, once that worked, deletes the contact data
+// (see wipeContacts). whatsmeow doesn't send events.LoggedOut for a logout it was asked for.
+func (b *Bot) Logout(ctx context.Context, actor string) error {
+	err := b.logout(ctx)
+	b.Audit(actor, "logout", "", "", err)
+	if err == nil {
+		b.wipeContacts(actor)
+	}
+	return err
 }
 
 func (b *Bot) Status() Status {

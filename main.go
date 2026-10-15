@@ -357,9 +357,7 @@ func logoutCommand(ctx context.Context, b *bot.Bot) error {
 		return err
 	}
 	_ = waitLoggedIn(ctx, b, 20*time.Second)
-	err := b.Client.Logout(ctx)
-	b.Audit("cli", "logout", "", "", err)
-	if err != nil {
+	if err := b.Logout(ctx, "cli"); err != nil {
 		return err
 	}
 	fmt.Println("logged out")

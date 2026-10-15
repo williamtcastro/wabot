@@ -166,8 +166,7 @@ func (a *server) pair(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *server) logout(w http.ResponseWriter, r *http.Request) {
-	err := a.b.Client.Logout(r.Context())
-	a.b.Audit(principal(r).Name, "logout", "", "", err)
+	err := a.b.Logout(r.Context(), principal(r).Name)
 	respond(w, map[string]bool{"ok": true}, err)
 }
 

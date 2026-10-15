@@ -234,7 +234,7 @@ func TestProfileRefreshErrors(t *testing.T) {
 	if p.Refreshed == nil || *p.Refreshed || strings.Contains(p.WhatsApp.Error, "https://") || strings.Contains(p.WhatsApp.Error, "\n") || p.WhatsApp.Error == "" {
 		t.Fatalf("error profile = %v %q", p.Refreshed, p.WhatsApp.Error)
 	}
-	if e := lastAudit(t, b); e.OK || e.Detail != "2 lookups" {
+	if e := lastAudit(t, b); e.OK || e.Detail != "2 lookups" || strings.Contains(e.Error, "https://") || strings.Contains(e.Error, "secret") {
 		t.Fatalf("audit = %+v", e)
 	}
 
@@ -269,10 +269,77 @@ func TestProfileEventsTouchExistingRowsOnly(t *testing.T) {
 	if g, _ := b.Store.CachedProfileOf(family); g.PictureID != "1" {
 		t.Fatal("group pictures must be ignored")
 	}
+}
 
-	b.handle(&events.LoggedOut{})
-	if _, err := b.Store.CachedProfileOf(maria); !errors.Is(err, store.ErrNotFound) {
-		t.Fatal("logout should clear the cache")
+// seedContactState gives maria an own row, a cached profile, a group membership and a message.
+func seedContactState(t *testing.T, b *Bot) {
+	t.Helper()
+	patch(t, b, maria, ContactInput{Name: ptr("Maria"), Notes: ptr("prefers mornings")})
+	if err := b.Store.PutCachedProfile(store.CachedProfile{JID: maria, OnWhatsApp: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Store.SaveGroups([]store.Group{{JID: family, Name: "Family", Members: []store.GroupMember{{JID: maria}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := b.Store.Save(store.Message{ID: "W1", Chat: maria, Sender: maria, Type: "text", Text: "oi", Timestamp: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func contactStateLeft(t *testing.T, b *Bot) (own, cache, groups bool) {
+	t.Helper()
+	_, err := b.Store.Contact(maria)
+	own = err == nil
+	_, err = b.Store.CachedProfileOf(maria)
+	cache = err == nil
+	g, _ := b.Store.GroupsWith(maria)
+	return own, cache, len(g) > 0
+}
+
+func TestLogoutWipesContactState(t *testing.T) {
+	for _, path := range []string{"event", "explicit", "failed", "disconnect"} {
+		t.Run(path, func(t *testing.T) {
+			b := newTestBot(t)
+			seedContactState(t, b)
+			if b.ChatName(t.Context(), maria, "") != "Maria" {
+				t.Fatal("own name not loaded")
+			}
+			switch path {
+			case "event":
+				b.handle(&events.LoggedOut{})
+			case "explicit", "failed":
+				b.logout = func(context.Context) error {
+					if path == "failed" {
+						return errors.New("offline")
+					}
+					return nil
+				}
+				err := b.Logout(t.Context(), "ops")
+				if (err != nil) != (path == "failed") {
+					t.Fatalf("Logout = %v", err)
+				}
+			case "disconnect":
+				b.handle(&events.Disconnected{})
+			}
+			own, cache, groups := contactStateLeft(t, b)
+			wiped := path == "event" || path == "explicit"
+			if own == wiped || cache == wiped || groups == wiped {
+				t.Fatalf("own %v cache %v groups %v, want wiped=%v", own, cache, groups, wiped)
+			}
+			if msgs, _ := b.Store.Messages(maria, 10); len(msgs) != 1 {
+				t.Fatalf("messages = %d, want them kept", len(msgs))
+			}
+			if !wiped {
+				return
+			}
+			if got := b.ChatName(t.Context(), maria, ""); got != "+5511999999999" {
+				t.Fatalf("name after wipe = %q", got)
+			}
+			e := lastAudit(t, b)
+			if e.Action != "contacts_wipe" || e.Detail != "1 contacts" || !e.OK || strings.Contains(e.Detail, "Maria") {
+				t.Fatalf("audit = %+v", e)
+			}
+		})
 	}
 }
 

@@ -51,9 +51,9 @@ func (b *Bot) handle(evt any) {
 	case *events.Disconnected:
 		b.setState("disconnected", "")
 	case *events.LoggedOut:
-		b.clearProfileCache()
 		b.setState("logged_out", "")
 		b.Audit("whatsapp", "logged_out", "", fmt.Sprint(v.Reason), nil)
+		b.wipeContacts("whatsapp")
 	case *events.PairSuccess:
 		b.setState("paired", "")
 	case *events.HistorySync:
@@ -202,13 +202,18 @@ func (b *Bot) cacheEvent(from types.JID, update func(jid string) (bool, error)) 
 	}
 }
 
-// clearProfileCache forgets every cached WhatsApp profile (it described what the logged-out
-// account could see). Your own contacts stay.
-func (b *Bot) clearProfileCache() {
-	if _, err := b.Store.ClearContactCache(); err != nil {
-		b.Log.Error("profile cache: clear", "err", err)
-	}
+// wipeContacts deletes everything wame keeps about people when the account logs out: your own
+// contacts, the WhatsApp profile cache and group members (messages and the audit log stay). It is
+// audited as contacts_wipe with the number of own contacts.
+func (b *Bot) wipeContacts(actor string) {
+	b.contactsMu.Lock()
+	n, err := b.Store.ClearContactState()
 	b.mu.Lock()
-	b.refreshes = nil
+	b.own, b.ownLIDs, b.refreshes = nil, 0, nil
 	b.mu.Unlock()
+	b.contactsMu.Unlock()
+	b.Audit(actor, "contacts_wipe", "", fmt.Sprintf("%d contacts", n), err)
+	if err == nil {
+		b.namesChanged()
+	}
 }

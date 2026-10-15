@@ -83,8 +83,31 @@ func TestContactCachePruneAndClear(t *testing.T) {
 	if n, err := s.PruneContactCache(time.Now().Add(-90 * 24 * time.Hour)); err != nil || n != 1 {
 		t.Fatalf("prune = %d, %v", n, err)
 	}
-	if n, err := s.ClearContactCache(); err != nil || n != 2 {
+	if _, err := s.SetContact(ContactEdit{Keys: []string{maria}, Set: OwnContact{Name: "Maria"}, Fields: []string{FieldName}, Actor: "ops"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveGroups([]Group{{JID: family, Name: "Family", Members: []GroupMember{{JID: maria}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Save(Message{ID: "K1", Chat: maria, Sender: maria, Type: "text", Text: "kept", Timestamp: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	gen := s.ContactsGen()
+	if n, err := s.ClearContactState(); err != nil || n != 1 {
 		t.Fatalf("clear = %d, %v", n, err)
+	}
+	for _, table := range []string{"wame_contacts", "wame_contact_cache", "wame_group_members"} {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil || n != 0 {
+			t.Errorf("%s has %d rows (%v)", table, n, err)
+		}
+	}
+	var msgs, groups int
+	if err := s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM wame_messages), (SELECT COUNT(*) FROM wame_groups)`).Scan(&msgs, &groups); err != nil || msgs != 1 || groups != 1 {
+		t.Errorf("messages %d groups %d should stay (%v)", msgs, groups, err)
+	}
+	if s.ContactsGen() == gen {
+		t.Error("clearing must bump ContactsGen")
 	}
 }
 

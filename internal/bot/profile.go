@@ -352,7 +352,7 @@ func (b *Bot) refreshProfile(ctx context.Context, actor string, jid, lid types.J
 		}
 		auditErr := err
 		if we, ok := errors.AsType[whatsAppError](err); ok {
-			auditErr, err = we, nil
+			auditErr, err = errors.New(cleanProfileError(we)), nil
 		}
 		b.Audit(actor, "contact_refresh", jid.String(), detail, auditErr)
 		if lookups == 0 && err != nil {

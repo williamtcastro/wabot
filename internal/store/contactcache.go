@@ -160,13 +160,33 @@ func (s *Store) PruneContactCache(before time.Time) (int64, error) {
 	return res.RowsAffected()
 }
 
-// ClearContactCache deletes every cache row (on logout: it describes what one account could see).
-func (s *Store) ClearContactCache() (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM wame_contact_cache`)
+// ClearContactState deletes, in one transaction, everything wame keeps about people: your own
+// contacts, the WhatsApp profile cache and group members. It returns how many own contacts there
+// were. Messages, group names and the audit log stay. Used on logout.
+func (s *Store) ClearContactState() (int64, error) {
+	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM wame_contacts`)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	for _, stmt := range []string{`DELETE FROM wame_contact_cache`, `DELETE FROM wame_group_members`} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	s.contactsGen.Add(1)
+	return n, nil
 }
 
 // RelinkLater makes the next read relink rows stored under jid when it is an @lid (WhatsApp may

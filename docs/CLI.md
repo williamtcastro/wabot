@@ -190,8 +190,10 @@ leaves the machine. To restore, stop wame and put the copy in place of `wame.db`
 
 ### `wame logout`
 
-Unlinks the device from your phone and deletes the session. Messages stored in the
-`wame_messages` table and the audit log are kept; delete the database file to remove everything.
+Unlinks the device from your phone and deletes the session. If that worked, it also deletes your
+own contacts (names, tags, notes, language, time zone), the WhatsApp profile cache and group
+members. Messages, group names and the audit log are kept; delete the database file to remove
+everything. Run `wame backup` first if you want to keep your notes.
 
 ### `wame version`
 
