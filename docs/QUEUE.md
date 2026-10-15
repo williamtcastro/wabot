@@ -114,6 +114,17 @@ It talks to the server over the API, like [`wame admin`](ADMIN.md) (same `-profi
 Docker or on another machine; the token needs the `send` scope. `-dry-run` checks the file and
 shows how it would be split, without sending anything.
 
+To send an image or a document to everyone in the file, add `-file menu.pdf` (see [Files](#files)):
+the CLI checks it locally (a regular file, at most 64 MB), uploads it once before the first request
+and passes its id on each one. The `text` column (or `-text`) becomes the caption and may be empty.
+`-file` also takes an id you already have (`f_` and 32 hex digits), which skips the upload.
+
+```sh
+wame queue import -batch menu-october -file menu.pdf -text "Our new menu" promo.csv
+# uploaded menu.pdf (document, 482.0 KiB)
+# 1/1: lines 2-3: queued 2
+```
+
 ### Running an import again
 
 Each request carries an idempotency key: `-key` plus the request's number (`promo-oct.1`,
@@ -138,6 +149,10 @@ key in its error when an import stops.
 - `-text` and `-send-at` are filled in before sending, so changing them is a change of the rows.
   So is adding or dropping `-template` or `-dedupe` (`-dedupe` leaves rows out, which moves the
   rest between requests); `-skip-sent` isn't: it's checked again on every run.
+- **`-file`** is part of the derived key (the file's id, or for a path the hash of its bytes), so the
+  same CSV with another file is a new import. Running it again with the same file uploads nothing
+  twice: the server answers 200 with the same id. An explicit `-key` with another file is a 409, as
+  for any change of the rows.
 - The server remembers the keys as long as it keeps the items, until 7 days after they finish.
 
 ## Tags, templates and skips
@@ -270,7 +285,8 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/queue -d '{
 
 - **Referencing it.** `file` at the top level is the default for every message; a message can set
   its own. With a file, `text` is the caption and may be empty. A CSV takes `?file=` as the
-  default. The file must be your own (admin included), or the answer is 404; an id that isn't
+  default (`wame queue import -file PATH`
+  uploads and passes it for you). The file must be your own (admin included), or the answer is 404; an id that isn't
   `f_` plus 32 hex digits is a 400. A retry with the same `Idempotency-Key` and a different file is a 409.
 - **Uploading.** `POST /queue/files` takes `multipart/form-data` with one part named `file`, up to
   64 MB, like `/send/file`. The answer is 201, or 200 when you already have a live file with the

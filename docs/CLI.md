@@ -120,7 +120,7 @@ must be the owner secret or have the admin scope. Both can also be saved in `./.
 `~/.config/wame/admin.env` ([details](ADMIN.md#saving-the-server-and-token)). Plain `http://` is refused for non-loopback
 addresses unless you pass `-insecure`.
 
-### `wame queue import [-batch NAME] [-text DEFAULT] [-send-at TIME] [-key KEY] [-template] [-dedupe] [-skip-sent DURATION|batch:NAME] [-dry-run] FILE.csv`
+### `wame queue import [-batch NAME] [-text DEFAULT] [-send-at TIME] [-key KEY] [-template] [-dedupe] [-skip-sent DURATION|batch:NAME] [-file PATH|ID] [-dry-run] FILE.csv`
 
 Queues the messages of a CSV file on a running server ([format](QUEUE.md#csv-import): a header
 line with `to` and optionally `text`, `send_at`, `reply_to`, `name`; one message per line; `to`
@@ -144,7 +144,8 @@ wame queue import -dry-run promo.csv          # check and show the requests, sen
 | `-template` | fill `{name}`, `{first_name}` and `{push_name}` per recipient ([templates](QUEUE.md#name-templates)); a `name` column wins. Needs a token with `read` |
 | `-dedupe` | leave out rows whose recipient, text and `name` appeared earlier in the file (and let the server skip repeats per request, like a person in two tags) |
 | `-skip-sent DURATION` | skip people who already got a message within `48h`, `3d`… (at most 90 days; 7 for a token without `read`), or in `batch:NAME` ([details](QUEUE.md#skipping-repeats-dedupe-and-skip_sent)) |
-| `-dry-run` | parse and check the file locally and print how it would be sent (tags show as `tag:NAME (expanded by the server)`) |
+| `-file PATH\|ID` | send one image or document to every row, the row's text being its caption (which may be empty). A path is checked locally (a regular, non-empty file of at most 64 MB), uploaded once through `POST /queue/files` before the first request and its id passed on every request; it prints `uploaded menu.pdf (document, 482.0 KiB)`, or `already uploaded` when the server has the same bytes from your token, so a rerun is safe. An id (`f_` and 32 hex digits) skips the upload. The default key and batch also depend on the file, so the same CSV with another file is a new import ([details](QUEUE.md#files)) |
+| `-dry-run` | parse and check the file locally and print how it would be sent (tags show as `tag:NAME (expanded by the server)`); a `-file` path is checked but not uploaded |
 
 The summary counts what was skipped: `queued 2328 messages, skipped 12 (8 sent in the last 48h, 4
 duplicates), batch promo-october`.

@@ -57,7 +57,7 @@ type importChunk struct {
 }
 
 func queueImport(ctx context.Context, args []string, out io.Writer) error {
-	const use = "usage: wame queue import [-batch NAME] [-text DEFAULT] [-send-at TIME] [-key KEY] [-template] [-dedupe] [-skip-sent DURATION|batch:NAME] [-dry-run] FILE.csv"
+	const use = "usage: wame queue import [-batch NAME] [-text DEFAULT] [-send-at TIME] [-key KEY] [-template] [-dedupe] [-skip-sent DURATION|batch:NAME] [-file PATH|ID] [-dry-run] FILE.csv"
 	file := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		file, args = args[0], args[1:]
@@ -71,6 +71,7 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 	sendAt := fs.String("send-at", "", "")
 	key := fs.String("key", "", "")
 	dryRun := fs.Bool("dry-run", false, "")
+	attach := fs.String("file", "", "")
 	var opt admin.QueueCSVOptions
 	fs.BoolVar(&opt.Template, "template", false, "")
 	fs.BoolVar(&opt.Dedupe, "dedupe", false, "")
@@ -101,6 +102,12 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 		}
 	}
 
+	// The attachment is checked before anything else touches the network: an id is used as given,
+	// a path must be a regular file within the upload limit.
+	att, err := checkAttachment(*attach)
+	if err != nil {
+		return err
+	}
 	data, err := readImportFile(file)
 	if err != nil {
 		return err
@@ -114,6 +121,7 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 	}
 	for i := range rows {
 		rows[i].Text, rows[i].SendAt = cmp.Or(rows[i].Text, *text), cmp.Or(rows[i].SendAt, at)
+		rows[i].File = att.checkID()
 		if err := bot.CheckQueueRequest(rows[i]); err != nil {
 			return fmt.Errorf("%s: %s: %w", file, rows[i].Where(i), err)
 		}
@@ -127,7 +135,7 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 	if opt.Dedupe {
 		rows, duplicates = dedupeRows(rows)
 	}
-	base, err := importKey(*key, file)
+	base, err := importKey(*key, file, att.identity)
 	if err != nil {
 		return err
 	}
@@ -143,6 +151,12 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 
 	if *dryRun {
 		fmt.Fprintf(out, "%s: %d messages to %d recipients, batch %s, in %d request(s):\n", file, len(rows), recipients(rows), *batch, len(chunks))
+		switch {
+		case att.path != "":
+			fmt.Fprintf(out, "  file %s (%s): would be uploaded once, then attached to every message\n", termui.SafeLine(att.name()), byteSize(att.size))
+		case att.id != "":
+			fmt.Fprintf(out, "  file %s: an existing upload, attached to every message\n", att.id)
+		}
 		for _, tag := range rowTags(rows) {
 			fmt.Fprintf(out, "  tag:%s (expanded by the server)\n", tag)
 		}
@@ -163,6 +177,12 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 	c, err := target.client()
 	if err != nil {
 		return err
+	}
+	opt.File = att.id
+	if att.path != "" {
+		if opt.File, err = uploadAttachment(ctx, c, att, out); err != nil {
+			return err
+		}
 	}
 	queued, replayed := 0, 0
 	skipped := bot.SkipCounts{Duplicate: duplicates}
@@ -189,6 +209,79 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "queued %d messages%s%s, batch %s (follow it with: wame queue status -batch %s)\n", queued, alreadyQueued(replayed), skippedReport(skipped, skipRule), *batch, *batch)
 	return nil
+}
+
+// attachment is -file: an id the server already has, or a local file to upload first.
+type attachment struct {
+	id       string
+	path     string
+	size     int64
+	identity string // what the default key hashes: the id, or the sha256 of the file's bytes
+}
+
+func (a attachment) name() string { return filepath.Base(a.path) }
+
+// checkID is the id the local row checks see; before the upload of a path there is none yet, and
+// only its shape matters there.
+func (a attachment) checkID() string {
+	switch {
+	case a.id != "":
+		return a.id
+	case a.path != "":
+		return "f_" + strings.Repeat("0", 32)
+	}
+	return ""
+}
+
+// checkAttachment looks at -file locally: nothing here talks to the server.
+func checkAttachment(arg string) (attachment, error) {
+	if arg == "" {
+		return attachment{}, nil
+	}
+	if bot.ValidQueueFileID(arg) {
+		return attachment{id: arg, identity: arg}, nil
+	}
+	info, err := os.Stat(arg)
+	switch {
+	case err != nil:
+		return attachment{}, fmt.Errorf("-file: %w", err)
+	case !info.Mode().IsRegular():
+		return attachment{}, fmt.Errorf("-file: %s is not a regular file", arg)
+	case info.Size() == 0:
+		return attachment{}, fmt.Errorf("-file: %s is empty", arg)
+	case info.Size() > maxImportFile: // the server's own limit for an upload
+		return attachment{}, fmt.Errorf("-file: %s is larger than %s", arg, byteSize(maxImportFile))
+	}
+	f, err := os.Open(arg)
+	if err != nil {
+		return attachment{}, fmt.Errorf("-file: %w", err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, io.LimitReader(f, maxImportFile+1)); err != nil {
+		return attachment{}, fmt.Errorf("-file: %w", err)
+	}
+	return attachment{path: arg, size: info.Size(), identity: "sha256:" + hex.EncodeToString(h.Sum(nil))}, nil
+}
+
+// uploadAttachment sends the file once and returns its id. Running the import again is safe: the
+// server answers 200 with the same id for the same bytes.
+func uploadAttachment(ctx context.Context, c *admin.Client, a attachment, out io.Writer) (string, error) {
+	f, err := os.Open(a.path)
+	if err != nil {
+		return "", fmt.Errorf("-file: %w", err)
+	}
+	defer f.Close()
+	up, existed, err := c.UploadQueueFile(ctx, a.name(), io.LimitReader(f, maxImportFile+1))
+	if err != nil {
+		return "", fmt.Errorf("uploading %s: %s", termui.SafeLine(a.name()), termui.SafeLine(err.Error()))
+	}
+	if existed {
+		fmt.Fprintf(out, "%s: already uploaded (%s)\n", termui.SafeLine(a.name()), up.ID)
+	} else {
+		fmt.Fprintf(out, "uploaded %s (%s, %s)\n", termui.SafeLine(a.name()), up.Kind, byteSize(up.Size))
+	}
+	return up.ID, nil
 }
 
 // dedupeRows drops rows whose recipient, text and name already appeared earlier in the file, as
@@ -236,6 +329,9 @@ func optionFlags(opt admin.QueueCSVOptions) string {
 	}
 	if opt.SkipSent != "" {
 		s.WriteString(" -skip-sent " + opt.SkipSent)
+	}
+	if opt.File != "" {
+		s.WriteString(" -file " + opt.File)
 	}
 	return s.String()
 }
@@ -361,8 +457,9 @@ func (c importChunk) fileError(err error) error {
 func chunkKey(base string, i int) string { return fmt.Sprintf("%s.%d", base, i+1) }
 
 // importKey is the base of the import's chunk keys: -key, or else one derived from the file's
-// absolute path, so a rerun after fixing a row resumes the same import (see docs/QUEUE.md).
-func importKey(key, file string) (string, error) {
+// absolute path (and the file's identity under -file, so another file with the same CSV is a new
+// import rather than a 409), so a rerun after fixing a row resumes the same import (see docs/QUEUE.md).
+func importKey(key, file, attached string) (string, error) {
 	if key != "" {
 		if len(key) > bot.MaxKeyLength-8 {
 			return "", fmt.Errorf("-key is longer than %d characters", bot.MaxKeyLength-8)
@@ -372,6 +469,9 @@ func importKey(key, file string) (string, error) {
 	abs, err := filepath.Abs(file)
 	if err != nil {
 		return "", err
+	}
+	if attached != "" {
+		abs += "\x00file:" + attached
 	}
 	sum := sha256.Sum256([]byte(abs))
 	return "csv-" + hex.EncodeToString(sum[:8]), nil

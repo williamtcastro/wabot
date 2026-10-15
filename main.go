@@ -56,9 +56,10 @@ Usage:
   wame queue import [-batch NAME] [-text DEFAULT] [-send-at TIME] [-key KEY] [-dry-run] FILE.csv
                                        queue the messages of a CSV file on a running server, 1000 per
                                        request; safe to run again (see docs/QUEUE.md#csv-import)
-                    [-template] [-dedupe] [-skip-sent 48h|batch:NAME]
+                    [-template] [-dedupe] [-skip-sent 48h|batch:NAME] [-file PATH|ID]
                                        fill {name} per recipient, drop repeated rows, skip people
-                                       messaged recently (to may be tag:NAME)
+                                       messaged recently (to may be tag:NAME); -file uploads one image
+                                       or document once and sends it to every row (text = caption)
   wame queue status [-batch NAME]     counts of queued, sent and failed messages
                                        (both take admin's -profile, -server, -token, -insecure)
   wame backup [-keep N] [PATH]        copy the database safely, even while a server has it open

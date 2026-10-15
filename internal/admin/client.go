@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
@@ -401,6 +402,7 @@ type QueueCSVOptions struct {
 	Template bool
 	Dedupe   bool
 	SkipSent string
+	File     string // default file id for every row (see UploadQueueFile)
 }
 
 // QueueCSV queues the messages of a CSV file (at most 1000 rows, see docs/QUEUE.md) under batch;
@@ -419,6 +421,9 @@ func (c *Client) QueueCSV(ctx context.Context, csv []byte, batch, key string, op
 	if opt.SkipSent != "" {
 		q.Set("skip_sent", opt.SkipSent)
 	}
+	if opt.File != "" {
+		q.Set("file", opt.File)
+	}
 	h := http.Header{"Content-Type": {"text/csv; charset=utf-8"}}
 	if key != "" {
 		h.Set("Idempotency-Key", key)
@@ -428,6 +433,44 @@ func (c *Client) QueueCSV(ctx context.Context, csv []byte, batch, key string, op
 	// still has to start within 30 s of the upload ending.
 	err := c.send(ctx, c.stream, "POST", "queue", q, bytes.NewReader(csv), h, &out)
 	return out, err
+}
+
+// statusTap records the status code of the last answer that passed through it.
+type statusTap struct {
+	next http.RoundTripper
+	code *int
+}
+
+func (s statusTap) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := s.next.RoundTrip(r)
+	if resp != nil {
+		*s.code = resp.StatusCode
+	}
+	return resp, err
+}
+
+// UploadQueueFile sends r as a queue file named name (POST /queue/files, streamed, never held in
+// memory). existed is true when the server already had the same bytes from this token: it answers
+// 200 with the same id instead of 201, so an upload is safe to repeat.
+func (c *Client) UploadQueueFile(ctx context.Context, name string, r io.Reader) (f store.OutboxFile, existed bool, err error) {
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	go func() {
+		part, err := mw.CreateFormFile("file", name)
+		if err == nil {
+			_, err = io.Copy(part, r)
+		}
+		if err == nil {
+			err = mw.Close()
+		}
+		pw.CloseWithError(err)
+	}()
+	defer pr.Close()
+	code := 0
+	hc := *c.stream
+	hc.Transport = statusTap{next: cmp.Or(c.stream.Transport, http.DefaultTransport), code: &code}
+	err = c.send(ctx, &hc, "POST", "queue/files", nil, pr, http.Header{"Content-Type": {mw.FormDataContentType()}}, &f)
+	return f, code == http.StatusOK, err
 }
 
 // Logs returns the server's recent app logs at level or above ("" for all), newest first; with since
