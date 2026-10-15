@@ -344,8 +344,8 @@ also deletes your own contacts (names, tags, notes, language, time zone), the Wh
 cache, and group names, admins and members, in one transaction (messages and the audit log are
 kept). Opt-outs are kept, so a logout can't let anyone who opted out be messaged again.
 The same happens when the phone unlinks the device. A disconnect or restart while still logged in
-keeps everything. The wipe is audited as `contacts_wipe` (detail `N contacts`, never names). Run
-`wame backup` first if you want to keep your notes. You'll need to log in again afterwards
+keeps everything. The state becomes `logged_out` (sent on `/events` as a status). The wipe is
+audited as `contacts_wipe` (detail `N contacts`, never names). Run `wame backup` first if you want to keep your notes. You'll need to log in again afterwards
 (restart the process to get a new QR). Returns `{"ok": true}`.
 
 ## `POST /send`

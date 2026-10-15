@@ -287,3 +287,14 @@ func wait(out <-chan tea.Msg) (tea.Msg, bool) {
 		}
 	}
 }
+
+func TestLogoutConfirmSaysWhatIsDeleted(t *testing.T) {
+	_, c := newServer(t)
+	m := newTestModel(t, Options{Client: c})
+	text := m.viewConfirmLogout()
+	for _, want := range []string{"contacts", "group", "opt-outs stay"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("the logout confirm doesn't mention %q:\n%s", want, text)
+		}
+	}
+}

@@ -218,10 +218,10 @@ func (s *Store) saveGroups(groups []Group, all bool) error {
 }
 
 func jsonList(ss []string) string {
-	data, _ := json.Marshal(ss)
 	if ss == nil {
 		return "[]"
 	}
+	data, _ := json.Marshal(ss)
 	return string(data)
 }
 

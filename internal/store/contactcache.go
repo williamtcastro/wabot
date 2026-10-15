@@ -58,20 +58,6 @@ CREATE INDEX IF NOT EXISTS wame_contact_cache_updated ON wame_contact_cache (upd
 const cacheCols = `jid, on_whatsapp, about, about_at, verified_name, verified_level, business, picture_id, picture_url, lid,
 	info_at, picture_at, business_at, error, error_at, updated_at`
 
-func millis(t time.Time) int64 {
-	if t.IsZero() {
-		return 0
-	}
-	return t.UnixMilli()
-}
-
-func fromMillis(ms int64) time.Time {
-	if ms == 0 {
-		return time.Time{}
-	}
-	return time.UnixMilli(ms)
-}
-
 // PutCachedProfile stores what a refresh learned, replacing the row under c.JID and deleting the
 // rows under replaces (the person's other keys), so an older copy can't hide the new one.
 func (s *Store) PutCachedProfile(c CachedProfile, replaces ...string) error {
@@ -94,8 +80,8 @@ func (s *Store) PutCachedProfile(c CachedProfile, replaces ...string) error {
 			lid = excluded.lid, info_at = excluded.info_at, picture_at = excluded.picture_at,
 			business_at = excluded.business_at, error = excluded.error, error_at = excluded.error_at,
 			updated_at = excluded.updated_at`,
-		c.JID, c.OnWhatsApp, c.About, millis(c.AboutAt), c.VerifiedName, c.VerifiedLevel, c.Business, c.PictureID,
-		c.PictureURL, c.LID, millis(c.InfoAt), millis(c.PictureAt), millis(c.BusinessAt), c.Error, millis(c.ErrorAt),
+		c.JID, c.OnWhatsApp, c.About, millisOrZero(c.AboutAt), c.VerifiedName, c.VerifiedLevel, c.Business, c.PictureID,
+		c.PictureURL, c.LID, millisOrZero(c.InfoAt), millisOrZero(c.PictureAt), millisOrZero(c.BusinessAt), c.Error, millisOrZero(c.ErrorAt),
 		time.Now().UnixMilli())
 	if err != nil {
 		return err
@@ -122,8 +108,8 @@ func (s *Store) CachedProfileOf(keys ...string) (CachedProfile, error) {
 			&c.PictureID, &c.PictureURL, &c.LID, &infoAt, &picAt, &bizAt, &c.Error, &errAt, &updated); err != nil {
 			return CachedProfile{}, err
 		}
-		c.AboutAt, c.InfoAt, c.PictureAt = fromMillis(aboutAt), fromMillis(infoAt), fromMillis(picAt)
-		c.BusinessAt, c.ErrorAt, c.UpdatedAt = fromMillis(bizAt), fromMillis(errAt), fromMillis(updated)
+		c.AboutAt, c.InfoAt, c.PictureAt = timeOrZero(aboutAt), timeOrZero(infoAt), timeOrZero(picAt)
+		c.BusinessAt, c.ErrorAt, c.UpdatedAt = timeOrZero(bizAt), timeOrZero(errAt), timeOrZero(updated)
 		found[c.JID] = c
 	}
 	if err := rows.Err(); err != nil {
@@ -143,7 +129,7 @@ func (s *Store) CachedProfileOf(keys ...string) (CachedProfile, error) {
 // CacheAbout sets the about text of jid when at isn't older than the one stored.
 func (s *Store) CacheAbout(jid, about string, at time.Time) (bool, error) {
 	return s.updateCache(`UPDATE wame_contact_cache SET about = ?, about_at = ? WHERE jid = ? AND about_at <= ?`,
-		about, millis(at), jid, millis(at))
+		about, millisOrZero(at), jid, millisOrZero(at))
 }
 
 // CachePicture sets the picture id of jid ("" when removed) and drops the URL, which belonged to the

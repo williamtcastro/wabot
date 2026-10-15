@@ -560,3 +560,26 @@ func TestGroupRefreshDuringLogoutKeepsNothing(t *testing.T) {
 		t.Fatal("a group refresh that outlived the logout put the groups back")
 	}
 }
+
+func TestExplicitLogoutSetsTheStateLikeTheEvent(t *testing.T) {
+	b := newTestBot(t)
+	ch, stop := b.Subscribe()
+	defer stop()
+	b.logout = func(context.Context) error { return nil }
+	if err := b.Logout(t.Context(), "ops"); err != nil {
+		t.Fatal(err)
+	}
+	if s := b.Status(); s.State != "logged_out" {
+		t.Fatalf("state after Logout = %q, want logged_out like events.LoggedOut", s.State)
+	}
+	for {
+		select {
+		case v := <-ch:
+			if s, ok := v.(Status); ok && s.State == "logged_out" {
+				return
+			}
+		default:
+			t.Fatal("subscribers weren't told about the logout")
+		}
+	}
+}

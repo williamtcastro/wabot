@@ -155,7 +155,7 @@ func (b *Bot) Profile(ctx context.Context, to string, opt ProfileOptions) (Profi
 		lid = orig.ToNonAD()
 	}
 	if lid.IsEmpty() {
-		lid = b.lidOf(jid)
+		lid = b.lidOf(ctx, jid)
 	}
 	keys := b.contactKeys(jid)
 	var p Profile
@@ -166,10 +166,7 @@ func (b *Bot) Profile(ctx context.Context, to string, opt ProfileOptions) (Profi
 		}
 		p.Refreshed, p.NextRefreshAt = &refreshed, next
 	}
-	cached, err := b.Store.CachedProfileOf(keys...)
-	if errors.Is(err, store.ErrNotFound) {
-		cached, err = store.CachedProfile{OnWhatsApp: -1}, nil
-	}
+	cached, err := b.cachedProfile(keys)
 	if err != nil {
 		return Profile{}, err
 	}
@@ -236,15 +233,25 @@ func (b *Bot) Profile(ctx context.Context, to string, opt ProfileOptions) (Profi
 	return p, nil
 }
 
+// cachedProfile is the cache row under the first of keys that has one, or an empty row with
+// on_whatsapp unknown.
+func (b *Bot) cachedProfile(keys []string) (store.CachedProfile, error) {
+	c, err := b.Store.CachedProfileOf(keys...)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.CachedProfile{OnWhatsApp: -1}, nil
+	}
+	return c, err
+}
+
 // lidOf is the person's @lid from whatsmeow's own mapping (never a lookup), or empty.
-func (b *Bot) lidOf(jid types.JID) types.JID {
+func (b *Bot) lidOf(ctx context.Context, jid types.JID) types.JID {
 	if jid.Server == types.HiddenUserServer {
 		return jid
 	}
 	if jid.Server != types.DefaultUserServer || b.Client.Store.LIDs == nil {
 		return types.JID{}
 	}
-	lid, err := b.Client.Store.LIDs.GetLIDForPN(context.Background(), jid)
+	lid, err := b.Client.Store.LIDs.GetLIDForPN(ctx, jid)
 	if err != nil {
 		return types.JID{}
 	}
@@ -366,10 +373,7 @@ func (b *Bot) refreshProfile(ctx context.Context, actor string, jid, lid types.J
 			b.releaseRefresh(guard, now)
 		}
 	}()
-	cached, err := b.Store.CachedProfileOf(keys...)
-	if errors.Is(err, store.ErrNotFound) {
-		cached, err = store.CachedProfile{OnWhatsApp: -1}, nil
-	}
+	cached, err := b.cachedProfile(keys)
 	if err != nil {
 		return false, next, err
 	}

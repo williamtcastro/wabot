@@ -61,7 +61,7 @@ Usage:
   wame backup [-keep N] [PATH]        copy the database safely, even while a server has it open
                                        (default: wame-YYYYMMDD-HHMMSS.db next to it; PATH may be a dir/)
   wame version                        print the version
-  wame logout                         unlink the device and delete the session
+  wame logout                         unlink the device; delete the session, contacts and groups
 
 Flags (right after the command, before other arguments):
   -db PATH               session database (env WAME_DB, default ~/.config/wame/wame.db)

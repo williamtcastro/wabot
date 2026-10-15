@@ -228,12 +228,14 @@ func (b *Bot) PairPhone(ctx context.Context, actor, phone string) (code string, 
 	return b.Client.PairPhone(ctx, digits(phone), true, whatsmeow.PairClientChrome, "Chrome (Linux)")
 }
 
-// Logout unlinks this device from the account and, once that worked, deletes the contact data
-// (see wipeContacts). whatsmeow doesn't send events.LoggedOut for a logout it was asked for.
+// Logout unlinks this device from the account and, once that worked, does what events.LoggedOut
+// does (whatsmeow doesn't send it for a logout it was asked for): the state becomes logged_out and
+// the contact and group data is deleted (see wipeContacts).
 func (b *Bot) Logout(ctx context.Context, actor string) error {
 	err := b.logout(ctx)
 	b.Audit(actor, "logout", "", "", err)
 	if err == nil {
+		b.setState("logged_out", "")
 		b.wipeContacts(actor)
 	}
 	return err

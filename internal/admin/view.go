@@ -908,7 +908,8 @@ func (m *model) viewPair() string {
 
 func (m *model) viewConfirmLogout() string {
 	return styleErr.Render("Log out of WhatsApp?") + "\n\n" +
-		"This unlinks the device and deletes the session on\n" + styleBold.Render(m.c.base.Host) + ". It needs a new QR or pairing code after.\n\n" +
+		"This unlinks the device and deletes the session on\n" + styleBold.Render(m.c.base.Host) + ". It needs a new QR or pairing code after.\n" +
+		"It also deletes your contacts (notes too), the WhatsApp profiles\nand the group cache; messages and opt-outs stay.\n\n" +
 		styleKey.Render("y") + " log out   " + styleKey.Render("any key") + " cancel"
 }
 
