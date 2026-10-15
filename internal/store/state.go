@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -8,11 +9,33 @@ import (
 	"time"
 )
 
-// Group is the cached name and admin list of a group, so names show before WhatsApp connects.
+// Group is the cached name, admins and members of a group, so names show before WhatsApp connects.
+// Admins are phone JIDs where known. Members go to wame_group_members as WhatsApp reported them;
+// SaveGroups leaves a group's members alone when Members is nil. Groups doesn't read them.
 type Group struct {
-	JID    string
-	Name   string
-	Admins []string
+	JID     string
+	Name    string
+	Admins  []string
+	Members []GroupMember
+}
+
+// GroupMember is one participant of a group: a phone JID or an @lid, and its role.
+type GroupMember struct {
+	JID  string
+	Role string
+}
+
+// Roles in wame_group_members.
+const (
+	RoleMember     = "member"
+	RoleAdmin      = "admin"
+	RoleSuperAdmin = "superadmin"
+)
+
+// GroupRef names a group.
+type GroupRef struct {
+	JID  string `json:"jid"`
+	Name string `json:"name"`
 }
 
 // ChatRead is published when a chat's read position moves (opened, /read, or read on another device).
@@ -32,7 +55,16 @@ CREATE TABLE IF NOT EXISTS wame_chat_state (
 	chat     TEXT PRIMARY KEY,
 	read_seq INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS wame_messages_chat_seq ON wame_messages (chat, seq);`
+CREATE INDEX IF NOT EXISTS wame_messages_chat_seq ON wame_messages (chat, seq);
+CREATE TABLE IF NOT EXISTS wame_group_members (
+	group_jid  TEXT NOT NULL,
+	member     TEXT NOT NULL,
+	role       TEXT NOT NULL DEFAULT 'member',
+	first_seen INTEGER NOT NULL,
+	last_seen  INTEGER NOT NULL,
+	PRIMARY KEY (group_jid, member)
+);
+CREATE INDEX IF NOT EXISTS wame_group_members_member ON wame_group_members (member);`
 
 // The full-text index mirrors wame_messages.text through triggers. remove_diacritics folds accents,
 // so "cafe" finds "café".
@@ -151,8 +183,48 @@ func (s *Store) SaveGroups(groups []Group) error {
 			g.JID, g.Name, string(admins), now); err != nil {
 			return err
 		}
+		if g.Members == nil {
+			continue
+		}
+		for _, m := range g.Members {
+			if _, err := tx.Exec(`INSERT INTO wame_group_members (group_jid, member, role, first_seen, last_seen)
+				VALUES (?, ?, ?, ?, ?)
+				ON CONFLICT (group_jid, member) DO UPDATE SET role = excluded.role, last_seen = excluded.last_seen`,
+				g.JID, m.JID, cmp.Or(m.Role, RoleMember), now, now); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`DELETE FROM wame_group_members WHERE group_jid = ? AND last_seen <> ?`, g.JID, now); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
+}
+
+// GroupsWith lists the cached groups any of keys is a member of, by name.
+func (s *Store) GroupsWith(keys ...string) ([]GroupRef, error) {
+	return groupsWith(s.db, keys)
+}
+
+func groupsWith(q querier, keys []string) ([]GroupRef, error) {
+	out := []GroupRef{}
+	if len(keys) == 0 {
+		return out, nil
+	}
+	rows, err := q.Query(`SELECT DISTINCT g.jid, g.name FROM wame_group_members m JOIN wame_groups g ON g.jid = m.group_jid
+		WHERE m.member IN (`+placeholders(len(keys))+`) ORDER BY g.name, g.jid`, anys(keys)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var g GroupRef
+		if err := rows.Scan(&g.JID, &g.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) Groups() ([]Group, error) {

@@ -48,6 +48,9 @@ func Open(ctx context.Context, db *sql.DB) (*Store, error) {
 	if err := migrateContacts(ctx, db); err != nil {
 		return nil, fmt.Errorf("create contacts table: %w", err)
 	}
+	if err := migrateContactCache(ctx, db); err != nil {
+		return nil, fmt.Errorf("create contact cache table: %w", err)
+	}
 	return &Store{db: db}, nil
 }
 
@@ -359,6 +362,9 @@ func (s *Store) relinkLIDs() {
 		`DELETE FROM wame_chat_state WHERE chat` + mapped,
 		`UPDATE OR IGNORE wame_optouts SET chat = ` + pn + ` WHERE chat` + mapped,
 		`DELETE FROM wame_optouts WHERE chat` + mapped,
+		// A cache row is a copy of what WhatsApp said; when the phone JID already has one, the @lid copy goes.
+		strings.ReplaceAll(`UPDATE OR IGNORE wame_contact_cache SET chat = `+pn+` WHERE chat`+mapped, "chat", "jid"),
+		strings.ReplaceAll(`DELETE FROM wame_contact_cache WHERE chat`+mapped, "chat", "jid"),
 	} {
 		if _, err := tx.Exec(stmt); err != nil {
 			return

@@ -532,3 +532,84 @@ func (s *Store) ContactTags() ([]TagCount, error) {
 	slices.SortFunc(out, func(a, b TagCount) int { return strings.Compare(a.Tag, b.Tag) })
 	return out, nil
 }
+
+// ContactQueueWindow is how far back ContactStats counts queue items: finished ones are pruned after
+// a week anyway. Open items count whatever their age.
+const ContactQueueWindow = 7 * 24 * time.Hour
+
+// ContactStats is what wame's own tables say about a person. Messages they sent in groups aren't
+// counted.
+type ContactStats struct {
+	FirstAt  time.Time
+	LastAt   time.Time
+	Sent     int
+	Received int
+	Unread   int
+	Groups   []GroupRef
+	Queue    QueueStats
+}
+
+// QueueStats counts a person's queue items in the last ContactQueueWindow.
+type QueueStats struct {
+	Total     int       `json:"total"`
+	Open      int       `json:"open"`
+	Sent      int       `json:"sent"`
+	Delivered int       `json:"delivered"`
+	Read      int       `json:"read"`
+	Failed    int       `json:"failed"`
+	LastAt    time.Time `json:"last_at,omitzero"`
+}
+
+// ContactStats reads the activity of a person stored under any of keys (phone JID, @lid, 9th-digit
+// variant) in one read transaction.
+func (s *Store) ContactStats(keys []string) (ContactStats, error) {
+	st := ContactStats{Groups: []GroupRef{}}
+	if len(keys) == 0 {
+		return st, nil
+	}
+	s.relinkLIDs()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return st, err
+	}
+	defer tx.Rollback()
+	in := `(` + placeholders(len(keys)) + `)`
+	var first, last sql.NullInt64
+	var sent, received sql.NullInt64
+	if err := tx.QueryRow(`SELECT MIN(ts), MAX(ts), SUM(from_me = 1), SUM(from_me = 0) FROM wame_messages
+		WHERE chat IN `+in+` AND type <> 'reaction' AND deleted = 0`, anys(keys)...).Scan(&first, &last, &sent, &received); err != nil {
+		return st, err
+	}
+	if first.Valid {
+		st.FirstAt, st.LastAt = time.UnixMilli(first.Int64), time.UnixMilli(last.Int64)
+	}
+	st.Sent, st.Received = int(sent.Int64), int(received.Int64)
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM wame_messages m WHERE chat IN `+in+` AND from_me = 0
+		AND type <> 'reaction' AND deleted = 0
+		AND seq > COALESCE((SELECT read_seq FROM wame_chat_state r WHERE r.chat = m.chat), 0)`, anys(keys)...).Scan(&st.Unread); err != nil {
+		return st, err
+	}
+	if st.Groups, err = groupsWith(tx, keys); err != nil {
+		return st, err
+	}
+	recipients := slices.Clone(keys)
+	for _, k := range keys {
+		if user, ok := strings.CutSuffix(k, "@s.whatsapp.net"); ok {
+			recipients = append(recipients, user, "+"+user)
+		}
+	}
+	var total, open, done, delivered, read, failed, lastAt sql.NullInt64
+	args := append(append(anys(keys), anys(recipients)...), time.Now().Add(-ContactQueueWindow).UnixMilli())
+	if err := tx.QueryRow(`SELECT COUNT(*), SUM(status IN ('queued', 'sending')), SUM(status = 'sent'),
+		SUM(delivered_at > 0), SUM(read_at > 0), SUM(status = 'failed'), MAX(updated_at)
+		FROM wame_outbox WHERE (chat IN `+in+` OR recipient IN (`+placeholders(len(recipients))+`))
+		AND (updated_at >= ? OR status IN ('queued', 'sending'))`, args...).Scan(&total, &open, &done, &delivered, &read, &failed, &lastAt); err != nil {
+		return st, err
+	}
+	st.Queue = QueueStats{Total: int(total.Int64), Open: int(open.Int64), Sent: int(done.Int64),
+		Delivered: int(delivered.Int64), Read: int(read.Int64), Failed: int(failed.Int64)}
+	if lastAt.Valid {
+		st.Queue.LastAt = time.UnixMilli(lastAt.Int64)
+	}
+	return st, nil
+}
