@@ -59,6 +59,7 @@ const (
 	modeImportContacts
 	modeConfirmImport
 	modeExportContacts
+	modeConfirmDeleteQueueFile
 )
 
 const (
@@ -197,6 +198,16 @@ type model struct {
 	optOutQuery   string
 	confirmOptOut string
 
+	queueFiles       bool
+	qfiles           QueueFiles
+	qfilesReq        inflight
+	qfilesLoaded     bool
+	qfilesErr        error
+	qfileSel         int
+	qfileQuery       string
+	confirmQFile     string
+	confirmQFileOpen int
+
 	contacts            []bot.Contact
 	contactsReq         inflight
 	contactsErr         error
@@ -293,7 +304,7 @@ func (m *model) loadAll() tea.Cmd {
 	}
 	cmds := []tea.Cmd{m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadStats(), m.loadChats(), m.loadSettings(), m.loadQueue()}
 	if m.tab == tabQueue {
-		cmds = append(cmds, m.loadOptOuts())
+		cmds = append(cmds, m.loadOptOuts(), m.pollQueueFiles(false))
 	}
 	if m.tab == tabLogs {
 		cmds = append(cmds, m.loadLogs(0), m.followLogs())
@@ -461,7 +472,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.loadChats())
 		}
 		if m.tab == tabQueue {
-			cmds = append(cmds, m.loadQueue(), m.pollOptOuts(true))
+			cmds = append(cmds, m.loadQueue(), m.pollOptOuts(true), m.pollQueueFiles(true))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -505,6 +516,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case optOutsMsg:
 		m.applyOptOuts(msg)
+	case queueFilesMsg:
+		m.applyQueueFiles(msg)
 		return m, nil
 
 	case contactsMsg:
@@ -594,7 +607,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setNotice(msg.notice, false)
 		}
-		return m, tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadQueue(), m.loadStats(), m.pollOptOuts(false))
+		return m, tea.Batch(m.loadStatus(), m.loadTokens(), m.loadAudit(false), m.loadQueue(), m.loadStats(), m.pollOptOuts(false), m.pollQueueFiles(false))
 
 	case noticeMsg:
 		m.setNotice(msg.text, msg.err)
@@ -653,7 +666,7 @@ func (m *model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeFilter:
 		return m, m.filterKey(k)
 	case modeConfirmLogout, modeConfirmRevoke, modeConfirmRotate, modeConfirmCancelBatch, modeConfirmRemoveOptOut,
-		modeConfirmDeleteContact, modeConfirmImport:
+		modeConfirmDeleteContact, modeConfirmImport, modeConfirmDeleteQueueFile:
 		return m, m.confirmKey(k.String() == "y")
 	case modeCreate:
 		return m.formKey(k)
@@ -749,6 +762,12 @@ func (m *model) confirmKey(yes bool) tea.Cmd {
 			return nil
 		}
 		return m.removeOptOut(m.confirmOptOut)
+	case modeConfirmDeleteQueueFile:
+		if !yes {
+			m.setNotice("kept the file", false)
+			return nil
+		}
+		return m.deleteQueueFile(m.confirmQFile, m.confirmQFileOpen)
 	case modeConfirmDeleteContact:
 		if !yes {
 			m.setNotice("kept "+m.confirmContactLabel, false)
@@ -810,7 +829,7 @@ func (m *model) setTab(t tab) tea.Cmd {
 	case tabSettings:
 		return m.loadSettings()
 	case tabQueue:
-		return tea.Batch(m.loadQueue(), m.loadStats(), m.loadOptOuts())
+		return tea.Batch(m.loadQueue(), m.loadStats(), m.loadOptOuts(), m.pollQueueFiles(false))
 	case tabLogs:
 		return tea.Batch(m.refreshLogs(), m.followLogs())
 	case tabContacts:
@@ -911,6 +930,9 @@ func (m *model) filterQuery() *string {
 	case tabContacts:
 		return &m.contactQuery
 	case tabQueue:
+		if m.queueFiles {
+			return &m.qfileQuery
+		}
 		return &m.optOutQuery
 	}
 	return &m.auditQuery
@@ -923,6 +945,7 @@ func (m *model) clampFiltered() {
 		m.logsSel = clamp(m.logsSel, len(m.visibleLogs()))
 	case tabQueue:
 		m.optOutSel = clamp(m.optOutSel, len(m.visibleOptOuts()))
+		m.qfileSel = clamp(m.qfileSel, len(m.visibleQueueFiles()))
 	case tabContacts:
 		m.contactSel = clamp(m.contactSel, len(m.visibleContacts()))
 	default:
