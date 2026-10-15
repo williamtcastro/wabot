@@ -120,10 +120,11 @@ must be the owner secret or have the admin scope. Both can also be saved in `./.
 `~/.config/wame/admin.env` ([details](ADMIN.md#saving-the-server-and-token)). Plain `http://` is refused for non-loopback
 addresses unless you pass `-insecure`.
 
-### `wame queue import [-batch NAME] [-text DEFAULT] [-send-at TIME] [-key KEY] [-dry-run] FILE.csv`
+### `wame queue import [-batch NAME] [-text DEFAULT] [-send-at TIME] [-key KEY] [-template] [-dedupe] [-skip-sent DURATION|batch:NAME] [-dry-run] FILE.csv`
 
 Queues the messages of a CSV file on a running server ([format](QUEUE.md#csv-import): a header
-line with `to` and optionally `text`, `send_at`, `reply_to`; one message per line). It checks every
+line with `to` and optionally `text`, `send_at`, `reply_to`, `name`; one message per line; `to`
+may be `tag:NAME` for everyone with that contact tag). It checks every
 row's format locally first (columns, numbers, times, text length), then sends them in requests of
 1000 under one batch, printing each request's result and a summary. The token's allowlist and its
 limit of waiting messages are checked by the server per request, after the earlier requests were
@@ -140,7 +141,13 @@ wame queue import -dry-run promo.csv          # check and show the requests, sen
 | `-text DEFAULT` | text for rows without one |
 | `-send-at TIME` | RFC 3339 time for rows without one, e.g. `2026-10-13T09:00:00-03:00` |
 | `-key KEY` | base of the idempotency keys (`KEY.1`, `KEY.2`, … per request); default `csv-` plus a hash of the file's full path |
-| `-dry-run` | parse and check the file locally and print how it would be sent |
+| `-template` | fill `{name}`, `{first_name}` and `{push_name}` per recipient ([templates](QUEUE.md#name-templates)); a `name` column wins. Needs a token with `read` |
+| `-dedupe` | leave out rows whose recipient, text and `name` appeared earlier in the file (and let the server skip repeats per request, like a person in two tags) |
+| `-skip-sent DURATION` | skip people who already got a message within `48h`, `3d`… (at most 90 days; 7 for a token without `read`), or in `batch:NAME` ([details](QUEUE.md#skipping-repeats-dedupe-and-skip_sent)) |
+| `-dry-run` | parse and check the file locally and print how it would be sent (tags show as `tag:NAME (expanded by the server)`) |
+
+The summary counts what was skipped: `queued 2328 messages, skipped 12 (8 sent in the last 48h, 4
+duplicates), batch promo-october`.
 
 After a failure, fix what the error names (in the failed request's lines or later ones, never the
 lines before it) and run the command the error prints: requests that went through before are

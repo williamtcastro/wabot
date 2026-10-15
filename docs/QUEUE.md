@@ -61,8 +61,9 @@ See you at 9.",2026-10-13T09:00:00-03:00,
 ```
 
 - **The first line names the columns**, in any order and any case: `to` (required), `text`,
-  `send_at` (RFC 3339) and `reply_to`. Any other column is refused with its name, so a typo like
-  `txet` can't silently drop the text. Leave out the columns you don't need.
+  `send_at` (RFC 3339), `reply_to` and `name` (for [templates](#name-templates)). Any other column
+  is refused with its name, so a typo like `txet` can't silently drop the text. Leave out the
+  columns you don't need.
 - **One message per line.** Fields with commas, quotes or line breaks go in double quotes (`""` for
   a quote inside), as every spreadsheet writes them. A UTF-8 BOM, Windows line ends, spaces around
   fields, blank lines, rows shorter than the header and empty columns without a name (the trailing
@@ -84,7 +85,8 @@ curl -H "Authorization: Bearer $T" -H "Content-Type: text/csv" -H "Idempotency-K
   --data-binary @promo.csv "localhost:8080/queue?batch=promo-october"
 ```
 
-The query takes `batch`, `send_at` and `text` (the defaults, like the JSON body's top-level fields);
+The query takes `batch`, `send_at` and `text` (the defaults, like the JSON body's top-level fields)
+and `template`, `dedupe` and `skip_sent` (see [below](#tags-templates-and-skips));
 the limits are the JSON form's: 1000 rows and 16 MB per request, the token's allowlist checked on
 every row, and `Idempotency-Key` to make a retry safe. Use `--data-binary`, not `-d`, which drops
 the line breaks. Put the message text in the file's `text` column rather than in `?text=`: query
@@ -134,7 +136,95 @@ key in its error when an import stops.
   refused with 409; the same file sent again unchanged queues nothing new. Moving the
   file changes the derived key, so pass the `-key` from the error when resuming a moved file.
 - `-text` and `-send-at` are filled in before sending, so changing them is a change of the rows.
+  So is adding or dropping `-template` or `-dedupe` (`-dedupe` leaves rows out, which moves the
+  rest between requests); `-skip-sent` isn't: it's checked again on every run.
 - The server remembers the keys as long as it keeps the items, until 7 days after they finish.
+
+## Tags, templates and skips
+
+Three request options that build on [your contacts](API.md#contacts). All of them work with JSON,
+CSV and `wame queue import`; tags and templates also with the MCP tool `schedule_message`.
+
+### `to=tag:NAME`
+
+A `to` of `tag:clients` queues one item per person you tagged `clients`, at enqueue time (a
+snapshot: people tagged later aren't added). It needs a token with `read` as well as `send`,
+since the items show who has the tag. For a token limited to some chats, members outside its list
+are dropped without a trace (not counted, not listed), so it can't learn how big the tag is. An
+empty tag is a 400, `tag clients has no contacts` (`…no contacts this token can reach` for a
+limited token). The expanded messages count toward the 1000 per request and the 10,000 waiting.
+A person in two tagged rows gets two items, unless `dedupe` is on.
+
+Each member's item has the idempotency key `KEY#i:CHAT` (`i` is the row's index), so retrying a
+request after the tag changed replays the members already queued and adds only the new ones. A
+member first queued under a hidden `…@lid` ID and known by number since is recognized too. A row
+changed from a number to a tag (or back) under the same key is a different request: 409.
+
+### `{name}` templates
+
+With `"template": true` (`?template=1`, `wame queue import -template`, MCP `template`), these
+placeholders are filled per recipient; without it, braces are plain text.
+
+| Placeholder | Filled with |
+|---|---|
+| `{name}` | the message's own `name` (JSON field or CSV column), else your name for the person, the phone's address book, the business name, or the verified business name WhatsApp reported |
+| `{first_name}` | the first word of `{name}` |
+| `{push_name}` | the name the person set in WhatsApp themselves |
+| `{name\|there}` | a fallback when there's no name (works on all three) |
+| `{{`, `}}` | a literal `{` or `}` |
+
+- **`{name}` never uses the push name.** Anyone can set theirs to anything, and it would go out
+  under your account. Ask for `{push_name}` by name when you want it. Groups have no name here.
+- A row without a name and without a fallback is refused (400, naming the first lines), so
+  nothing goes out as "Hi ,". Any other `{…}` is a 400 too.
+- Names are cleaned first: one line, no invisible or direction-changing characters, at most 60
+  characters.
+- The text is filled in when it's queued: `GET /queue/{id}` shows what goes out, and renaming
+  someone later doesn't change it. A retry with the same key compares the template (and the
+  row's own `name`), not the filled text, so it replays even after a contact was renamed or lost
+  their name; a changed `name` column, or another tag, is a different request (409).
+- Needs `read`, like tags: the filled text shows names.
+
+### Skipping repeats: `dedupe` and `skip_sent`
+
+| | `dedupe` | `skip_sent` |
+|---|---|---|
+| Skips | a row whose recipient and (filled) text already appeared earlier in the request | a recipient who already got a message: within a time (`48h`, `90m`, `3d`) or in a batch (`batch:promo-october`) |
+| API | `"dedupe": true` / `?dedupe=1` | `"skip_sent": "48h"` / `?skip_sent=batch:promo-october` |
+| CLI | `-dedupe` (across the whole file) | `-skip-sent 48h` |
+
+What counts for `skip_sent`:
+
+- **Queue items** that are queued or sending (whatever their age), or were sent within the time
+  (with `batch:NAME`: every queued, sending or sent item of that batch still kept; finished items
+  are deleted 7 days after they finish, so after that a rerun of the campaign sends again; use a
+  time like `30d` with a `read` token for longer). Failed and canceled items
+  don't count: the person didn't get the message. Without `admin`, only the token's own items
+  count, so a token can't learn whether another one messaged someone.
+- **With `read`, every message you sent** in that 1:1 chat within the time: from the phone, `/send`,
+  the TUI or the queue (a reader can see those anyway). Up to 90 days. Without `read` only the
+  token's queue counts, and finished items are kept 7 days, so the limit is 7 days.
+- A person is matched under every form wame knows without asking WhatsApp: the number, its other
+  form with or without Brazil's 9th digit, and its `…@lid` ID.
+
+Order per row: a retry's replay first (an item already queued under the row's key is returned),
+then `skip_sent`, then `dedupe`. Earlier rows of the same request count too. A retried request
+skips the same rows again, unless the time has passed meanwhile: then they're queued, as a fresh
+run would. Rows keep their own index in the key, so skipping one never changes another's key.
+Two requests at once can't both pass the check: the database is locked while it runs.
+
+```json
+{ "batch": "promo-october", "queued": 2328, "replayed": 0, "items": [ … ],
+  "skipped": { "duplicate": 4, "recently_sent": 8 },
+  "skipped_rows": [ { "line": 7, "index": 5, "to": "5511999999999", "reason": "recently_sent" }, … ] }
+```
+
+`skipped_rows` lists the first 100. Skips aren't failures: they create no items, no events and no
+alerts. A request where every row was skipped (a rerun of a finished campaign) is a 202 with
+`queued: 0`. The audit entry reads `N messages, M skipped`. `wame queue import` prints
+`queued 2328 messages, skipped 12 (8 sent in the last 48h, 4 duplicates)`. Its `-dedupe` runs over
+the whole file before it's split into requests (rows with the same recipient, text and
+`name`), and the server dedupes each request as well, which catches a person in two tags.
 
 ## States
 
@@ -209,7 +299,7 @@ queued itself; with `admin`, every item (`?actor=` narrows it).
 
 | Route | |
 |---|---|
-| `POST /queue` | queue up to 1000 messages. Body: `messages` (each `to`, `text`, optional `reply_to` and `send_at`), optional `batch` (letters, digits, `.`, `_`, `-`; generated when left out), and top-level `text` / `send_at` used by messages that leave theirs out. Or a [CSV file](#csv-import) as `text/csv` or `application/csv`. Answers 202 with the items (without text), `queued` (how many items) and `replayed` (how many of them were already queued under the idempotency key) |
+| `POST /queue` | queue up to 1000 messages. Body: `messages` (each `to`, `text`, optional `reply_to`, `send_at` and `name`), optional `batch` (letters, digits, `.`, `_`, `-`; generated when left out), top-level `text` / `send_at` used by messages that leave theirs out, and the options `template`, `dedupe` and `skip_sent` ([above](#tags-templates-and-skips)). Or a [CSV file](#csv-import) as `text/csv` or `application/csv`. Answers 202 with the items (without text), `queued` (how many items), `replayed` (how many of them were already queued under the idempotency key), `skipped` and `skipped_rows` |
 | `GET /queue` | items, newest first, plus `counts` by state. Query: `status`, `batch`, `actor` (admin), `before` (id, to page), `limit` (≤ 500) |
 | `GET /queue/{id}` | one item, with its text |
 | `DELETE /queue/{id}` | cancel a queued item (409 when it's already sending or finished) |

@@ -713,16 +713,29 @@ paths:
         messages that leave theirs out. Tokens limited to chats can only queue to those. See docs/QUEUE.md.
         Requires send.
 
+        A to of tag:NAME queues one item per person with that contact tag (needs read too; members
+        outside a restricted token's allowlist are dropped without a trace; an empty tag is a 400).
+        template fills {name}, {first_name} and {push_name} ({name|fallback}; {{ and }} for braces)
+        per recipient, never with a push name for {name} (needs read). dedupe skips a row whose
+        recipient and text appeared earlier in the request; skip_sent skips recipients who already
+        got a message: a duration ("48h", "3d", at most 90 days, 7 without read) or "batch:NAME".
+        Skipped rows are counted in skipped and listed in skipped_rows; all of them skipped is
+        still a 202.
+
         With Content-Type text/csv (or application/csv), the body is a CSV file: a header line naming
-        the columns (to required; text, send_at, reply_to; any order and case; "," or ";" between
-        fields) and one message per line; batch, send_at and text come from the query. Unknown
-        columns are refused, and errors name the line ("line 7: invalid recipient"). Prefer a text
-        column to the text query parameter, which proxies and shell history may log.
+        the columns (to required; text, send_at, reply_to, name; any order and case; "," or ";"
+        between fields) and one message per line; batch, send_at, text, template, dedupe and
+        skip_sent come from the query. Unknown columns are refused, and errors name the line
+        ("line 7: invalid recipient"). Prefer a text column to the text query parameter, which
+        proxies and shell history may log.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
         - { name: batch, in: query, description: "CSV body only: the batch", schema: { type: string, pattern: "^[A-Za-z0-9._-]{1,64}$" } }
         - { name: text, in: query, description: "CSV body only: text for rows without one. Query strings get logged by proxies; prefer a text column", schema: { type: string } }
         - { name: send_at, in: query, description: "CSV body only: earliest send time for rows without one", schema: { type: string, format: date-time } }
+        - { name: template, in: query, description: "CSV body only: fill {name} placeholders (1, true, 0 or false)", schema: { type: boolean } }
+        - { name: dedupe, in: query, description: "CSV body only: skip repeated rows (1, true, 0 or false)", schema: { type: boolean } }
+        - { name: skip_sent, in: query, description: "CSV body only: skip recipients messaged within this duration, or in batch:NAME", schema: { type: string, example: "48h" } }
       requestBody:
         required: true
         content:
@@ -735,6 +748,9 @@ paths:
                 text: { type: string, description: "Default text" }
                 send_at: { type: string, format: date-time, description: "Default earliest send time, up to 30 days ahead" }
                 idempotency_key: { type: string }
+                template: { type: boolean, description: "Fill {name}, {first_name} and {push_name} per recipient (needs read)" }
+                dedupe: { type: boolean, description: "Skip a row whose recipient and text appeared earlier in the request" }
+                skip_sent: { type: string, description: "Skip recipients who got a message within this duration (at most 90d; 7d without read), or batch:NAME", example: "48h" }
                 messages:
                   type: array
                   maxItems: 1000
@@ -742,10 +758,11 @@ paths:
                     type: object
                     required: [to]
                     properties:
-                      to: { type: string, example: "5511999999999" }
+                      to: { type: string, example: "5511999999999", description: "Number, JID, or tag:NAME (needs read)" }
                       text: { type: string }
                       reply_to: { type: string }
                       send_at: { type: string, format: date-time }
+                      name: { type: string, description: "The {name} for this message's template; wins over every known name" }
             example: { batch: promo-october, text: "Hi! Our store opens at 9 tomorrow.", messages: [{ to: "5511999999999" }, { to: "5511988887777", text: "Hi John!" }] }
           text/csv:
             schema: { type: string, description: "Header line, then one message per line; at most 1000 rows and 16 MB" }
@@ -764,6 +781,21 @@ paths:
                   queued: { type: integer, description: "How many items the answer has" }
                   replayed: { type: integer, description: "How many of them were already queued under this idempotency key" }
                   items: { type: array, items: { $ref: "#/components/schemas/OutboxItem" } }
+                  skipped:
+                    type: object
+                    properties:
+                      duplicate: { type: integer }
+                      recently_sent: { type: integer }
+                  skipped_rows:
+                    type: array
+                    description: The first 100 skipped rows
+                    items:
+                      type: object
+                      properties:
+                        line: { type: integer, description: "CSV line (CSV bodies only)" }
+                        index: { type: integer, description: "Index of the row in the request" }
+                        to: { type: string, description: "The recipient (a tag's member for a tag row)" }
+                        reason: { type: string, enum: [duplicate, recently_sent] }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }

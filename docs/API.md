@@ -501,13 +501,28 @@ many of them were already queued under the same `Idempotency-Key`, so a retry sh
 didn't add). The same key with different messages (`to`, `text`, `reply_to`, `send_at` or a named
 `batch`) is a 409 and queues nothing.
 
+**Tags, templates and skips** ([details](QUEUE.md#tags-templates-and-skips)):
+
+- A `to` of `tag:clients` queues one item per person with that [contact tag](#contacts), at enqueue
+  time. Needs `read` as well as `send`; a token limited to chats reaches only the members on its
+  list (the others are dropped without a trace). An empty tag is a 400.
+- `"template": true` fills `{name}`, `{first_name}` and `{push_name}` (`{name|there}` for a
+  fallback, `{{` and `}}` for braces) per recipient; a message's own `name` wins. Needs `read`.
+- `"dedupe": true` skips a row whose recipient and text appeared earlier in the request;
+  `"skip_sent": "48h"` (or `"3d"`, at most 90 days; 7 without `read`) or `"batch:promo-october"`
+  skips recipients who already got a message.
+- Skipped rows are counted in `skipped` (`{"duplicate": 4, "recently_sent": 8}`) and listed in
+  `skipped_rows` (the first 100: `line` for CSV, `index`, `to`, `reason`). A request where every row
+  was skipped is still a 202, with `queued: 0`.
+
 **As CSV.** With `Content-Type: text/csv` (or `application/csv`) the body is a CSV file instead: a
-header line naming the columns (`to` required; `text`, `send_at`, `reply_to`; any order; `,` or
-`;` between fields) and one message per line, with `batch`, `send_at` and `text` in the query as
-defaults. Same limits (1000 rows, 16 MB, allowlist per row, `Idempotency-Key`); an unknown column
-is a 400 that names it, and errors name the file's line (`line 7: invalid recipient "12"`). Put the
-text in the file rather than in `?text=`: query strings are kept in proxy logs and shell history.
-See [CSV import](QUEUE.md#csv-import), and `wame queue import` for files of any length.
+header line naming the columns (`to` required; `text`, `send_at`, `reply_to`, `name`; any order;
+`,` or `;` between fields) and one message per line, with `batch`, `send_at`, `text`, `template`,
+`dedupe` and `skip_sent` in the query. Same limits (1000 rows, 16 MB, allowlist per row,
+`Idempotency-Key`); an unknown column is a 400 that names it, and errors name the file's line
+(`line 7: invalid recipient "12"`). Put the text in the file rather than in `?text=`: query
+strings are kept in proxy logs and shell history. See [CSV import](QUEUE.md#csv-import), and
+`wame queue import` for files of any length.
 
 ```sh
 curl -H "$H" -H "Content-Type: text/csv" --data-binary @promo.csv "localhost:8080/queue?batch=promo-october"
@@ -1020,7 +1035,7 @@ mode, `mcp` for `wame mcp` without a token), or `tui`, `cli`, `autoreply` or `wh
 `detail` the requested scopes), `settings` (`detail` lists the changes, e.g. `rate=10, chat_gap
 reset`), `webhook_test` or `webhook_replay` (`detail` is the delivery id), `alert_test`
 (`detail` is the backend, `gotify`), `qr`, `check`, `queue` (`target` is the batch, `detail` `N
-messages`), `queue_cancel` (`target` is the batch or `#id`, `detail` `N canceled`), `optout_add`
+messages`, plus `, M skipped` when rows were skipped), `queue_cancel` (`target` is the batch or `#id`, `detail` `N canceled`), `optout_add`
 (`target` is the chat; `detail` is `added`, `already listed`, or `keyword STOP` with actor
 `whatsapp` when the chat sent the keyword), `optout_remove`, `contact_set` (`target` is the chat,
 `detail` the changed fields like `name, tags`, or `no change`), `contact_delete`, `contact_import`

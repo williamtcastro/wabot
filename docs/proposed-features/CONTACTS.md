@@ -1,7 +1,7 @@
 # Contacts: your own list and a profile per person (proposal)
 
-> **Phases 1 and 2 are built** (each phase ends with an "As built" list of where the code differs
-> from this plan); phases 3 and 4 are still proposals. See the [list of proposals](README.md). This
+> **Phases 1, 2 and 3 are built** (each phase ends with an "As built" list of where the code differs
+> from this plan); phase 4 is still a proposal. See the [list of proposals](README.md). This
 > replaced the two contact entries that were in [BACKLOG.md](BACKLOG.md).
 
 ## Goals
@@ -689,6 +689,57 @@ the response and audit never carry names.
 Risks: idempotency regressions (the queue's most delicate part: review `sameRequest` and key
 derivation as an attacker would); templates turning wame into a mass-personalization tool (keep the
 opt-in and the existing limits; nothing here raises a rate).
+
+**As built, where it differs from the above** (user docs: [QUEUE.md](../QUEUE.md#tags-templates-and-skips)):
+
+- **Bot.** `Bot.Queue(ctx, QueueOptions, reqs)` in `internal/bot/queueopts.go` is the one entry
+  point; `QueueMessages` and `Enqueue` call it without options. `QueueOptions` carries the caller's
+  `Admin`, `Read` and `Allow` (the allowlist), so `Bot` decides, not each front end. Tag expansion
+  (`expandTags`, `tagMembers`) and `ParseSkipSent` live there too; `template.go` has the parser,
+  `renderTemplate` (it takes parsed parts and the names, not a callback) and `namesForTemplate`.
+- **Store.** `EnqueueWith(items, EnqueueOptions)` (in `outbox.go`; skip rules in the new
+  `outbox_skip.go`) keeps `Enqueue(items, check)` as a wrapper. With skips or alternative keys it
+  takes the write lock first, then per row: the stored item under the key (a replay), `skip_sent`,
+  `dedupe`, insert. The recipient's keys (`Bot.contactKeys`: phone JID, `@lid`, 9th-digit form) come
+  from `Bot`, since `store` knows no variants. `recipient_key` is backfilled from `chat` for items
+  sent before it existed; items that were never sent keep it empty and can't be matched.
+- **`skip_sent` follows Decision 3:** with the `read` scope, every message sent in the 1:1 chat
+  (`wame_messages`, `from_me`, not reactions) counts as well as the queue, and the window may be
+  90 days. Without `read` only the caller's queue counts (it can't read messages anyway) and the
+  window is at most 7 days (`outboxKeep`), refused above that. Queued and sending items count
+  whatever their age; sent ones within the window; failed and canceled never.
+- **No key-prefix exclusion.** The plan's `NOT (actor = ? AND key LIKE ?)` isn't needed: a row's
+  own item is found by its key before `skip_sent` runs, and earlier rows of the same request
+  (or earlier requests of the same CSV import) do count, so the second row to the same person is
+  skipped whether or not it lands in the same request.
+- **Templates need `read`**, like tags: the filled text, shown to the token by `GET /queue/{id}`,
+  carries names. `{push_name}` is in (Decision 5), with the same fallback rule. Groups have no
+  template name (their subject is set by any member). An unknown placeholder is only quoted when it
+  looks like a name (`{nmae}`), so error text (audited) never carries other message text; a
+  tag's member is named in errors by its place (`line 3 (member 2)`), not its number.
+- **`source_hash`** is set for template rows and for every tag member: sha256 of the tag, the
+  unrendered text and the row's own `name`. So a contact renamed in wame replays, while another
+  `name` column or another tag under the same key is a 409.
+- **`skip_sent=batch:NAME`** only sees items still kept (finished ones are pruned after 7 days);
+  it doesn't fall back on `wame_messages`, which has no batch.
+- A retry of a request without a batch name answers (and audits) the batch its items are in,
+  not the new name it made up.
+- **A tag member's key** is `KEY#i:CHAT`; the store also tries `KEY#i:` plus the member's other
+  keys (`EnqueueRow.AltKeys`), so a member queued under an `@lid` and known by number on the
+  retry replays instead of being queued twice. A `name` on a `tag:` row is refused. A row changed
+  between a number and a tag under the same key is `ErrKeyReused` (409): each new row checks that
+  no key of the other kind is stored at its index (`EnqueueRow.Taken`: `KEY#i` for a member,
+  the `KEY#i:` prefix for a number), since the keys differ and the change would otherwise queue a
+  second message. A row the template has no name for is refused only when it would be queued
+  now, so a retry still replays one queued before the name was removed.
+- **Dedupe** compares every key of the recipient (so `+55 11 9…` and the 9th-digit form are the
+  same person) with the filled text. The CLI's `-dedupe` drops rows with the same recipient, text and
+  `name` from the whole file before chunking, and also asks the server to dedupe
+  each request.
+- **Response.** `skipped_rows` entries have `line` (CSV), `index` (the row in the request), `to`
+  and `reason` (`duplicate` or `recently_sent`, also for `batch:`). The CLI sends the `name` column
+  only when the file has one, so files without names still import into older servers.
+- **MCP** `schedule_message` takes `tag:` and `template`; for a tag it answers `queued` and no `id`.
 
 ### Phase 4 (later)
 

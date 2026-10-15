@@ -189,7 +189,7 @@ func TestQueueImportDryRun(t *testing.T) {
 		{"to,text\n5511999999999,hi\n123,hi\n", "", "line 3: invalid recipient"},
 		{"to,text\n5511999999999,\"a\nb\"\n5511988887777,\n", "", "line 4: text is empty"},
 		{"to\n5511999999999\n", "", "line 2: text is empty"},
-		{"to,name\n5511999999999,Ana\n", "", `unknown columns "name"`},
+		{"to,nome\n5511999999999,Ana\n", "", `unknown columns "nome"`},
 		{"text\nhi\n", "", `"to" column is required`},
 		{"to,text\n", "", "no messages"},
 		{"to,text,send_at\n5511999999999,hi,2099-01-01T00:00:00Z\n", "", "line 2: send_at is more than 30 days ahead"},
