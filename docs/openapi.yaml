@@ -723,6 +723,7 @@ paths:
         - { name: batch, in: query, description: "CSV body only: the batch", schema: { type: string, pattern: "^[A-Za-z0-9._-]{1,64}$" } }
         - { name: text, in: query, description: "CSV body only: text for rows without one. Query strings get logged by proxies; prefer a text column", schema: { type: string } }
         - { name: send_at, in: query, description: "CSV body only: earliest send time for rows without one", schema: { type: string, format: date-time } }
+        - { name: file, in: query, description: "CSV body only: id of a file from POST /queue/files, the default for every row", schema: { type: string, pattern: "^f_[0-9a-f]{32}$" } }
       requestBody:
         required: true
         content:
@@ -735,6 +736,7 @@ paths:
                 text: { type: string, description: "Default text" }
                 send_at: { type: string, format: date-time, description: "Default earliest send time, up to 30 days ahead" }
                 idempotency_key: { type: string }
+                file: { type: string, pattern: "^f_[0-9a-f]{32}$", description: "Default file (id from POST /queue/files, the caller's own); text becomes its caption and may be empty" }
                 messages:
                   type: array
                   maxItems: 1000
@@ -746,6 +748,7 @@ paths:
                       text: { type: string }
                       reply_to: { type: string }
                       send_at: { type: string, format: date-time }
+                      file: { type: string, pattern: "^f_[0-9a-f]{32}$", description: "File for this message; overrides the top-level one" }
             example: { batch: promo-october, text: "Hi! Our store opens at 9 tomorrow.", messages: [{ to: "5511999999999" }, { to: "5511988887777", text: "Hi John!" }] }
           text/csv:
             schema: { type: string, description: "Header line, then one message per line; at most 1000 rows and 16 MB" }
@@ -767,7 +770,8 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "409": { description: "The idempotency key was used for a different request (to, text, reply_to, send_at or a named batch differ); nothing is queued" }
+        "404": { description: "A file id isn't one of the caller's live files (also another token's file); nothing is queued" }
+        "409": { description: "The idempotency key was used for a different request (to, text, reply_to, send_at, file or a named batch differ); nothing is queued" }
         "413": { description: "The body is over 16 MB" }
     get:
       tags: [Queue]
@@ -803,6 +807,84 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+
+  /queue/files:
+    post:
+      tags: [Queue]
+      summary: Upload a file to queue
+      description: |
+        Uploads an image or document once, to be referenced by id from POST /queue (docs/QUEUE.md). One
+        multipart part named file, streamed to disk, up to 64 MB. The type is read from the bytes, never from
+        the client's Content-Type: JPEG, PNG and WebP as images; PDF, plain text, CSV, .docx .xlsx .pptx
+        .odt .ods .odp as documents. Anything else is 415, text starting with "<" too, and the file name's
+        extension must match the content (text must be UTF-8; Office archives hold at most 10,000 entries). Two uploads per token and eight in all at once, else 429. Images over 16 MB, or over 16384 px a side or 100 MP, go as
+        documents. A file belongs to the token that uploaded it, sits on the server's disk until sent and
+        is never served back. Quotas: 50 files and 500 MB per token, and queue_files_quota in all.
+        201 for a new file, 200 when the caller already has a live file with the same sha256.
+        Requires send.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        "200":
+          description: The caller already had this file (same sha256)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueFile" }
+        "201":
+          description: Stored
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueueFile" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { description: "Over 64 MB, or over a quota (the message says which one)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "415": { description: "The content isn't an allowed type, or the name's extension doesn't match it", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "507": { description: "The server couldn't write the file", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    get:
+      tags: [Queue]
+      summary: Uploaded queue files
+      description: |
+        The caller's live files and their usage. Admin sees every actor's files, without the other actors'
+        name, and usage is the total. Never returns content. Requires send.
+      responses:
+        "200":
+          description: Files and usage
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files: { type: array, items: { $ref: "#/components/schemas/QueueFile" } }
+                  usage:
+                    type: object
+                    properties:
+                      files: { type: integer }
+                      bytes: { type: integer, format: int64 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /queue/files/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, pattern: "^f_[0-9a-f]{32}$" } }
+    delete:
+      tags: [Queue]
+      summary: Delete a queue file
+      description: "The caller's own file (admin: any). Requires send."
+      responses:
+        "200": { description: Deleted, content: { application/json: { schema: { type: object, properties: { deleted: { type: boolean } } } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: "Unknown id, or another token's file (404 rather than 403, so ids don't leak)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: "Queued or sending items use it; cancel them first", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
   /queue/{id}:
     parameters:
@@ -961,6 +1043,8 @@ paths:
                 queue_quiet_hours: { type: string, nullable: true, description: "Daily window when the queue sends nothing, like 21:00-08:00 (may cross midnight); empty turns it off" }
                 queue_quiet: { nullable: true, description: "false switches the quiet hours off without forgetting the window; true or null turns them back on" }
                 queue_timezone: { type: string, nullable: true, description: "IANA zone the quiet hours are read in, like America/Sao_Paulo; Local is the server's zone" }
+                queue_media_ttl: { type: string, nullable: true, description: "How long one upload to WhatsApp is reused for later messages with the same queue file: a duration up to 168h (default 24h), or off to upload for every message" }
+                queue_files_quota: { type: string, nullable: true, description: "Bytes all queue files may take together: 2GB (default), 500MB, 64KB, 1TB or a byte count, powers of 1024; 0 refuses new uploads" }
             example: { rate: 10, auto_reply: false, chat_gap: null }
       responses:
         "200":
@@ -1570,6 +1654,9 @@ components:
                 cooldown_until: { type: string, format: date-time, description: "Backing off after repeated WhatsApp errors" }
                 last_error: { type: string }
                 last_error_at: { type: string, format: date-time }
+                files: { type: integer, description: "Live queue files" }
+                file_bytes: { type: integer, format: int64, description: "Bytes those files take on disk" }
+                files_quota: { type: integer, format: int64, description: "The queue_files_quota limit in bytes" }
         alerts:
           type: object
           description: Push alerts (-alert-gotify). Never includes the URL or the token
@@ -1606,6 +1693,24 @@ components:
         error: { type: string, description: "Last error" }
         delivered_at: { type: string, format: date-time, description: "When WhatsApp reported it delivered; absent until then" }
         read_at: { type: string, format: date-time, description: "When WhatsApp reported it read; absent until then (or if the person hides read receipts)" }
+        file: { type: string, description: "Queue file id; absent for text. Never the file's name" }
+        kind: { type: string, enum: [image, document], description: "Absent for text" }
+        file_size: { type: integer, format: int64, description: "Bytes of the file; absent for text" }
+    QueueFile:
+      type: object
+      description: A file uploaded for the queue. Never its content.
+      properties:
+        id: { type: string, example: "f_0123456789abcdef0123456789abcdef" }
+        actor: { type: string, description: "Token name that uploaded it" }
+        sha256: { type: string }
+        size: { type: integer, format: int64 }
+        mime: { type: string, description: "Sniffed from the bytes", example: application/pdf }
+        kind: { type: string, enum: [image, document] }
+        name: { type: string, description: "Display name only (cleaned); left out of other actors' files in the admin's listing" }
+        created_at: { type: string, format: date-time }
+        items: { type: integer, description: "Queue items that use the file" }
+        open: { type: integer, description: "Of those, how many are still queued or sending" }
+        expires_at: { type: string, format: date-time, description: "Only while no item has used the file yet: when it is deleted if still unused (24 h after upload)" }
     QueueCounts:
       type: object
       properties:
@@ -1643,7 +1748,7 @@ components:
     SettingView:
       type: object
       properties:
-        key: { type: string, enum: [rate, chat_gap, max_wait, auto_reply, webhook_filter, queue_paused, queue_jitter, queue_quiet_hours, queue_quiet, queue_timezone] }
+        key: { type: string, enum: [rate, chat_gap, max_wait, auto_reply, webhook_filter, queue_paused, queue_jitter, queue_quiet_hours, queue_quiet, queue_timezone, queue_media_ttl, queue_files_quota] }
         value: { type: string, description: "Effective value" }
         default: { type: string, description: "The flag's value, used when not overridden" }
         overridden: { type: boolean }
@@ -1663,7 +1768,7 @@ components:
         id: { type: integer, format: int64 }
         at: { type: string, format: date-time }
         actor: { type: string, description: "Token name for API/MCP calls (api = owner secret or token-less, mcp = stdio without a token), or tui, cli, autoreply, whatsapp", example: "support-bot" }
-        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel, optout_add, optout_remove, alert_test, contact_set, contact_delete, contact_import, contact_delete_all, contact_export, contact_refresh, contacts_wipe] }
+        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel, queue_file, queue_file_delete, queue_files_wipe, optout_add, optout_remove, alert_test, contact_set, contact_delete, contact_import, contact_delete_all, contact_export, contact_refresh, contacts_wipe] }
         target: { type: string, description: "Chat JID, when there is one" }
         detail: { type: string, example: "text, 6 chars" }
         ok: { type: boolean }

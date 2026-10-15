@@ -1,7 +1,9 @@
-# Files in the send queue (proposal)
+# Files in the send queue (design record)
 
-> **Deferred proposal.** Not built. Today the [send queue](../QUEUE.md) takes text only; files go
-> out one at a time through `POST /send/file`, which holds the request open. See the
+> **Built (2026-10-15), with option C.** This is the design record; how to use it is in
+> [QUEUE.md](../QUEUE.md#files) and [API.md](../API.md#post-queuefiles-get-queuefiles-delete-queuefilesid).
+> The text below is the proposal as written, with the few places the build differs corrected; see
+> [Decisions](#decisions-2026-10-15). Before it, the queue took text only. See the
 > [list of proposals](README.md).
 
 ## Goal
@@ -68,12 +70,13 @@ CREATE TABLE IF NOT EXISTS wame_outbox_files (
 	name        TEXT NOT NULL DEFAULT '',-- display name only, cleaned
 	created_at  INTEGER NOT NULL,
 	upload      BLOB,                    -- cached whatsmeow.UploadResponse fields (see below)
-	uploaded_at INTEGER NOT NULL DEFAULT 0
+	uploaded_at INTEGER NOT NULL DEFAULT 0,
+	deleted_at  INTEGER NOT NULL DEFAULT 0 -- set when the bytes are gone; the row stays for the items
 );
-CREATE UNIQUE INDEX IF NOT EXISTS wame_outbox_files_dedupe ON wame_outbox_files (actor, sha256);
+CREATE UNIQUE INDEX IF NOT EXISTS wame_outbox_files_dedupe ON wame_outbox_files (actor, sha256) WHERE deleted_at = 0;
 ```
 
-plus `file_id TEXT NOT NULL DEFAULT ''` on `wame_outbox`, added idempotently in `migrateOutbox`.
+plus `file_id`, `file_kind` and `file_size` (`TEXT`, `TEXT`, `INTEGER`, all defaulting to empty or 0) on `wame_outbox`, added idempotently in `migrateOutbox`.
 
 Limits: 64 MB per file (`maxUpload`, same as `/send/file`; WhatsApp caps images at about 16 MB, so larger ones go as
 documents),
@@ -170,7 +173,7 @@ the server's disk until sent.
 
 ## Migration
 
-`migrateOutbox` creates `wame_outbox_files` and adds `wame_outbox.file_id` idempotently; existing
+`migrateOutbox` creates `wame_outbox_files` and adds `wame_outbox.file_id`, `file_kind` and `file_size` idempotently; existing
 rows get `''` (text). The `outbox/` directory is created on first upload with 0700. Older servers
 answer 404 on `/queue/files`; the admin panel shows "update the server". `docs/openapi.yaml`,
 `docs/API.md`, `docs/QUEUE.md` and the audit tables (`queue_file`, `queue_file_delete`: target the
@@ -209,3 +212,57 @@ file id, detail `kind, N bytes`, never the name) are updated with the code.
 - Audio and video: same table, but WhatsApp wants specific codecs (OGG/Opus voice notes, MP4/H.264)
   and thumbnails; worth a separate step.
 - Keep files when the queue is paused for days, or count paused time toward the orphan timer?
+
+## Decisions (2026-10-15)
+
+The open questions above, answered:
+
+- **Media retry receipts**: not answered in v1. A recipient who asks for expired media to be sent
+  again gets nothing; the reuse TTL keeps that window small.
+- **Default reuse lifetime**: 24 h kept (`queue_media_ttl`, up to 168 h, `off` = upload for every
+  message). Not measured against the CDN yet.
+- **Sharing between tokens**: no. Files are own-actor only; admin sees every actor's files (without
+  the others' names) and can delete any, but a batch can only reference the caller's own files, admin
+  included. No team sharing.
+- **Audio and video**: still a later step.
+- **Paused queue**: paused time counts toward the 24 h orphan timer only for files no item ever
+  used. A file that queued items need stays while those items are open, paused or not.
+
+What was decided while building:
+
+- The dedupe unique index is partial (`WHERE deleted_at = 0`), so a deleted file can be uploaded
+  again; the row of a deleted file keeps only id, actor, size, sha256, mime and kind (`deleted_at`
+  set, name and cached upload cleared).
+- Kind and size are copied onto each `wame_outbox` row (`file_kind`, `file_size`), so lists, events
+  and webhook deliveries need no join, and the file's name never reaches them.
+- A trigger (`wame_outbox_file_live`) refuses an insert into `wame_outbox` that names a deleted or
+  another actor's file. It closes the race between the check and a concurrent delete or prune;
+  replays of an existing idempotency key are exempt. The idempotency fingerprint includes the file id.
+- Quota is checked inside the `INSERT`, so parallel uploads can't both pass. Limits: 50 files and
+  500 MB per actor (token name), and `queue_files_quota` in all (default 2 GB, `0` refuses uploads).
+- The optional `queue_upload_mb_per_min` byte budget was not built.
+- Upload errors have their URLs cut to the host before they are stored: the upload URL carries
+  WhatsApp's auth token.
+- Cleanup also deletes files of a revoked or expired token (their queued items fail with "file is
+  gone"), sweeps files in `outbox/` without a row older than 15 minutes (instead of only at startup), and
+  runs once when the worker starts as well as hourly. Logout, `POST /logout` and WhatsApp logging
+  the device out delete every file and remove `outbox/` (audited as `queue_files_wipe`).
+- Backups (`wame backup`) copy the database only, not `outbox/`.
+- Files that are queued are audited as `send_file` with `kind, N bytes, queue #id` (no name); uploads
+  and deletes as `queue_file` and `queue_file_delete`.
+- Types are sniffed from the bytes: JPEG, PNG, WebP; PDF, plain text, CSV, and the Office ZIP
+  formats (`.docx .xlsx .pptx .odt .ods .odp`, checked for `[Content_Types].xml` or `mimetype`);
+  text starting with `<` is refused; the name's extension must match the content.
+- The upload is made right before the send, one at a time, only when the item's slot is about to be
+  free; it is kept in memory for the item it was made for for a short while. A fresh upload ends
+  the worker's step, so pause, quiet hours and the token are checked again before the send.
+- An upload error while the connection is down gives the attempt back (as a text send does); a
+  local read error backs off without the whole-queue cooldown.
+- From the adversarial review: per-actor quotas are checked before anything is written to disk; at
+  most two uploads per token and eight in all run at once (429); Office archives are checked by
+  walking at most 10,000 central-directory headers (not `zip.OpenReader`, which allocates one per
+  entry); text must be UTF-8 and may not start with `<` after any whitespace; errors never quote the
+  client's extension or a server path; the total quota error doesn't show other tokens' usage; an
+  upload of the same bytes restores a stored copy that went missing on disk.
+
+For usage see [QUEUE.md](../QUEUE.md#files).

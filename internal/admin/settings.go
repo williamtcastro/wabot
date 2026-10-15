@@ -38,6 +38,8 @@ var settingLabels = map[string][2]string{
 	"queue_quiet_hours": {"Quiet hours", "a window when queued messages wait, e.g. 21:00-08:00; empty removes it"},
 	"queue_quiet":       {"Quiet hours on", "switch the quiet hours off and on again without losing the window"},
 	"queue_timezone":    {"Queue time zone", "the zone quiet hours are in, e.g. America/Sao_Paulo"},
+	"queue_media_ttl":   {"Queue file reuse", "how long one WhatsApp upload of a queued file serves later messages, e.g. 24h; off uploads per message"},
+	"queue_files_quota": {"Queue files quota", "disk space all queued files may use together, e.g. 2GB"},
 }
 
 // settingLabel is a setting's name and description; a key added by a newer server shows as itself.

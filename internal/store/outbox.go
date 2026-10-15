@@ -30,8 +30,9 @@ func ValidOutboxStatus(s string) error {
 	return fmt.Errorf("status must be one of %s", strings.Join(OutboxStates, ", "))
 }
 
-// OutboxItem is one queued text message. MessageID is chosen before the first attempt and reused on
-// retries, so a message that did reach WhatsApp before a crash isn't shown twice.
+// OutboxItem is one queued message: text, or a file (FileID) with the text as its caption.
+// MessageID is chosen before the first attempt and reused on retries, so a message that did reach
+// WhatsApp before a crash isn't shown twice.
 type OutboxItem struct {
 	ID        int64     `json:"id"`
 	Batch     string    `json:"batch"`
@@ -52,6 +53,9 @@ type OutboxItem struct {
 	Error     string    `json:"error,omitempty"`
 	Delivered time.Time `json:"delivered_at,omitzero"`
 	Read      time.Time `json:"read_at,omitzero"`
+	FileID    string    `json:"file,omitempty"`
+	FileKind  string    `json:"kind,omitempty"`
+	FileSize  int64     `json:"file_size,omitempty"`
 }
 
 // Receipt progress of an item WhatsApp accepted, beyond its state.
@@ -169,7 +173,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS wame_outbox_key ON wame_outbox (actor, key) WH
 		return err
 	}
 	_, err = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS wame_outbox_message ON wame_outbox (message_id) WHERE message_id != ''`)
-	return err
+	if err != nil {
+		return err
+	}
+	return migrateOutboxFiles(ctx, db)
 }
 
 // outboxReceiptColumns came after the table did, so they're added to older databases on startup.
@@ -216,7 +223,7 @@ func addColumn(ctx context.Context, db *sql.DB, table, def string) error {
 	return err
 }
 
-const outboxColumns = `id, batch, actor, token_id, key, recipient, text, reply_to, status, attempts, due, created_at, updated_at, chat, message_id, error, delivered_at, read_at, send_at`
+const outboxColumns = `id, batch, actor, token_id, key, recipient, text, reply_to, status, attempts, due, created_at, updated_at, chat, message_id, error, delivered_at, read_at, send_at, file_id, file_kind, file_size`
 
 // outboxColumnsNoText reads an item without its text, where it isn't needed.
 var outboxColumnsNoText = strings.Replace(outboxColumns, " text,", " '',", 1)
@@ -232,7 +239,8 @@ func scanOutbox(row interface{ Scan(...any) error }) (OutboxItem, error) {
 	var it OutboxItem
 	var due, created, updated, delivered, read int64
 	err := row.Scan(&it.ID, &it.Batch, &it.Actor, &it.TokenID, &it.Key, &it.To, &it.Text, &it.ReplyTo, &it.Status,
-		&it.Attempts, &due, &created, &updated, &it.Chat, &it.MessageID, &it.Error, &delivered, &read, &it.SendAt)
+		&it.Attempts, &due, &created, &updated, &it.Chat, &it.MessageID, &it.Error, &delivered, &read, &it.SendAt,
+		&it.FileID, &it.FileKind, &it.FileSize)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = ErrNotFound
 	}
@@ -279,9 +287,10 @@ func (s *Store) Enqueue(items []OutboxItem, check EnqueueCheck) ([]OutboxItem, e
 		if !it.Due.IsZero() {
 			sendAt = it.Due.UnixMilli()
 		}
-		out[i], err = scanOutbox(tx.QueryRow(`INSERT INTO wame_outbox (batch, actor, token_id, key, recipient, text, reply_to, status, due, created_at, updated_at, send_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING `+outboxColumns,
-			it.Batch, it.Actor, it.TokenID, it.Key, it.To, it.Text, it.ReplyTo, OutboxQueued, max(sendAt, now), now, now, sendAt))
+		out[i], err = scanOutbox(tx.QueryRow(`INSERT INTO wame_outbox (batch, actor, token_id, key, recipient, text, reply_to, status, due, created_at, updated_at, send_at, file_id, file_kind, file_size)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING `+outboxColumns,
+			it.Batch, it.Actor, it.TokenID, it.Key, it.To, it.Text, it.ReplyTo, OutboxQueued, max(sendAt, now), now, now, sendAt,
+			it.FileID, it.FileKind, it.FileSize))
 		if errors.Is(err, ErrNotFound) {
 			replayed[i] = true
 			out[i], err = scanOutbox(tx.QueryRow(`SELECT `+outboxColumns+` FROM wame_outbox WHERE actor = ? AND key = ?`, it.Actor, it.Key))

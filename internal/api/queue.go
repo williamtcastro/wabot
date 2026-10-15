@@ -19,6 +19,7 @@ type queueMessage struct {
 	Text    string    `json:"text"`
 	ReplyTo string    `json:"reply_to"`
 	SendAt  time.Time `json:"send_at"`
+	File    string    `json:"file"`
 }
 
 // queueBody is POST /queue as JSON; a CSV upload is read into the same shape.
@@ -28,6 +29,7 @@ type queueBody struct {
 	SendAt         time.Time      `json:"send_at"`
 	Messages       []queueMessage `json:"messages"`
 	IdempotencyKey string         `json:"idempotency_key"`
+	File           string         `json:"file"`
 	isCSV          bool
 	csv            []bot.QueueRequest
 }
@@ -66,6 +68,7 @@ func (a *server) enqueue(w http.ResponseWriter, r *http.Request) {
 func readQueueCSV(w http.ResponseWriter, r *http.Request, req *queueBody) bool {
 	q := r.URL.Query()
 	req.Batch, req.Text, req.isCSV = q.Get("batch"), q.Get("text"), true
+	req.File = q.Get("file")
 	if s := q.Get("send_at"); s != "" {
 		t, err := bot.ParseSendAt(s)
 		if err != nil {
@@ -93,7 +96,7 @@ func (a *server) queueRequests(w http.ResponseWriter, r *http.Request, req queue
 	if !req.isCSV {
 		reqs = make([]bot.QueueRequest, len(req.Messages))
 		for i, m := range req.Messages {
-			reqs[i] = bot.QueueRequest{To: m.To, Text: m.Text, ReplyTo: m.ReplyTo, SendAt: m.SendAt}
+			reqs[i] = bot.QueueRequest{To: m.To, Text: m.Text, ReplyTo: m.ReplyTo, SendAt: m.SendAt, File: m.File}
 		}
 	}
 	for i := range reqs {
@@ -103,6 +106,7 @@ func (a *server) queueRequests(w http.ResponseWriter, r *http.Request, req queue
 			return nil, false
 		}
 		reqs[i].To, reqs[i].Text, reqs[i].SendAt = to, cmp.Or(reqs[i].Text, req.Text), cmp.Or(reqs[i].SendAt, req.SendAt)
+		reqs[i].File = cmp.Or(reqs[i].File, req.File)
 	}
 	return reqs, true
 }

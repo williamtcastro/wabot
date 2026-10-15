@@ -211,8 +211,8 @@ func (m *model) viewQueue() string {
 		filter = m.queueStatus
 	}
 	lines = append(lines, "   "+styleDim.Render(fmt.Sprintf("showing %s · %d of %d", filter, len(m.queue.Items), m.queue.Counts.Of(m.queueStatus))))
-	cols := []int{6, 14, 18, 13, 4, 12, 12}
-	lines = append(lines, "   "+styleHead.Render(table(cols, "ID", "BATCH", "TO", "STATE", "TRY", "BY", "DUE", "ERROR")))
+	cols := []int{6, 14, 18, 15, 13, 4, 12, 12}
+	lines = append(lines, "   "+styleHead.Render(table(cols, "ID", "BATCH", "TO", "TYPE", "STATE", "TRY", "BY", "DUE", "ERROR")))
 	if len(m.queue.Items) == 0 {
 		return strings.Join(append(lines, "   "+styleDim.Render("nothing here")), "\n")
 	}
@@ -224,10 +224,31 @@ func (m *model) viewQueue() string {
 			due = styleDim.Render(relTime(it.Updated))
 		}
 		line := table(cols, fmt.Sprint(it.ID), fit(safe(it.Batch), 13), displayJID(safe(cmp.Or(it.Chat, it.To))),
-			queueState(it), fmt.Sprint(it.Attempts), fit(safe(it.Actor), 11), due, styleErr.Render(safe(it.Error)))
+			queueType(it), queueState(it), fmt.Sprint(it.Attempts), fit(safe(it.Actor), 11), due, styleErr.Render(safe(it.Error)))
 		lines = append(lines, m.row(line, i == m.queueSel))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// queueType is an item's type and, for a file, its size; never the file's name.
+func queueType(it store.OutboxItem) string {
+	if it.FileKind == "" {
+		return styleDim.Render("text")
+	}
+	return safe(it.FileKind) + styleDim.Render(" "+byteSize(it.FileSize))
+}
+
+// byteSize shows a size in B, KB, MB or GB (powers of 1024), one decimal from MB up.
+func byteSize(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%d KB", n>>10)
+	}
+	return fmt.Sprintf("%d B", n)
 }
 
 func (m *model) viewConfirmCancelBatch() string {

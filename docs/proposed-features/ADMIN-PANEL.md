@@ -139,7 +139,7 @@ whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 | Action | Written by | `detail` |
 |---|---|---|
 | `send` | `Bot.SendText` | `text, N chars` |
-| `send_file` | `Bot.SendFile` | `<file name>, N bytes` |
+| `send_file` | `Bot.SendFile`; the queue worker for a queued file | `<file name>, N bytes`; from the queue `<kind>, N bytes, queue #<id>`, without the name |
 | `react` | `Bot.React` | `<emoji> on <id>` |
 | `edit` | `Bot.Edit` | message id |
 | `delete` | `Bot.Delete` | message id |
@@ -155,6 +155,9 @@ whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 | `alert_test` | `POST /alerts/test` | the backend (`gotify`) |
 | `queue` | `Bot.Enqueue`: `POST /queue`, MCP `schedule_message` | `N messages` (target = batch) |
 | `queue_cancel` | `Bot.CancelQueued`: `DELETE /queue`, `DELETE /queue/{id}`, MCP `cancel_scheduled` | `N canceled` (target = batch or `#id`) |
+| `queue_file` | `Bot.AddQueueFile`: `POST /queue/files` | `<kind>, N bytes`, plus `, already uploaded` for a repeat; never the name (target = file id) |
+| `queue_file_delete` | `Bot.DeleteQueueFile`: `DELETE /queue/files/{id}` | `<kind>, N bytes` (target = file id) |
+| `queue_files_wipe` | logout (`wame logout`, `POST /logout`, or WhatsApp logging the device out) | `N files`; only when there was something to delete |
 | `optout_add` | `POST /optouts`; an incoming opt-out keyword (actor `whatsapp`) | `added` / `already listed`, or `keyword STOP` (target = chat) |
 | `optout_remove` | `DELETE /optouts/{chat}` | (target = chat) |
 | `contact_set` | `Bot.SetContact` / `Bot.PatchContact`: `PUT`/`PATCH /contacts/{number}`, TUI `/name`, `/tag` | changed field names (`name, tags`) or `no change`, never values (target = chat) |

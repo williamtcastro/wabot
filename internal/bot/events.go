@@ -220,4 +220,5 @@ func (b *Bot) wipeContacts(actor string) {
 	if err == nil {
 		b.namesChanged()
 	}
+	b.wipeQueueFiles(actor)
 }

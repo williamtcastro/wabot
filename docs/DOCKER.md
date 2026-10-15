@@ -207,6 +207,14 @@ address Prometheus can reach (a token is required either way). Useful alert rule
 `wame_connected == 0` for a few minutes, `increase(wame_webhook_failed_total[15m]) > 0`,
 `wame_queue_cooldown == 1`.
 
+## Queue files
+
+Files uploaded for the [send queue](QUEUE.md#files) are kept in `/data/outbox/` (directory `0700`,
+files `0600`, named by random ids), next to the database, until they are sent or pruned. They sit
+there unencrypted, so treat `/data` accordingly. `wame backup` copies the database only; the files
+aren't in a backup, and after a restore the queued items that need one fail with "file is gone".
+`wame logout` removes the whole directory.
+
 ## Moving an existing database in
 
 Stop whatever uses it, and copy `wame.db` with its `-wal` and `-shm` files if they exist.
@@ -236,7 +244,7 @@ docker cp wame:/data/backups/wame-20261013-093005.db .  # take a copy off the vo
 
 `docker exec` runs as the container's user (uid 65532, or your `--user`), which is the one that owns
 `/data`, so the backup folder can live there; it's created `0700` on the first run and each copy is
-`0600`. `WAME_DB` is already set in the image, so there's no `-db` to pass. Copying `wame.db` with
+`0600`. `WAME_DB` is already set in the image, so there's no `-db` to pass. The backup copies the database only, not `/data/outbox/` (see [Queue files](#queue-files)). Copying `wame.db` with
 `cp` or `tar` while the server runs can catch it halfway through a write; `wame backup` can't.
 
 For a nightly copy, run the same `docker exec` line from the host's cron or a systemd timer, with
