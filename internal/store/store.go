@@ -365,6 +365,12 @@ func (s *Store) relinkLIDs() {
 		// A cache row is a copy of what WhatsApp said; when the phone JID already has one, the @lid copy goes.
 		strings.ReplaceAll(`UPDATE OR IGNORE wame_contact_cache SET chat = `+pn+` WHERE chat`+mapped, "chat", "jid"),
 		strings.ReplaceAll(`DELETE FROM wame_contact_cache WHERE chat`+mapped, "chat", "jid"),
+		strings.ReplaceAll(`INSERT INTO wame_group_members (group_jid, member, role, first_seen, last_seen)
+			SELECT group_jid, `+pn+`, role, first_seen, last_seen FROM wame_group_members WHERE chat`+mapped+` ORDER BY last_seen
+			ON CONFLICT (group_jid, member) DO UPDATE SET first_seen = MIN(first_seen, excluded.first_seen),
+				role = CASE WHEN excluded.last_seen >= last_seen THEN excluded.role ELSE role END,
+				last_seen = MAX(last_seen, excluded.last_seen)`, "chat", "member"),
+		strings.ReplaceAll(`DELETE FROM wame_group_members WHERE chat`+mapped, "chat", "member"),
 	} {
 		if _, err := tx.Exec(stmt); err != nil {
 			return

@@ -203,6 +203,7 @@ func (s *Store) SaveGroups(groups []Group) error {
 
 // GroupsWith lists the cached groups any of keys is a member of, by name.
 func (s *Store) GroupsWith(keys ...string) ([]GroupRef, error) {
+	s.relinkLIDs()
 	return groupsWith(s.db, keys)
 }
 

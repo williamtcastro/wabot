@@ -232,3 +232,38 @@ func TestContactStats(t *testing.T) {
 		t.Fatalf("empty = %+v, %v", empty, err)
 	}
 }
+
+func TestGroupMembersRelink(t *testing.T) {
+	s := openStore(t)
+	if _, err := s.db.Exec(`CREATE TABLE whatsmeow_lid_map (lid TEXT PRIMARY KEY, pn TEXT UNIQUE NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveGroups([]Group{
+		{JID: family, Name: "Family", Members: []GroupMember{{JID: marialid, Role: RoleAdmin}}},
+		{JID: work, Name: "Work", Members: []GroupMember{{JID: marialid}, {JID: maria, Role: RoleSuperAdmin}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE wame_group_members SET first_seen = 5 WHERE group_jid = ? AND member = ?`, work, marialid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO whatsmeow_lid_map VALUES ('100000000000001', '5511999999999')`); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := s.GroupsWith(maria)
+	if err != nil || len(groups) != 2 {
+		t.Fatalf("after relink maria is in %+v (%v)", groups, err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM wame_group_members WHERE member = ?`, marialid).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("@lid rows left: %d (%v)", n, err)
+	}
+	var first int64
+	if err := s.db.QueryRow(`SELECT first_seen FROM wame_group_members WHERE group_jid = ? AND member = ?`, work, maria).Scan(&first); err != nil || first != 5 {
+		t.Errorf("merged first_seen = %d (%v), want the older 5", first, err)
+	}
+	var role string
+	if err := s.db.QueryRow(`SELECT role FROM wame_group_members WHERE group_jid = ? AND member = ?`, family, maria).Scan(&role); err != nil || role != RoleAdmin {
+		t.Errorf("moved role = %q, %v", role, err)
+	}
+}
