@@ -1,9 +1,8 @@
 # Contacts: your own list and a profile per person (proposal)
 
-> **Deferred proposal.** Not built. Today `GET /contacts` reads whatsmeow's address book
-> (`whatsmeow_contacts`, synced from the phone, plus push names), read-only, and restricted tokens
-> get 403. See the [list of proposals](README.md). This replaces the two contact entries that were
-> in [BACKLOG.md](BACKLOG.md).
+> **Phases 1 and 2 are built** (each phase ends with an "As built" list of where the code differs
+> from this plan); phases 3 and 4 are still proposals. See the [list of proposals](README.md). This
+> replaced the two contact entries that were in [BACKLOG.md](BACKLOG.md).
 
 ## Goals
 
@@ -138,10 +137,11 @@ DELETE FROM wame_contact_cache WHERE jid <mapped>;   -- a cache copy, losing it 
 
   (`<pn>` and `<mapped>` are the existing `pn` / `mapped` fragments, with `chat` replaced by `jid`.)
   `SetContact` calls `relinkLater` for `@lid` keys, like `AddOptOut`.
-- **Retention.** `wame_contacts` rows live until deleted. `wame_contact_cache` rows not refreshed in
-  90 days are pruned (`Store.PruneContactCache(before)`, called from the existing daily
-  `pruneOutbox` step), and the whole cache is cleared on `events.LoggedOut` (it describes what one
-  account could see). Both tables are in `wame backup` like everything else.
+- **Retention.** `wame_contacts` rows live until deleted or until logout. `wame_contact_cache` rows
+  not refreshed in 90 days are pruned (`Store.PruneContactCache(before)`, called from the existing
+  daily `pruneOutbox` step). Logout (`wame logout`, `POST /logout`, or the phone unlinking the
+  device) deletes own contacts, the cache and group members in one transaction (see Decision 2).
+  Both tables are in `wame backup` like everything else.
 - **Groups in common** need members: add `members TEXT NOT NULL DEFAULT '[]'` to `wame_groups`
   (through `addColumns` in `migrateState`), filled by `refreshGroups` with the phone JIDs of all
   participants (`PhoneJID` of `JID`, `PhoneNumber`, `LID`, like admins today).
@@ -530,8 +530,11 @@ LIMIT 1;
 - **Size caps:** name 100 runes, notes 2000, 20 tags × 32 chars, language 16, time zone 64, about
   700, business JSON 8 KB, error 200; bodies 64 KB for `PUT`/`PATCH`, 4 MB / 5000 rows for import
   (413 above). At most 100,000 own rows (400 beyond), so the table can't be filled by a script.
-- **Logout:** the cache is cleared on `events.LoggedOut`; own contacts stay (they're your data, not
-  the account's). Whether to offer a wipe is an open question.
+- **Logout wipes contact data:** `Bot.Logout` (CLI and API) and `events.LoggedOut` both call
+  `Store.ClearContactState`, which deletes your own contacts, the WhatsApp profile cache and
+  `wame_group_members` in one transaction, and Bot drops its in-memory names. Messages, group
+  names and the audit log stay. A disconnect or restart while still logged in keeps everything.
+  Audited as `contacts_wipe` (`N contacts`, never names). Run `wame backup` first to keep your notes.
 - **Export:** `wame backup` covers both tables; `GET /contacts/export` gives a CSV to admins.
 - **Templates** never use push names; tag expansion doesn't reveal sizes to restricted tokens;
   `skip_sent` doesn't reveal other tokens' sends.
@@ -606,6 +609,55 @@ Risks: whatsmeow call shapes change (keep them behind the interface); `GetUserIn
 mappings (good, but relink must be triggered: call `relinkLater`); `wame_groups.members` grows the
 table (a few hundred KB).
 
+**As built, where it differs from the above:**
+
+- **The LID is part of the profile** (`lid`, empty when unknown). It comes from whatsmeow's local
+  LID map first (never a lookup, so every profile read shows it), then from the `lid` column of the
+  cache row (what `GetUserInfo` returned on the last refresh). A profile opened by an `@lid` key
+  answers the phone JID too when the mapping is known. MCP's `contact_profile` returns it at the top
+  level next to `chat` and `phone` (an identifier, cleaned like message ids), not under `untrusted`.
+- **Group members live in a pivot table**, not a JSON column on `wame_groups`:
+  `wame_group_members (group_jid, member, role, first_seen, last_seen)`, primary key
+  `(group_jid, member)`, indexed on `member`. `role` is `member`, `admin` or `superadmin`.
+  `refreshGroups` passes every participant's key through `PhoneJID` (an `@lid` stays until its
+  number is known). `SaveGroups` upserts the current members of each refreshed group (keeping
+  `first_seen`, updating `role` and `last_seen`) and deletes the ones that left, in the same
+  transaction. `relinkLIDs` moves `@lid` member rows onto the phone JID like other tables, merging
+  with a phone row already there (older `first_seen`, newer `last_seen` and its role).
+  `GroupsWith(keys...)` is an indexed join. The `admins` column stays as it was.
+- The cache table is `wame_contact_cache` as planned, plus a `lid` column. `updated_at` is the last
+  refresh only; notification updates (`CacheAbout`, `CachePicture`, `CacheVerifiedName`) don't
+  touch it, so the 90-day prune counts from the last refresh. An older `events.UserAbout` never
+  replaces a newer about.
+- `ProfileOptions` has a third level, `Details` (about, verified name, language, time zone and
+  activity, without notes, picture, business, queue, opt-out or tokens): what `contact_profile`
+  uses. `Refresh` needs `Full`.
+- A refresh always asks `IsOnWhatsApp` (numbers only) and `GetUserInfo`; a number WhatsApp doesn't
+  know stops there (1 lookup) and clears the cached profile. The picture is fetched only when
+  `GetUserInfo` reports a picture id that changed or whose URL is older than 6 hours; an empty id
+  is stored as "none" (WhatsApp may hide it there too, but telling the two apart would cost a
+  lookup every time). The business profile is fetched on every refresh of a verified business.
+  Its kept fields are address, email, categories (≤ 10), profile options (≤ 10) and the hours'
+  time zone; the opening hours are left out.
+- The 5-minute guard is in memory (it resets on restart, which can't be used to spend the budget
+  faster than the lookup limiter allows). A refresh refused by the budget before its first call
+  frees the slot. A WhatsApp error mid-refresh stores what was learned plus the cleaned error and
+  answers 200 with `refreshed: false`; the audit entry carries the error.
+- The cached verified name feeds the profile's `names` only (business step, when the address book
+  has no business name). `NamesOf` doesn't read the cache, so `/chats` stays free of per-chat
+  queries.
+- `GET /contacts/{number}` answers the profile; `PUT` and `PATCH` still answer the phase 1
+  `ContactView` (the panel reloads the profile after a write). The full profile and `refresh=1`
+  need an admin token **without** a chat allowlist; a restricted admin token (which `auth.Issue`
+  never mints, but the check doesn't rely on that) gets the basic view and a fixed 403 on refresh,
+  checked before `Bot` is called. The basic view also carries `lid` and `whatsapp.stale`.
+- MCP's `contact_profile` doesn't use `chat()` (which canonicalizes on WhatsApp for unrestricted
+  callers): `personChat` checks the allowlist locally for restricted callers and passes everyone
+  else's input to `Profile`, which parses it without a lookup. Tags go under `untrusted` like
+  names; restricted callers see only the groups in common that their allowlist allows.
+- "Tokens that can see the chat" compares each restricted token's allowlist with the person's keys
+  locally; it never expands an allowlist, so opening a profile never asks WhatsApp.
+
 ### Phase 3: tags, templates and dedupe in the queue (≈ 1,000 lines)
 
 | Agent | Files | Work |
@@ -634,8 +686,9 @@ photo previews.
 ## Decisions (2026-10-13)
 
 1. **Writes are admin only.** No separate `contacts` scope; a sync integration uses an admin token.
-2. **Logout keeps your own contacts**; only the WhatsApp profile cache is cleared. An admin
-   "delete all contacts" route exists for when you want them gone.
+2. ~~Logout keeps your own contacts~~ **Reversed (2026-10-15): logout wipes all contact data**:
+   own contacts (tags, notes, language, time zone), the WhatsApp profile cache and group members.
+   Messages and the audit log are kept. `wame backup` before logging out keeps a copy.
 3. **`-skip-sent` counts every message you sent**, not only queued ones: it uses `wame_messages`
    (from_me), so the phone, `/send` and the TUI count too, and the window may be longer than the
    queue's 7 days (cap it, e.g. 90 days).
