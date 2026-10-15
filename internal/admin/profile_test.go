@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/williamtcastro/wame/internal/api"
@@ -83,15 +86,142 @@ func TestContactsRefresh(t *testing.T) {
 		t.Fatalf("a server that ignores refresh=1: %q", m.notice)
 	}
 	m.Update(contactRefreshMsg{seq: m.contactViewReq.start(), jid: maria, err: &APIError{Code: http.StatusForbidden}})
-	if !m.noticeErr || m.notice != contactsRefreshScope || !m.contactsReadOnly() {
-		t.Fatalf("403: %q", m.notice)
-	}
-	m.notice = ""
-	press(m, "W")
-	if m.notice != contactsRefreshScope {
-		t.Fatalf("W on a read-only tab: %q", m.notice)
+	if !m.noticeErr || m.notice != contactsRefreshScope || m.contactsReadOnly() {
+		t.Fatalf("a 403 on W must say so without turning the tab read-only: %q, read-only %v", m.notice, m.contactsReadOnly())
 	}
 }
+
+func TestContactsRefreshErrorAfterAMoveLoadsTheCard(t *testing.T) {
+	b, c := contactsServer(t, false)
+	seedContacts(t, b)
+	m := newTestModel(t, Options{Client: c})
+	press(m, "9")
+	selectContact(t, m, john)
+	_, load := m.Update(keyMsg("j"))
+	press(m, "W")
+	run(m, load)
+	if view := flat(m.View()); strings.Contains(view, "loading") || !strings.Contains(view, "prefers mornings") {
+		t.Fatalf("the card is stuck after a failed refresh overtook its load:\n%s", view)
+	}
+}
+
+func TestContactsRefreshDoesNotRepeatAnOldError(t *testing.T) {
+	_, c := contactsServer(t, false)
+	m := newTestModel(t, Options{Client: c})
+	m.tab = tabContacts
+	m.Update(contactsMsg{seq: m.contactsReq.start(), list: []bot.Contact{{JID: maria, Names: bot.Names{Display: "Maria"}}}})
+	no, sent := false, time.Now()
+	answer := func(errAt time.Time) contactRefreshMsg {
+		return contactRefreshMsg{seq: m.contactViewReq.start(), jid: maria, label: "Maria", sent: sent, p: bot.Profile{
+			JID: maria, OptedOut: &no, Refreshed: &no, NextRefreshAt: sent.Add(4 * time.Minute),
+			WhatsApp: bot.ProfileWhatsApp{Error: "timed out", ErrorAt: errAt},
+		}}
+	}
+	m.Update(answer(sent.Add(-time.Minute)))
+	if strings.Contains(m.notice, "timed out") || !strings.Contains(m.notice, "every 5 minutes") {
+		t.Fatalf("an error from the last refresh shown as new: %q", m.notice)
+	}
+	m.Update(answer(sent.Add(time.Second)))
+	if !m.noticeErr || !strings.Contains(m.notice, "WhatsApp answered with an error: timed out") {
+		t.Fatalf("this refresh's error: %q", m.notice)
+	}
+}
+
+func TestContactsCardTitleAndQueueLabelStayNarrow(t *testing.T) {
+	m := newTestModel(t, Options{})
+	m.tab = tabContacts
+	long := strings.Repeat("Maria", 20)
+	m.Update(contactsMsg{seq: m.contactsReq.start(), list: []bot.Contact{{JID: maria, Phone: "+5511999999999", Names: bot.Names{Display: long}}}})
+	no := false
+	m.Update(contactViewMsg{seq: m.contactViewReq.start(), jid: maria, v: bot.Profile{
+		JID: maria, Phone: "+5511999999999", Names: bot.Names{Display: long}, OptedOut: &no,
+		Queue: &bot.ProfileQueue{Window: strings.Repeat("w", 40)},
+	}})
+	lines := strings.Split(ansi.Strip(m.contactDetail(60, 40)), "\n")
+	if !strings.Contains(lines[1], "…") || !strings.Contains(lines[2], "Number") {
+		t.Fatalf("the title wraps:\n%s", strings.Join(lines, "\n"))
+	}
+	if i := strings.Index(lines[2], "+5511999999999"); i < 0 || i > 20 {
+		t.Fatalf("the queue window widens the labels:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestContactsProfileRowLeavingTheFilterMovesTheCard(t *testing.T) {
+	b, c := contactsServer(t, false)
+	seedContacts(t, b)
+	m := newTestModel(t, Options{Client: c})
+	m.tab = tabContacts
+	m.Update(contactsMsg{seq: m.contactsReq.start(), list: []bot.Contact{
+		{JID: maria, Names: bot.Names{Display: "Maria"}, Tags: []string{"clients"}},
+		{JID: john, Names: bot.Names{Display: "John"}, Tags: []string{"clients"}},
+	}})
+	m.contactQuery, m.contactSel = "clients", 0
+	_, cmd := m.Update(contactViewMsg{seq: m.contactViewReq.start(), jid: maria, v: bot.Profile{JID: maria, Names: bot.Names{Display: "Maria"}}})
+	if got, _ := m.selectedContact(); got.JID != john || cmd == nil {
+		t.Fatalf("the card wasn't loaded for the person now selected (%s), cmd %v", got.JID, cmd != nil)
+	}
+	run(m, cmd)
+	if m.contactView.JID != john {
+		t.Fatalf("card for %q", m.contactView.JID)
+	}
+}
+
+// A phase-1 server answers GET /contacts/{number} with a bot.ContactView.
+func TestContactsPhaseOneServerKeepsNotes(t *testing.T) {
+	b, err := bot.New(context.Background(), filepath.Join(t.TempDir(), "wame.db"), waLog.Noop, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.InitSettings(bot.Settings{Rate: 20, ChatGap: time.Second, MaxWait: 30 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	seedContacts(t, b)
+	h := api.NewHandler(b, &auth.Authenticator{Store: b.Store, Owner: owner}, "test")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		number, ok := strings.CutPrefix(r.URL.Path, "/contacts/")
+		if !ok || number == "tags" || r.Method != http.MethodGet {
+			h.ServeHTTP(w, r)
+			return
+		}
+		v, err := b.ContactOf(r.Context(), number)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(v)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(srv.URL, owner, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newTestModel(t, Options{Client: c})
+	press(m, "9")
+	selectContact(t, m, maria)
+	if view := flat(m.View()); !strings.Contains(view, "prefers mornings") || !strings.Contains(view, "update wame on the server") || strings.Contains(view, "admin scope") {
+		t.Fatalf("a phase-1 card:\n%s", view)
+	}
+	press(m, "e")
+	if len(m.form) != 3 || m.form[2].Value() != "prefers mornings" {
+		t.Fatalf("notes not editable on a phase-1 server: %d fields", len(m.form))
+	}
+}
+
+func TestClientReadsAProfileUnderTheJSONCap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"jid":"5511999999999@s.whatsapp.net","names":{"name":"Maria"},"pad":"`+strings.Repeat("x", 17<<20)+`"}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := NewClient(srv.URL, owner, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Contact(t.Context(), "5511999999999"); err == nil {
+		t.Fatal("a 17 MB profile answer was read")
+	}
+}
+
+func keyMsg(k string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)} }
 
 func TestContactsRefreshNeedsAdmin(t *testing.T) {
 	b, c := contactsServer(t, false)

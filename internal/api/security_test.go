@@ -150,6 +150,46 @@ func TestRestrictedContacts(t *testing.T) {
 	}
 }
 
+// A refresh spends lookups from a GET, so a page on another site or localhost port must not be able
+// to trigger one with an <img>, least of all in token-less mode.
+func TestContactRefreshRefusesOtherOrigins(t *testing.T) {
+	b := newTestBot(t)
+	tokenless := newHandler(b, "")
+	lookups := func() bot.LimiterStats { s := b.Lookups.Stats(); s.NextFree = time.Time{}; return s }
+	before := lookups()
+	const path = "/contacts/5511999999999?refresh=1"
+	for _, hdr := range []map[string]string{
+		{"Sec-Fetch-Site": "same-site"},
+		{"Referer": "http://127.0.0.1:3000/page"},
+		{"Referer": "http://localhost:8080/page"},
+		{"Referer": "::bad"},
+	} {
+		if w := do(tokenless, "GET", path, hdr); w.Code != http.StatusForbidden || errorOf(w) != errRefreshCrossSite {
+			t.Errorf("token-less refresh with %v = %d %s; want the fixed 403", hdr, w.Code, w.Body)
+		}
+	}
+	for _, hdr := range []map[string]string{nil, {"Sec-Fetch-Site": "same-origin"}, {"Sec-Fetch-Site": "none"}, {"Referer": "http://127.0.0.1:8080/docs"}} {
+		if w := do(tokenless, "GET", path, hdr); w.Code != http.StatusBadGateway || !strings.Contains(errorOf(w), "not logged in") {
+			t.Errorf("same-origin refresh with %v = %d %s; want the normal path (502 not logged in)", hdr, w.Code, w.Body)
+		}
+	}
+
+	admin := issue(t, b, "boss", []auth.Scope{auth.Admin}, nil, 0)
+	withToken := newHandler(b, "")
+	for _, hdr := range []map[string]string{{"Origin": "http://127.0.0.1:3000"}, {"Sec-Fetch-Site": "cross-site"}} {
+		hdr["Authorization"] = "Bearer " + admin
+		if w := do(withToken, "GET", path, hdr); w.Code != http.StatusForbidden || errorOf(w) != errRefreshCrossSite {
+			t.Errorf("token refresh with %v = %d %s; want the fixed 403", hdr, w.Code, w.Body)
+		}
+	}
+	if w := do(withToken, "GET", "/contacts/5511999999999", map[string]string{"Authorization": "Bearer " + admin, "Sec-Fetch-Site": "cross-site"}); w.Code != 200 {
+		t.Errorf("a plain GET with a token isn't affected: %d %s", w.Code, w.Body)
+	}
+	if after := lookups(); after != before {
+		t.Fatalf("refused refreshes spent lookups: %+v -> %+v", before, after)
+	}
+}
+
 // restrictedAdmin stores an admin token limited to chats, which auth.Issue refuses to create, to
 // check that the API still treats such a row as restricted.
 func restrictedAdmin(t *testing.T, b *bot.Bot, chats ...string) map[string]string {

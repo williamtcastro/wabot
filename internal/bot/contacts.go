@@ -172,6 +172,7 @@ func (b *Bot) refreshGroups(ctx context.Context) {
 		b.mu.Unlock()
 		close(done)
 	}()
+	wipes := b.wipes.Load()
 	joined, err := b.Client.GetJoinedGroups(ctx)
 	if err != nil {
 		b.Log.Warn("refresh groups failed", "err", err)
@@ -184,8 +185,8 @@ func (b *Bot) refreshGroups(ctx context.Context) {
 		var admins []string
 		members := make([]store.GroupMember, 0, len(j.Participants))
 		for _, p := range j.Participants {
-			if !p.JID.IsEmpty() {
-				members = append(members, store.GroupMember{JID: b.PhoneJID(p.JID.ToNonAD()).String(), Role: participantRole(p)})
+			if member := memberJID(b.PhoneJID(p.JID.ToNonAD()), p.PhoneNumber); !member.IsEmpty() {
+				members = append(members, store.GroupMember{JID: member.String(), Role: participantRole(p)})
 			}
 			if p.IsAdmin || p.IsSuperAdmin {
 				for _, id := range []types.JID{p.JID, p.PhoneNumber, p.LID} {
@@ -200,13 +201,26 @@ func (b *Bot) refreshGroups(ctx context.Context) {
 		all[j.JID.String()] = info
 		cached = append(cached, store.Group{JID: j.JID.String(), Name: j.Name, Admins: admins, Members: members})
 	}
-	if err := b.Store.SaveGroups(cached); err != nil {
-		b.Log.Warn("cache groups failed", "err", err)
+	b.contactsMu.Lock()
+	if b.wipes.Load() == wipes {
+		if err := b.Store.SaveJoinedGroups(cached); err != nil {
+			b.Log.Warn("cache groups failed", "err", err)
+		}
 	}
+	b.contactsMu.Unlock()
 	b.mu.Lock()
 	b.groups, b.groupsAt = all, time.Now()
 	b.mu.Unlock()
 	b.publish(NamesChanged{})
+}
+
+// memberJID is a participant's phone JID when known: the @lid WhatsApp reported is kept only when
+// neither the LID map nor the participant carries the number.
+func memberJID(jid, phone types.JID) types.JID {
+	if jid.Server == types.HiddenUserServer && !phone.IsEmpty() {
+		return phone.ToNonAD()
+	}
+	return jid
 }
 
 func participantRole(p types.GroupParticipant) string {

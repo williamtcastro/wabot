@@ -72,10 +72,22 @@ func fromMillis(ms int64) time.Time {
 	return time.UnixMilli(ms)
 }
 
-// PutCachedProfile stores what a refresh learned, replacing the row under c.JID.
-func (s *Store) PutCachedProfile(c CachedProfile) error {
+// PutCachedProfile stores what a refresh learned, replacing the row under c.JID and deleting the
+// rows under replaces (the person's other keys), so an older copy can't hide the new one.
+func (s *Store) PutCachedProfile(c CachedProfile, replaces ...string) error {
 	s.relinkLater(Message{Chat: c.JID})
-	_, err := s.db.Exec(`INSERT INTO wame_contact_cache (`+cacheCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if len(replaces) > 0 {
+		if _, err := tx.Exec(`DELETE FROM wame_contact_cache WHERE jid <> ? AND jid IN (`+placeholders(len(replaces))+`)`,
+			append([]any{c.JID}, anys(replaces)...)...); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(`INSERT INTO wame_contact_cache (`+cacheCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (jid) DO UPDATE SET on_whatsapp = excluded.on_whatsapp, about = excluded.about,
 			about_at = excluded.about_at, verified_name = excluded.verified_name, verified_level = excluded.verified_level,
 			business = excluded.business, picture_id = excluded.picture_id, picture_url = excluded.picture_url,
@@ -85,7 +97,10 @@ func (s *Store) PutCachedProfile(c CachedProfile) error {
 		c.JID, c.OnWhatsApp, c.About, millis(c.AboutAt), c.VerifiedName, c.VerifiedLevel, c.Business, c.PictureID,
 		c.PictureURL, c.LID, millis(c.InfoAt), millis(c.PictureAt), millis(c.BusinessAt), c.Error, millis(c.ErrorAt),
 		time.Now().UnixMilli())
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CachedProfileOf returns the cache row under the first of keys that has one, or ErrNotFound.

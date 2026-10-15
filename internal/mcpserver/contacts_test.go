@@ -28,8 +28,8 @@ func profileBot(t *testing.T) *bot.Bot {
 	t.Helper()
 	b := newBot(t)
 	ctx := t.Context()
-	name, notes, lang, tags := "Maria‮", "prefers mornings", "pt-BR", []string{"clients", "vip"}
-	if _, err := b.PatchContact(ctx, "test", maria, bot.ContactInput{Name: &name, Notes: &notes, Language: &lang, Tags: &tags}); err != nil {
+	name, notes, lang, tz, tags := "Maria‮", "prefers mornings", "pt-BR", "America/Sao_Paulo", []string{"clients", "vip"}
+	if _, err := b.PatchContact(ctx, "test", maria, bot.ContactInput{Name: &name, Notes: &notes, Language: &lang, TimeZone: &tz, Tags: &tags}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
@@ -79,13 +79,13 @@ func TestContactProfile(t *testing.T) {
 		if isErr {
 			t.Fatalf("%s: %q", p.Name, text)
 		}
-		for _, secret := range []string{"mornings", "notes", "example.invalid", "1712345678", "business\"", "opted", "support-bot", "queue", "boom", "picture"} {
+		for _, secret := range []string{"mornings", "notes", "example.invalid", "1712345678", "business\"", "opted", "support-bot", "queue", "boom", "picture", "pt-BR", "Sao_Paulo", "language", "time_zone"} {
 			if strings.Contains(text, secret) {
 				t.Errorf("%s: contact_profile leaks %q: %s", p.Name, secret, text)
 			}
 		}
 		if out["chat"] != maria || out["phone"] != "+5511999999999" || out["lid"] != mariaLID || out["name_source"] != "own" ||
-			out["language"] != "pt-BR" || out["on_whatsapp"] != true || out["received"] != float64(1) || out["sent"] != float64(1) || out["note"] == "" {
+			out["on_whatsapp"] != true || out["received"] != float64(1) || out["sent"] != float64(1) || out["note"] == "" {
 			t.Fatalf("%s: top level = %v", p.Name, out)
 		}
 		for _, k := range []string{"name", "about", "tags", "verified_name", "groups_in_common"} {

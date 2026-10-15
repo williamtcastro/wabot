@@ -41,15 +41,19 @@ type (
 		err  error
 	}
 	contactViewMsg struct {
-		seq int
-		jid string
-		v   bot.Profile
-		err error
+		seq   int
+		jid   string
+		v     bot.Profile
+		shape profileShape
+		err   error
 	}
+	// sent is when the refresh was asked for, to tell a new WhatsApp error from an older one.
 	contactRefreshMsg struct {
 		seq        int
 		jid, label string
+		sent       time.Time
 		p          bot.Profile
+		shape      profileShape
 		err        error
 	}
 	// contactDoneMsg ends a write on the Contacts tab; missing is the notice for a 404.
@@ -112,8 +116,8 @@ func (m *model) loadContactView(jid string) tea.Cmd {
 	}
 	seq := m.contactViewReq.start()
 	return m.call(func(ctx context.Context, c *Client) tea.Msg {
-		v, err := c.Contact(ctx, jid)
-		return contactViewMsg{seq, jid, v, err}
+		v, shape, err := c.profile(ctx, jid, false)
+		return contactViewMsg{seq: seq, jid: jid, v: v, shape: shape, err: err}
 	})
 }
 
@@ -220,31 +224,34 @@ func (m *model) contactSelected() tea.Cmd {
 	return m.loadContactView(c.JID)
 }
 
-func (m *model) applyContactView(msg contactViewMsg) {
+func (m *model) applyContactView(msg contactViewMsg) tea.Cmd {
 	if !m.contactViewReq.done(msg.seq) {
-		return
+		return nil
 	}
-	m.showProfile(msg.jid, msg.v, msg.err)
+	return m.showProfile(msg.jid, msg.v, msg.shape, msg.err)
 }
 
 // showProfile puts a profile on the card if that person is still selected, and their names and
-// tags on their list row.
-func (m *model) showProfile(jid string, p bot.Profile, err error) {
+// tags on their list row. The new row may no longer match the filter, so the selection is checked
+// again.
+func (m *model) showProfile(jid string, p bot.Profile, shape profileShape, err error) tea.Cmd {
 	if c, ok := m.selectedContact(); !ok || c.JID != jid {
-		return
+		return nil
 	}
-	m.contactViewErr, m.contactNotes = err, ""
+	m.contactViewErr, m.contactNotes, m.contactShape = err, "", profileShape{}
 	if err != nil {
 		m.contactView = bot.Profile{JID: jid}
-		return
+		return nil
 	}
-	m.contactNotes = p.Own.Notes
+	m.contactNotes, m.contactShape = p.Own.Notes, shape
 	m.contactView = safeProfile(p)
 	m.contactView.JID = jid
 	if i := slices.IndexFunc(m.contacts, func(c bot.Contact) bool { return c.JID == jid }); i >= 0 {
 		v := m.contactView
 		m.contacts[i] = bot.Contact{JID: jid, Phone: v.Phone, Names: v.Names, Tags: v.Own.Tags}
 	}
+	m.contactSel = clamp(m.contactSel, len(m.visibleContacts()))
+	return m.contactSelected()
 }
 
 // refreshContact asks the server to ask WhatsApp about the person, then shows the answer.
@@ -253,13 +260,14 @@ func (m *model) refreshContact(c bot.Contact) tea.Cmd {
 	seq := m.contactViewReq.start()
 	m.setNotice("asking WhatsApp about "+label+" (2-4 lookups)…", false)
 	return m.call(func(ctx context.Context, c *Client) tea.Msg {
-		p, err := c.RefreshContact(ctx, jid)
-		return contactRefreshMsg{seq, jid, label, p, err}
+		sent := time.Now()
+		p, shape, err := c.profile(ctx, jid, true)
+		return contactRefreshMsg{seq: seq, jid: jid, label: label, sent: sent, p: p, shape: shape, err: err}
 	})
 }
 
-const profileRefreshEvery = 5 * time.Minute
-
+// applyContactRefresh says how a refresh went. A failed one still leaves a card: the refresh may
+// have overtaken the load of the person selected meanwhile, which was then dropped as older.
 func (m *model) applyContactRefresh(msg contactRefreshMsg) tea.Cmd {
 	fresh := m.contactViewReq.done(msg.seq)
 	next := ""
@@ -270,35 +278,30 @@ func (m *model) applyContactRefresh(msg contactRefreshMsg) tea.Cmd {
 	apiErr, _ := errors.AsType[*APIError](msg.err)
 	switch {
 	case isForbidden(msg.err):
-		m.contactDenied = true
 		m.setNotice(contactsRefreshScope, true)
-		return nil
 	case isNotFound(msg.err):
 		m.setNotice(contactsUpdate, true)
-		return nil
 	case apiErr != nil && apiErr.Code == http.StatusTooManyRequests:
 		retry := "later"
 		if apiErr.RetryAfter > 0 {
 			retry = "in " + apiErr.RetryAfter.String()
 		}
 		m.setNotice("not refreshed: the server's lookup budget is spent; try W again "+retry, true)
-		return nil
 	case msg.err != nil:
 		m.setNotice("not refreshed: "+msg.err.Error(), true)
-		return nil
 	case msg.p.Refreshed == nil:
 		m.setNotice("this server can't ask WhatsApp about contacts yet: update wame on it", true)
 	case *msg.p.Refreshed:
 		m.setNotice("refreshed "+msg.label+" from WhatsApp"+next, false)
-	case w.Error != "" && !msg.p.NextRefreshAt.IsZero() && !w.ErrorAt.Before(msg.p.NextRefreshAt.Add(-profileRefreshEvery-10*time.Second)):
+	case w.Error != "" && !w.ErrorAt.Before(msg.sent):
 		m.setNotice("WhatsApp answered with an error: "+w.Error+next, true)
 	default:
 		m.setNotice("not refreshed: one refresh per person every 5 minutes"+next, false)
 	}
-	if fresh {
-		m.showProfile(msg.jid, msg.p, nil)
+	if msg.err != nil || !fresh {
+		return m.contactSelected()
 	}
-	return m.loadAudit(false)
+	return tea.Batch(m.showProfile(msg.jid, msg.p, msg.shape, nil), m.loadAudit(false))
 }
 
 func (m *model) visibleContacts() []bot.Contact {
@@ -481,7 +484,7 @@ func (m *model) suggestTags() {
 
 func (m *model) startContactForm(c bot.Contact) {
 	f := contactForm{jid: c.JID, label: contactLabel(c), name: c.Own, tags: strings.Join(c.Tags, " ")}
-	if v := m.contactView; v.JID == c.JID && m.contactViewErr == nil && fullProfile(v) {
+	if v := m.contactView; v.JID == c.JID && m.contactViewErr == nil && m.contactShape.notes {
 		f.name, f.tags, f.notes = v.Names.Own, strings.Join(v.Own.Tags, " "), m.contactNotes
 		f.notesOK = true
 		if safe(f.notes) != f.notes {
@@ -682,7 +685,7 @@ func (m *model) applyContactDone(msg contactDoneMsg) tea.Cmd {
 
 // resetContactView drops the card, so the next one shown (and the edit form) is loaded fresh.
 func (m *model) resetContactView() {
-	m.contactView, m.contactViewErr, m.contactNotes = bot.Profile{}, nil, ""
+	m.contactView, m.contactViewErr, m.contactNotes, m.contactShape = bot.Profile{}, nil, "", profileShape{}
 }
 
 // The profile card's width: the list keeps the rest of the screen.
@@ -754,7 +757,7 @@ func (m *model) contactDetail(w, h int) string {
 	if len(body) > h-3 {
 		body = append(body[:max(h-4, 1)], styleDim.Render("…"))
 	}
-	return card(cmp.Or(c.Display, "Contact"), w, strings.Join(body, "\n"))
+	return card(fit(cmp.Or(c.Display, "Contact"), w-4), w, strings.Join(body, "\n"))
 }
 
 // profileRows lays out a profile already through safeProfile.
@@ -775,7 +778,7 @@ func (m *model) profileRows(v bot.Profile) [][2]string {
 	}
 	full := fullProfile(v)
 	o := v.Own
-	if full || o.Notes != "" {
+	if m.contactShape.notes || o.Notes != "" {
 		rows = append(rows, [2]string{"Notes", cmp.Or(o.Notes, none)})
 	}
 	if o.Language != "" || o.TimeZone != "" {
@@ -850,20 +853,23 @@ func (m *model) profileRows(v bot.Profile) [][2]string {
 		rows = append(rows, [2]string{"Groups", cmp.Or(strings.Join(groups, " · "), none)})
 	}
 	if q := v.Queue; q != nil {
-		text := none
+		window := fit(safe(cmp.Or(q.Window, "7d")), 8)
+		text := styleDim.Render("none in " + window)
 		if q.Total > 0 {
-			text = fmt.Sprintf("%d: %d open, %d sent, %d delivered, %d read, %d failed", q.Total, q.Open, q.Sent, q.Delivered, q.Read, q.Failed)
+			text = fmt.Sprintf("%d in %s: %d open, %d sent, %d delivered, %d read, %d failed", q.Total, window, q.Open, q.Sent, q.Delivered, q.Read, q.Failed)
 			if !q.LastAt.IsZero() {
 				text += styleDim.Render(", last " + stamp(q.LastAt, "2006-01-02 15:04"))
 			}
 		}
-		rows = append(rows, [2]string{"Queue " + safe(cmp.Or(q.Window, "7d")), text})
+		rows = append(rows, [2]string{"Queue", text})
 	}
 	if v.OptedOut != nil {
 		rows = append(rows, [2]string{"Opted out", map[bool]string{true: styleWarn.Render("yes: queued messages skip them"), false: "no"}[*v.OptedOut]})
 	}
 	if full {
 		rows = append(rows, [2]string{"Tokens", cmp.Or(strings.Join(v.Tokens, ", "), styleDim.Render("none limited to this chat"))})
+	} else if m.contactShape.old {
+		rows = append(rows, [2]string{"", styleWarn.Render("update wame on the server for the WhatsApp profile and activity")})
 	} else {
 		rows = append(rows, [2]string{"", styleDim.Render("notes, activity and the WhatsApp profile need the admin scope")})
 	}

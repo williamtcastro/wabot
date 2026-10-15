@@ -39,8 +39,8 @@ func (b *Bot) handle(evt any) {
 		})
 		b.namesChanged()
 	case *events.Picture:
-		id := capRunes(v.PictureID, maxPictureID)
-		if v.Remove {
+		id := capRunes(cleanName(v.PictureID), maxPictureID)
+		if v.Remove || id == store.PictureHidden {
 			id = ""
 		}
 		b.cacheEvent(v.JID, func(jid string) (bool, error) { return b.Store.CachePicture(jid, id) })
@@ -207,9 +207,12 @@ func (b *Bot) cacheEvent(from types.JID, update func(jid string) (bool, error)) 
 // audited as contacts_wipe with the number of own contacts.
 func (b *Bot) wipeContacts(actor string) {
 	b.contactsMu.Lock()
+	b.wipes.Add(1)
 	n, err := b.Store.ClearContactState()
 	b.mu.Lock()
 	b.own, b.ownLIDs, b.refreshes = nil, 0, nil
+	clear(b.jids)
+	b.allowlists = nil
 	b.mu.Unlock()
 	b.contactsMu.Unlock()
 	b.Audit(actor, "contacts_wipe", "", fmt.Sprintf("%d contacts", n), err)

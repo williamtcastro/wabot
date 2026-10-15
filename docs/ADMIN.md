@@ -87,7 +87,9 @@ Nothing is ever written to WhatsApp or to the phone.
   admin only). It costs 2 to 4 lookups from the server's lookup budget and runs at most once per
   person every 5 minutes: a second `W` inside that says when the next one may run. Over the budget
   the server answers 429 and the panel says when to try again; while the server isn't logged in,
-  it says so. The card shows the answer.
+  it says so. The card shows the answer. A WhatsApp error is reported as new only when WhatsApp
+  gave it to this `W`. A server from before profiles shows names, tags and notes (still editable)
+  and asks for an update for the rest.
 - **Delete** (`x`): removes your name, tags, notes, language and time zone for the person marked
   when you pressed it; the address book and WhatsApp names stay.
 - **Import** (`I`): a local CSV file with a `number` column and any of `name`, `tags`, `notes`,

@@ -144,7 +144,8 @@ claude mcp add --transport http wame http://127.0.0.1:8080/mcp --header "Authori
 
 Without a running server, `claude mcp add wame -- wame mcp` uses stdio. It's read-only unless you
 pass `-allow-send`. The tools are `status`, `list_chats`, `read_messages`, `search_messages`,
-`find_contact`, `send_message`, `react` and `mark_read`. Each one goes through the same scopes,
+`find_contact`, `contact_profile`, `send_message`, `react`, `mark_read`, `schedule_message`,
+`list_scheduled` and `cancel_scheduled`. Each one goes through the same scopes,
 allowlists, rate limits and audit log as the API. Setup for Claude Desktop and other clients:
 [docs/MCP.md](docs/MCP.md).
 

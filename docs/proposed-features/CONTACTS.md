@@ -532,8 +532,11 @@ LIMIT 1;
   (413 above). At most 100,000 own rows (400 beyond), so the table can't be filled by a script.
 - **Logout wipes contact data:** `Bot.Logout` (CLI and API) and `events.LoggedOut` both call
   `Store.ClearContactState`, which deletes your own contacts, the WhatsApp profile cache and
-  `wame_group_members` in one transaction, and Bot drops its in-memory names. Messages, group
-  names and the audit log stay. A disconnect or restart while still logged in keeps everything.
+  `wame_group_members` in one transaction, and Bot drops its in-memory names, refresh slots and
+  resolved numbers. Messages, group names and admin lists (`wame_groups`), opt-outs and the audit
+  log stay. A disconnect or restart while still logged in keeps everything. A profile refresh or
+  group refresh still in flight when the wipe runs writes nothing (a wipe counter checked under
+  the contacts lock).
   Audited as `contacts_wipe` (`N contacts`, never names). Run `wame backup` first to keep your notes.
 - **Export:** `wame backup` covers both tables; `GET /contacts/export` gives a CSV to admins.
 - **Templates** never use push names; tag expansion doesn't reveal sizes to restricted tokens;
@@ -619,10 +622,11 @@ table (a few hundred KB).
 - **Group members live in a pivot table**, not a JSON column on `wame_groups`:
   `wame_group_members (group_jid, member, role, first_seen, last_seen)`, primary key
   `(group_jid, member)`, indexed on `member`. `role` is `member`, `admin` or `superadmin`.
-  `refreshGroups` passes every participant's key through `PhoneJID` (an `@lid` stays until its
-  number is known). `SaveGroups` upserts the current members of each refreshed group (keeping
-  `first_seen`, updating `role` and `last_seen`) and deletes the ones that left, in the same
-  transaction. `relinkLIDs` moves `@lid` member rows onto the phone JID like other tables, merging
+  `refreshGroups` stores each participant's phone JID (through `PhoneJID`, or the participant's
+  own phone number); an `@lid` stays only until its number is known. `SaveGroups` upserts the
+  current members of each refreshed group (keeping `first_seen`, updating `role` and `last_seen`)
+  and deletes the ones that left, in the same transaction; `SaveJoinedGroups` (what
+  `refreshGroups` calls with the full list) also deletes the members of groups the account left. `relinkLIDs` moves `@lid` member rows onto the phone JID like other tables, merging
   with a phone row already there (older `first_seen`, newer `last_seen` and its role).
   `GroupsWith(keys...)` is an indexed join. The `admins` column stays as it was.
 - The cache table is `wame_contact_cache` as planned, plus a `lid` column. `updated_at` is the last
@@ -631,17 +635,23 @@ table (a few hundred KB).
   replaces a newer about.
 - `ProfileOptions` has a third level, `Details` (about, verified name, language, time zone and
   activity, without notes, picture, business, queue, opt-out or tokens): what `contact_profile`
-  uses. `Refresh` needs `Full`.
-- A refresh always asks `IsOnWhatsApp` (numbers only) and `GetUserInfo`; a number WhatsApp doesn't
-  know stops there (1 lookup) and clears the cached profile. The picture is fetched only when
+  uses. `Refresh` needs `Full`. Unlike the plan, `contact_profile` leaves out language and time
+  zone: they're your own fields, which reach admin callers only and never MCP (AGENTS.md).
+  `whatsapp.stale` is in every view.
+- A refresh always asks `IsOnWhatsApp` (numbers only) and `GetUserInfo`, reserving both lookups
+  together so the budget can't stop it between them; a number WhatsApp doesn't know stops after the
+  first call and clears the cached profile. `as_of` (`info_at`) moves only when `GetUserInfo`
+  answered. The row is stored under the JID WhatsApp resolved, and the person's rows under their
+  other keys (the 9th-digit form) are deleted, so an older copy can't hide it. The picture is fetched only when
   `GetUserInfo` reports a picture id that changed or whose URL is older than 6 hours; an empty id
   is stored as "none" (WhatsApp may hide it there too, but telling the two apart would cost a
   lookup every time). The business profile is fetched on every refresh of a verified business.
   Its kept fields are address, email, categories (≤ 10), profile options (≤ 10) and the hours'
   time zone; the opening hours are left out.
 - The 5-minute guard is in memory (it resets on restart, which can't be used to spend the budget
-  faster than the lookup limiter allows). A refresh refused by the budget before its first call
-  frees the slot. A WhatsApp error mid-refresh stores what was learned plus the cleaned error and
+  faster than the lookup limiter allows) and shared by both 9th-digit forms of a number. A refresh
+  refused by the budget before its first call frees the slot; one refused later (picture or
+  business) keeps what it learned and answers 429. A WhatsApp error mid-refresh stores what was learned plus the cleaned error and
   answers 200 with `refreshed: false`; the audit entry carries the error.
 - The cached verified name feeds the profile's `names` only (business step, when the address book
   has no business name). `NamesOf` doesn't read the cache, so `/chats` stays free of per-chat

@@ -498,37 +498,47 @@ func (c *Client) ContactTags(ctx context.Context) ([]store.TagCount, error) {
 // Contact is one person's profile by number or JID: all of it for an admin token; names, tags and
 // whether they're on WhatsApp for others. It never asks WhatsApp.
 func (c *Client) Contact(ctx context.Context, number string) (bot.Profile, error) {
-	return c.profile(ctx, number, nil)
+	p, _, err := c.profile(ctx, number, false)
+	return p, err
 }
 
 // RefreshContact asks WhatsApp about the person first (admin only; 2 to 4 lookups, once per person
 // per 5 minutes) and answers the profile with Refreshed set. A server without refreshes ignores the
 // parameter and answers Refreshed nil.
 func (c *Client) RefreshContact(ctx context.Context, number string) (bot.Profile, error) {
-	return c.profile(ctx, number, url.Values{"refresh": {"1"}})
+	p, _, err := c.profile(ctx, number, true)
+	return p, err
 }
 
-func (c *Client) profile(ctx context.Context, number string, q url.Values) (bot.Profile, error) {
-	var raw []byte
-	if err := c.send(ctx, c.http, "GET", "contacts/"+url.PathEscape(number), q, nil, nil, &raw); err != nil {
-		return bot.Profile{}, err
+// profileShape says what a profile answer can tell: old is a server from before profiles (a
+// bot.ContactView); notes, that the answer carries the notes (an admin's).
+type profileShape struct{ old, notes bool }
+
+func (c *Client) profile(ctx context.Context, number string, refresh bool) (bot.Profile, profileShape, error) {
+	var q url.Values
+	if refresh {
+		q = url.Values{"refresh": {"1"}}
+	}
+	var raw json.RawMessage
+	if err := c.do(ctx, "GET", "contacts/"+url.PathEscape(number), q, nil, &raw); err != nil {
+		return bot.Profile{}, profileShape{}, err
 	}
 	var out struct {
 		bot.Profile
 		Names *bot.Names `json:"names"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return bot.Profile{}, fmt.Errorf("unexpected answer from contacts: %w", err)
+		return bot.Profile{}, profileShape{}, fmt.Errorf("unexpected answer from contacts: %w", err)
 	}
 	if out.Names != nil {
 		out.Profile.Names = *out.Names
-		return out.Profile, nil
+		return out.Profile, profileShape{notes: out.OptedOut != nil}, nil
 	}
 	var old bot.ContactView
 	if err := json.Unmarshal(raw, &old); err != nil {
-		return bot.Profile{}, fmt.Errorf("unexpected answer from contacts: %w", err)
+		return bot.Profile{}, profileShape{}, fmt.Errorf("unexpected answer from contacts: %w", err)
 	}
-	return oldProfile(old), nil
+	return oldProfile(old), profileShape{old: true, notes: old.Own != nil}, nil
 }
 
 // oldProfile reads a server's answer from before profiles (a bot.ContactView).

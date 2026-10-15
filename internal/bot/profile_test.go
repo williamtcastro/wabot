@@ -32,6 +32,7 @@ type fakeWA struct {
 	pic      *types.ProfilePictureInfo
 	picErr   error
 	business *types.BusinessProfile
+	block    chan struct{}
 }
 
 func (f *fakeWA) note(call string) {
@@ -55,6 +56,9 @@ func (f *fakeWA) IsOnWhatsApp(_ context.Context, phones []string) ([]types.IsOnW
 
 func (f *fakeWA) GetUserInfo(_ context.Context, jids []types.JID) (map[types.JID]types.UserInfo, error) {
 	f.note("GetUserInfo")
+	if f.block != nil {
+		<-f.block
+	}
 	if f.infoErr != nil {
 		return nil, f.infoErr
 	}
@@ -139,19 +143,97 @@ func TestProfileRefreshChargesLookups(t *testing.T) {
 		t.Fatal("the second refresh should answer the cache")
 	}
 
-	// One lookup left: John needs at least two.
+	// One lookup left: John's first two calls are reserved together, so nothing is asked.
 	_, err := b.Profile(t.Context(), john, ProfileOptions{Full: true, Refresh: true, Actor: "ops"})
 	if _, ok := errors.AsType[RateLimitError](err); !ok {
 		t.Fatalf("over budget: %v", err)
 	}
-	if got := f.Calls(); len(got) != 5 || got[4] != "IsOnWhatsApp" {
+	if got := f.Calls(); len(got) != 4 {
 		t.Fatalf("calls = %v", got)
+	}
+	if _, err := b.Store.CachedProfileOf(john); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("a refused refresh must not store anything")
+	}
+}
+
+func TestProfileRefreshBudgetMidway(t *testing.T) {
+	b := newTestBot(t)
+	b.Lookups = NewLimiter(3, 0, time.Millisecond)
+	f := withFake(t, b)
+	f.info = types.UserInfo{Status: "Hey there", PictureID: "1", VerifiedName: verified("Maria Ltd")}
+	f.pic = &types.ProfilePictureInfo{ID: "1", URL: "https://cdn.example/p.jpg"}
+	_, err := b.Profile(t.Context(), maria, ProfileOptions{Full: true, Refresh: true, Actor: "ops"})
+	if _, ok := errors.AsType[RateLimitError](err); !ok {
+		t.Fatalf("business over budget: %v", err)
+	}
+	c, err := b.Store.CachedProfileOf(maria)
+	if err != nil || c.About != "Hey there" || c.InfoAt.IsZero() || c.PictureID != "1" {
+		t.Fatalf("what was learned should be kept: %+v, %v", c, err)
+	}
+}
+
+func TestProfileRefreshDoesntMarkOldInfoFresh(t *testing.T) {
+	b := newTestBot(t)
+	f := withFake(t, b)
+	old := time.Now().Add(-48 * time.Hour).Truncate(time.Millisecond)
+	if err := b.Store.PutCachedProfile(store.CachedProfile{JID: maria, OnWhatsApp: 1, About: "old", InfoAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	f.infoErr = errors.New("timeout")
+	p := refresh(t, b, maria)
+	if !p.WhatsApp.Stale || !p.WhatsApp.AsOf.Equal(old) || p.WhatsApp.About != "old" {
+		t.Fatalf("after a failed GetUserInfo: stale %v as_of %v about %q", p.WhatsApp.Stale, p.WhatsApp.AsOf, p.WhatsApp.About)
+	}
+}
+
+func TestProfileRefreshReplacesOtherVariant(t *testing.T) {
+	b := newTestBot(t)
+	withFake(t, b)
+	if err := b.Store.PutCachedProfile(store.CachedProfile{JID: "552187654321@s.whatsapp.net", OnWhatsApp: 0, InfoAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	// The fake resolves the number as typed, so this lands under the 9-digit form.
+	p := refresh(t, b, "5521987654321")
+	if p.WhatsApp.OnWhatsApp == nil || !*p.WhatsApp.OnWhatsApp {
+		t.Fatalf("the old not-on-WhatsApp row still shows: %+v", p.WhatsApp)
+	}
+	if again, _ := b.Profile(t.Context(), "552187654321", ProfileOptions{}); again.WhatsApp.OnWhatsApp == nil || !*again.WhatsApp.OnWhatsApp {
+		t.Fatal("the 8-digit form should read the new row")
+	}
+	if next := refresh(t, b, "552187654321"); *next.Refreshed {
+		t.Fatal("both forms of a number share one five-minute slot")
+	}
+}
+
+func TestLogoutDuringRefreshKeepsNothing(t *testing.T) {
+	b := newTestBot(t)
+	f := withFake(t, b)
+	gate := make(chan struct{})
+	f.block = gate
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Profile(context.Background(), maria, ProfileOptions{Full: true, Refresh: true, Actor: "ops"})
+		done <- err
+	}()
+	for len(f.Calls()) < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	b.logout = func(context.Context) error { return nil }
+	if err := b.Logout(t.Context(), "ops"); err != nil {
+		t.Fatal(err)
+	}
+	close(gate)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Store.CachedProfileOf(maria); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("a refresh that outlived the logout wrote its profile back")
 	}
 }
 
 func TestProfileRefreshRefusedBeforeAnyCallFreesTheSlot(t *testing.T) {
 	b := newTestBot(t)
-	b.Lookups = NewLimiter(1, 0, time.Millisecond)
+	b.Lookups = NewLimiter(2, 0, time.Millisecond)
 	if _, err := b.Lookups.ReserveN("lookup", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +261,9 @@ func TestProfileWithoutRefreshNeverAsksWhatsApp(t *testing.T) {
 	}
 	if _, err := b.Profile(t.Context(), family, ProfileOptions{}); !isInputError(err) {
 		t.Fatalf("group: %v", err)
+	}
+	if p, _ := b.Profile(t.Context(), john, ProfileOptions{Full: true}); p.WhatsApp.OnWhatsApp != nil {
+		t.Fatalf("never asked should be unknown, got %v", *p.WhatsApp.OnWhatsApp)
 	}
 	if len(f.Calls()) != 0 || b.Lookups.Stats().LastMinute != 0 {
 		t.Fatalf("calls %v lookups %d", f.Calls(), b.Lookups.Stats().LastMinute)
@@ -238,7 +323,9 @@ func TestProfileRefreshErrors(t *testing.T) {
 		t.Fatalf("audit = %+v", e)
 	}
 
-	f.infoErr, f.notOnWA = nil, true
+	b = newTestBot(t)
+	f = withFake(t, b)
+	f.notOnWA = true
 	n := len(f.Calls())
 	if p := refresh(t, b, "5521987654321"); p.WhatsApp.OnWhatsApp == nil || *p.WhatsApp.OnWhatsApp || len(f.Calls()) != n+1 {
 		t.Fatalf("not on WhatsApp = %+v, calls %v", p.WhatsApp, f.Calls()[n:])
@@ -398,5 +485,39 @@ func TestProfileStatsAndPrune(t *testing.T) {
 	b.pruneOutbox()
 	if _, err := b.Store.CachedProfileOf(maria); !errors.Is(err, store.ErrNotFound) {
 		t.Fatal("old cache rows should be pruned")
+	}
+}
+
+func TestMemberJIDPrefersTheNumber(t *testing.T) {
+	if got := memberJID(jidOf(mariaLID), jidOf(maria)); got.String() != maria {
+		t.Fatalf("lid with a number = %s", got)
+	}
+	if got := memberJID(jidOf(mariaLID), types.JID{}); got.String() != mariaLID {
+		t.Fatalf("lid alone = %s", got)
+	}
+	if got := memberJID(jidOf(john), types.JID{}); got.String() != john {
+		t.Fatalf("phone = %s", got)
+	}
+}
+
+func TestPictureEventCantFakeHidden(t *testing.T) {
+	b := newTestBot(t)
+	if err := b.Store.PutCachedProfile(store.CachedProfile{JID: maria, PictureID: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	b.handle(&events.Picture{JID: jidOf(maria), PictureID: store.PictureHidden})
+	if c, _ := b.Store.CachedProfileOf(maria); c.PictureID == store.PictureHidden {
+		t.Fatal(`a picture id of "-" must not read as hidden`)
+	}
+}
+
+func TestLogoutForgetsResolvedNumbers(t *testing.T) {
+	b := newTestBot(t)
+	b.mu.Lock()
+	b.jids["5511999999999"] = jidOf(maria)
+	b.mu.Unlock()
+	b.handle(&events.LoggedOut{})
+	if p, _ := b.Profile(t.Context(), maria, ProfileOptions{}); p.WhatsApp.OnWhatsApp != nil {
+		t.Fatal("on_whatsapp should be unknown after logout")
 	}
 }

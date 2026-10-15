@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/csv"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -63,7 +64,26 @@ func (a *server) contactTags(w http.ResponseWriter, r *http.Request) {
 	respond(w, tags, err)
 }
 
-const errRefreshForbidden = "refresh=1 needs an admin token without a chat allowlist"
+const (
+	errRefreshForbidden = "refresh=1 needs an admin token without a chat allowlist"
+	errRefreshCrossSite = "refresh=1 is refused from another site or port"
+)
+
+// fromOtherOrigin reports whether a browser says the request came from another page (another
+// localhost port counts). Clients that aren't browsers send none of these headers.
+func fromOtherOrigin(r *http.Request) bool {
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+		return true
+	}
+	for _, h := range []string{"Origin", "Referer"} {
+		if v := r.Header.Get(h); v != "" {
+			if u, err := url.Parse(v); err != nil || u.Host != r.Host {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // contact is one person's profile: the full one for admin tokens without an allowlist, the basic
 // one for everyone else. Only ?refresh=1 (those admin tokens) asks WhatsApp. A restricted token
@@ -81,6 +101,10 @@ func (a *server) contact(w http.ResponseWriter, r *http.Request) {
 	full := p.Has(auth.Admin) && !p.Restricted()
 	if refresh && !full {
 		writeErr(w, http.StatusForbidden, errRefreshForbidden)
+		return
+	}
+	if refresh && fromOtherOrigin(r) {
+		writeErr(w, http.StatusForbidden, errRefreshCrossSite)
 		return
 	}
 	v, err := a.b.Profile(r.Context(), to, bot.ProfileOptions{Full: full, Refresh: refresh, Actor: p.Name})

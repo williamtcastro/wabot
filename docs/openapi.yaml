@@ -518,20 +518,23 @@ paths:
       summary: One person's profile
       description: |
         Never asks WhatsApp unless refresh=1; someone wame knows nothing about is still a 200. Requires read.
-        Tokens limited to chats get 403 for anyone outside their list, and inside it always the basic view (jid,
-        phone, lid, names, own.tags, whatsapp.on_whatsapp and whatsapp.stale), even with admin. The full view
-        (notes, about, picture, business profile, activity, queue, opted_out, tokens) needs admin and no chat list.
+        Tokens limited to chats get 403 for anyone outside their list, and inside it the basic view (jid,
+        phone, lid, names, own.tags, whatsapp.on_whatsapp and whatsapp.stale). The full view (notes, about,
+        picture, business profile, activity, queue, opted_out, tokens) needs an unrestricted admin token (admin
+        tokens are never issued with a chat list; the handler checks it again as a safety net).
         PUT and PATCH still answer with ContactView.
 
         refresh=1 asks WhatsApp now: 2 to 4 lookups from the shared lookup budget, at most once per person per
-        5 minutes (a second one returns the cache with refreshed false). It needs an admin token without a chat
-        list, checked before anything is looked up. A WhatsApp error is stored in whatsapp.error and the answer
-        is still 200 with refreshed false. Audited as contact_refresh.
+        5 minutes (a second one returns the cache with refreshed false). It needs an unrestricted admin token,
+        checked before anything is looked up. It is also refused (403 "refresh=1 is refused from another site or
+        port") when Sec-Fetch-Site is present and not same-origin or none, or when an Origin or Referer host
+        differs from Host, so a web page can't spend lookups with an <img>. A WhatsApp error is stored in
+        whatsapp.error and the answer is still 200 with refreshed false. Audited as contact_refresh.
       parameters:
         - name: refresh
           in: query
           schema: { type: boolean }
-          description: "1, true, 0 or false; anything else is a 400. 403 \"refresh=1 needs an admin token without a chat allowlist\" for any other caller."
+          description: "1, true, 0 or false; anything else is a 400. 403 \"refresh=1 needs an admin token without a chat allowlist\" for any caller without an unrestricted admin token; 403 \"refresh=1 is refused from another site or port\" for requests from another page."
       responses:
         "200": { description: The profile, content: { application/json: { schema: { $ref: "#/components/schemas/ContactProfile" } } } }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -1345,7 +1348,7 @@ components:
       type: object
       description: |
         One person. The basic view (read scope, or any token limited to chats) has jid, phone, lid, names,
-        own.tags and whatsapp.on_whatsapp / stale; everything else is the full view (admin, no chat list).
+        own.tags and whatsapp.on_whatsapp / stale; everything else is the full view (an unrestricted admin token).
       properties:
         jid: { type: string, example: "5511988887777@s.whatsapp.net" }
         phone: { type: string, example: "+5511988887777" }
@@ -1375,9 +1378,9 @@ components:
           properties:
             on_whatsapp: { type: boolean, nullable: true, description: "null when unknown" }
             about: { type: string, description: "Full view only" }
-            about_at: { type: string, format: date-time }
-            verified_name: { type: string }
-            verified_level: { type: string }
+            about_at: { type: string, format: date-time, description: "Full view only" }
+            verified_name: { type: string, description: "Full view only" }
+            verified_level: { type: string, description: "Full view only" }
             picture:
               type: object
               properties:
@@ -1394,8 +1397,8 @@ components:
                 options: { type: object, additionalProperties: { type: string } }
                 time_zone: { type: string }
                 as_of: { type: string, format: date-time }
-            as_of: { type: string, format: date-time }
-            stale: { type: boolean, description: "A part is older than its limit, or was never fetched" }
+            as_of: { type: string, format: date-time, description: "Full view only" }
+            stale: { type: boolean, description: "In every view: a part is older than its limit, or was never fetched" }
             error: { type: string, description: "The last WhatsApp error, full view only" }
             error_at: { type: string, format: date-time }
         activity:

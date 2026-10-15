@@ -167,7 +167,10 @@ func (b *Bot) Profile(ctx context.Context, to string, opt ProfileOptions) (Profi
 		p.Refreshed, p.NextRefreshAt = &refreshed, next
 	}
 	cached, err := b.Store.CachedProfileOf(keys...)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) {
+		cached, err = store.CachedProfile{OnWhatsApp: -1}, nil
+	}
+	if err != nil {
 		return Profile{}, err
 	}
 	if lid.IsEmpty() && cached.LID != "" {
@@ -192,12 +195,12 @@ func (b *Bot) Profile(ctx context.Context, to string, opt ProfileOptions) (Profi
 		}
 	}
 	p.Own = ProfileOwn{Tags: tagsOf(own)}
-	p.WhatsApp.OnWhatsApp = b.onWhatsApp(jid, cached)
+	p.WhatsApp.OnWhatsApp, p.WhatsApp.Stale = b.onWhatsApp(jid, cached), stale(cached)
 	if opt.Details {
 		p.Own.Language, p.Own.TimeZone = own.Language, own.TimeZone
 		p.WhatsApp.About, p.WhatsApp.AboutAt = cached.About, cached.AboutAt
 		p.WhatsApp.VerifiedName, p.WhatsApp.VerifiedLevel = cached.VerifiedName, cached.VerifiedLevel
-		p.WhatsApp.AsOf, p.WhatsApp.Stale = cached.InfoAt, stale(cached)
+		p.WhatsApp.AsOf = cached.InfoAt
 		st, err := b.Store.ContactStats(keys)
 		if err != nil {
 			return Profile{}, err
@@ -328,6 +331,8 @@ func (b *Bot) releaseRefresh(key string, at time.Time) {
 	b.mu.Unlock()
 }
 
+var errLoggedOutMeanwhile = whatsAppError{errors.New("logged out during the refresh; nothing was kept")}
+
 // whatsAppError marks a failed WhatsApp call during a refresh: it is stored on the profile, not
 // returned.
 type whatsAppError struct{ error }
@@ -340,7 +345,9 @@ func (b *Bot) refreshProfile(ctx context.Context, actor string, jid, lid types.J
 		return false, time.Time{}, errors.New("not logged in")
 	}
 	now := time.Now()
-	next, ok := b.claimRefresh(jid.String(), now)
+	guard := slices.Min(append(phoneVariants(jid.String()), jid.String()))
+	wipes := b.wipes.Load()
+	next, ok := b.claimRefresh(guard, now)
 	if !ok {
 		return false, next, nil
 	}
@@ -356,7 +363,7 @@ func (b *Bot) refreshProfile(ctx context.Context, actor string, jid, lid types.J
 		}
 		b.Audit(actor, "contact_refresh", jid.String(), detail, auditErr)
 		if lookups == 0 && err != nil {
-			b.releaseRefresh(jid.String(), now)
+			b.releaseRefresh(guard, now)
 		}
 	}()
 	cached, err := b.Store.CachedProfileOf(keys...)
@@ -375,7 +382,15 @@ func (b *Bot) refreshProfile(ctx context.Context, actor string, jid, lid types.J
 		c.Error, c.ErrorAt = "", time.Time{}
 	}
 	if lookups > 0 {
-		if serr := b.Store.PutCachedProfile(c); serr != nil {
+		b.contactsMu.Lock()
+		var serr error
+		if b.wipes.Load() == wipes {
+			serr = b.Store.PutCachedProfile(c, keys...)
+		} else {
+			err = errLoggedOutMeanwhile
+		}
+		b.contactsMu.Unlock()
+		if serr != nil {
 			return false, next, serr
 		}
 	}
@@ -393,38 +408,42 @@ func (b *Bot) profileClient() profileClient {
 // id changed or its URL is old, and the business profile when there is a verified name.
 func (b *Bot) askWhatsApp(ctx context.Context, c *store.CachedProfile, cached store.CachedProfile, jid, lid types.JID, lookups *int) error {
 	wa := b.profileClient()
-	call := func() error {
-		if err := b.lookup(ctx, 1); err != nil {
+	reserve := func(n int) error {
+		if err := b.lookup(ctx, n); err != nil {
 			return err
 		}
-		*lookups++
+		*lookups += n
 		return nil
 	}
+	call := func() error { return reserve(1) }
 	now := time.Now()
 	target := jid
+	// IsOnWhatsApp and GetUserInfo are reserved together, so the budget can't stop a refresh between them.
+	first := 1
 	if jid.Server == types.DefaultUserServer {
-		if err := call(); err != nil {
-			return err
-		}
+		first = 2
+	}
+	if err := reserve(first); err != nil {
+		return err
+	}
+	if jid.Server == types.DefaultUserServer {
 		res, err := wa.IsOnWhatsApp(ctx, []string{"+" + jid.User})
 		if err != nil {
 			return whatsAppError{err}
 		}
-		c.OnWhatsApp, c.InfoAt = 0, now
+		c.OnWhatsApp = 0
 		for _, r := range res {
 			if r.IsIn {
 				c.OnWhatsApp, target = 1, b.PhoneJID(r.JID.ToNonAD())
 			}
 		}
 		if c.OnWhatsApp == 0 {
+			c.InfoAt = now
 			c.About, c.AboutAt, c.VerifiedName, c.VerifiedLevel = "", time.Time{}, "", ""
 			c.PictureID, c.PictureURL, c.Business, c.BusinessAt = "", "", "", time.Time{}
 			return nil
 		}
 		c.JID = target.String()
-	}
-	if err := call(); err != nil {
-		return err
 	}
 	infos, err := wa.GetUserInfo(ctx, []types.JID{target})
 	if err != nil {
@@ -530,6 +549,10 @@ func businessJSON(bp *types.BusinessProfile) string {
 	data, _ := json.Marshal(bi)
 	if len(data) > maxBusinessJSON {
 		bi.Options = nil
+		data, _ = json.Marshal(bi)
+	}
+	if len(data) > maxBusinessJSON {
+		bi.Categories = nil
 		data, _ = json.Marshal(bi)
 	}
 	return string(data)

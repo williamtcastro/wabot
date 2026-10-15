@@ -557,8 +557,8 @@ chats.
 |---|---|---|
 | `GET /contacts` | read | `Bot.Contacts` with `Allow` = the token's list, expanded by `ExpandAllowlist` (only the list's own entries are ever resolved); `tag=` and `q=` filter inside it |
 | `GET /contacts/tags` | read | forbidden (`unrestricted`): tag names and counts span every contact |
-| `GET /contacts/{number}` | read | `authorizeChat` (`LocalChat` + `ChatAllowed`, no lookup), the fixed 403 text otherwise; a restricted token always gets the basic profile, even with admin; the full one (notes included) only for admin without an allowlist |
-| `GET /contacts/{number}?refresh=1` | admin | refused for restricted tokens (even admin) with `refresh=1 needs an admin token without a chat allowlist`, before anything is looked up |
+| `GET /contacts/{number}` | read | `authorizeChat` (`LocalChat` + `ChatAllowed`, no lookup), the fixed 403 text otherwise; a restricted token gets the basic profile; the full one (notes included) needs an unrestricted admin token. `auth.Issue` never mints an admin token limited to chats, and the handler checks `admin && !Restricted()` anyway as a safety net |
+| `GET /contacts/{number}?refresh=1` | admin | needs an unrestricted admin token, else 403 `refresh=1 needs an admin token without a chat allowlist` (the same safety net), before anything is looked up. Refused too (403 `refresh=1 is refused from another site or port`) when `Sec-Fetch-Site` is present and not `same-origin`/`none`, or an `Origin`/`Referer` host differs from `Host`: a refresh spends lookups from a GET, so otherwise a page on another localhost port could trigger it with an `<img>` in token-less mode. Applied in every mode; CLI and admin clients send none of these headers |
 | `PUT`/`PATCH`/`DELETE /contacts/{number}`, `DELETE /contacts?all=true`, `POST /contacts/import`, `GET /contacts/export` | admin | n/a |
 
 - **Why filtered is safe.** A restricted token could already see these people's names through

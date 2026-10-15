@@ -136,8 +136,8 @@ its queue items with token-less `wame mcp`: revoke it and issue one under anothe
 | `GET /media/{seq}` | read | 404 for messages outside the allowed chats |
 | `GET /chats` | read | only allowed chats are listed |
 | `GET /contacts` | read | only allowed chats are listed |
-| `GET /contacts/{number}` | read (the full profile only with admin and no chat limit) | only allowed chats (403 otherwise), always the basic view |
-| `GET /contacts/{number}?refresh=1` | admin | 403 (even with `admin`), before anything is looked up |
+| `GET /contacts/{number}` | read (the full profile needs an unrestricted admin token) | only allowed chats (403 otherwise), the basic view |
+| `GET /contacts/{number}?refresh=1` | admin | 403, before anything is looked up |
 | `GET /contacts/tags`, `GET /groups` | read | 403 |
 | `PUT`, `PATCH`, `DELETE /contacts/{number}`, `DELETE /contacts`, `POST /contacts/import`, `GET /contacts/export` | admin | n/a |
 | `POST /check` | send | 403 |
@@ -779,8 +779,7 @@ asks WhatsApp unless you pass `?refresh=1` (see below): everything comes from wa
 what WhatsApp said last time. Someone wame knows nothing about is still a 200, with only the number.
 Groups are 400 `contacts are people, not groups`.
 
-The **basic view** is for `read` tokens and for every token limited to chats, even one with
-`admin`:
+The **basic view** is for `read` tokens and for every token limited to chats:
 
 ```json
 { "jid": "5511988887777@s.whatsapp.net", "phone": "+5511988887777",
@@ -792,11 +791,12 @@ The **basic view** is for `read` tokens and for every token limited to chats, ev
 
 `lid` is the person's hidden WhatsApp id when wame's map knows it, else an empty string. `names`
 has `name` (the one name every view shows), `name_source`, and `own_name`, `book_name`,
-`business_name` and `push_name` when known. `on_whatsapp` is `null` when unknown; `stale` says the
-cached WhatsApp data is older than its limit or was never fetched.
+`business_name` and `push_name` when known. `on_whatsapp` is `null` when unknown; `stale` (in every
+view) says the cached WhatsApp data is older than its limit or was never fetched.
 
-The **full view** is for `admin` tokens without a chat limit. It adds more to `own` and
-`whatsapp`, and these top-level fields:
+The **full view** needs an unrestricted `admin` token (wame never issues admin tokens limited to
+chats, and the handler checks this again as a safety net). It adds more to `own` and `whatsapp`,
+and these top-level fields:
 
 ```json
 { "jid": "5511988887777@s.whatsapp.net", "phone": "+5511988887777",
@@ -835,9 +835,16 @@ token can't access that chat`, and the number is never looked up.
 
 #### `?refresh=1`
 
-`refresh` takes `1`, `true`, `0` or `false`; anything else is a 400. A refresh is for `admin`
-tokens without a chat limit. Any other caller, a limited admin token included, gets 403
-`refresh=1 needs an admin token without a chat allowlist`, checked before anything is looked up.
+`refresh` takes `1`, `true`, `0` or `false`; anything else is a 400. A refresh needs an
+unrestricted `admin` token (or the owner secret, or token-less local mode). Any other caller gets
+403 `refresh=1 needs an admin token without a chat allowlist`, checked before anything is looked up.
+
+Because a refresh spends lookups from a `GET`, it is also refused with 403 `refresh=1 is refused
+from another site or port` when the request says it came from another page: `Sec-Fetch-Site` is
+present and isn't `same-origin` or `none`, or an `Origin` or `Referer` header names a host other
+than the request's `Host` (another localhost port counts). That stops a web page from triggering
+refreshes with an `<img>`, above all in token-less mode. It applies with tokens too; `curl`, the CLI
+and `wame admin` send none of these headers.
 
 It asks WhatsApp now and spends 2 to 4 lookups from the shared lookup budget: whether the number
 is on WhatsApp, the profile info (about, verified name), the picture when it changed, and the

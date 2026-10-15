@@ -62,7 +62,7 @@ To send every kind of message (files, edits and deletes are API-only), see [SEND
 | `read_messages` | read | `chat` (JID or number), `limit` (default 50, max 200), `since_seq` | `messages[]` oldest first, `next_seq`, `note`. Without `since_seq`, the latest messages; pass `next_seq` as `since_seq` to page forward |
 | `search_messages` | read | `query`, `chat` (optional), `limit` (default 30, max 200) | `messages[]` newest first; same matching as `q=` in the API |
 | `find_contact` | read | `query` (part of a name, a tag or part of a number) | `contacts[]` (max 50, sorted by name): `chat`, `phone`, `name_source` (`own`, `book`, `business`, `push`, `number`), `untrusted.name` (the one name wame shows, as in [`/contacts`](API.md#contacts)), `untrusted.push_name`, `untrusted.tags`; `note`. A token limited to chats finds only those chats |
-| `contact_profile` | read | `chat` (number or JID) | `chat` (phone JID), `phone`, `lid`, `name_source`, `language`, `time_zone`, `on_whatsapp`, `verified_level`, `first_at`, `last_at`, `sent`, `received`, `unread`, `note`; `untrusted`: `name`, `own_name`, `book_name`, `business_name`, `push_name`, `tags`, `about`, `verified_name`, `groups_in_common` (`[{chat, name}]`). Read-only: never asks WhatsApp and never refreshes. A token limited to chats gets only its allowed chats (otherwise `this connection can't access that chat`) and only the groups on its list. Never returned, even to admin: notes, the picture URL, the business profile, queue stats, opt-out status, which tokens can see the chat, WhatsApp error text |
+| `contact_profile` | read | `chat` (number or JID) | `chat` (phone JID), `phone`, `lid`, `name_source`, `on_whatsapp`, `verified_level`, `first_at`, `last_at`, `sent`, `received`, `unread`, `note`; `untrusted`: `name`, `own_name`, `book_name`, `business_name`, `push_name`, `tags`, `about`, `verified_name`, `groups_in_common` (`[{chat, name}]`). Read-only: never asks WhatsApp and never refreshes. A token limited to chats gets only its allowed chats (otherwise `this connection can't access that chat`) and only the groups on its list. Never returned, even to admin: notes, language, time zone, the picture URL, the business profile, queue stats, opt-out status, which tokens can see the chat, WhatsApp error text |
 | `send_message` | send | `to`, `text`, `reply_to` (optional) | `seq`, `id`, `chat` |
 | `react` | send | `chat`, `message_id`, `emoji` (empty removes) | `seq`, `id`, `chat` |
 | `mark_read` | send | `chat`, `message_ids` (optional; omit for the whole chat) | `marked` |
@@ -107,10 +107,9 @@ trying again".
   WhatsApp (the same check as `send_message`); other recipients are resolved by the worker at send
   time. Scheduled text comes back only to the caller that queued it, under `untrusted` and cleaned.
   Revoking the token fails its items that haven't gone out yet.
-- **Contacts.** `find_contact` never returns your notes, language or time zone, even to an admin
-  connection, and never looks a number up on WhatsApp. `contact_profile` returns the language and
-  time zone but not the notes, never looks anything up either, and puts the text other people wrote
-  (names, tags, about, verified name, group names) under `untrusted`.
+- **Contacts.** `find_contact` and `contact_profile` never return your notes, language or time
+  zone, even to an admin connection, and never look anything up on WhatsApp. `contact_profile` puts
+  the text other people wrote (names, tags, about, verified name, group names) under `untrusted`.
 - **Limits and audit.** Global send and lookup limits apply. Every send, reaction and read is in
   `GET /audit` under the token's name, or `mcp` for stdio without a token.
 - **Approvals.** Configure your client to ask before each `send_message`, `schedule_message`, `react`

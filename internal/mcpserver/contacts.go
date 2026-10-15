@@ -26,8 +26,6 @@ type contactProfileOut struct {
 	Phone         string    `json:"phone,omitempty"`
 	LID           string    `json:"lid,omitempty"`
 	NameSource    string    `json:"name_source"`
-	Language      string    `json:"language,omitempty"`
-	TimeZone      string    `json:"time_zone,omitempty"`
 	OnWhatsApp    *bool     `json:"on_whatsapp"`
 	VerifiedLevel string    `json:"verified_level,omitempty"`
 	FirstAt       time.Time `json:"first_at,omitzero"`
@@ -51,7 +49,7 @@ type contactProfileOut struct {
 
 func (s *server) addContactTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "contact_profile",
-		Description: "One person's profile from what wame already knows (never asks WhatsApp): names, tags, language, time zone, about, first and last message, counts and groups in common.",
+		Description: "One person's profile from what wame already knows (never asks WhatsApp): names, tags, about, first and last message, counts and groups in common.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, s.contactProfile)
 }
 
@@ -81,8 +79,7 @@ func (s *server) contactProfile(ctx context.Context, req *mcp.CallToolRequest, i
 		return nil, contactProfileOut{}, err
 	}
 	out := contactProfileOut{Chat: pr.JID, Phone: pr.Phone, LID: cleanID(pr.LID), NameSource: pr.Names.Source,
-		Language: pr.Own.Language, TimeZone: pr.Own.TimeZone, OnWhatsApp: pr.WhatsApp.OnWhatsApp,
-		VerifiedLevel: cleanID(pr.WhatsApp.VerifiedLevel), Note: untrustedNote}
+		OnWhatsApp: pr.WhatsApp.OnWhatsApp, VerifiedLevel: cleanID(pr.WhatsApp.VerifiedLevel), Note: untrustedNote}
 	if a := pr.Activity; a != nil {
 		out.FirstAt, out.LastAt, out.Sent, out.Received, out.Unread = a.FirstAt, a.LastAt, a.Sent, a.Received, a.Unread
 	}

@@ -78,6 +78,7 @@ type Bot struct {
 	profiles     profileClient
 	logout       func(ctx context.Context) error
 	refreshes    map[string]time.Time
+	wipes        atomic.Uint64
 
 	db            *sql.DB
 	groupsRefresh chan struct{}

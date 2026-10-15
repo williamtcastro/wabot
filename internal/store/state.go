@@ -169,7 +169,14 @@ func (s *Store) CountFrom(chat string, from int64) int {
 	return n
 }
 
-func (s *Store) SaveGroups(groups []Group) error {
+// SaveGroups stores groups' names, admins and members.
+func (s *Store) SaveGroups(groups []Group) error { return s.saveGroups(groups, false) }
+
+// SaveJoinedGroups is SaveGroups for the full list of groups the account is in: members of any other
+// group (one the account left) are deleted too. Group names stay, for the messages.
+func (s *Store) SaveJoinedGroups(groups []Group) error { return s.saveGroups(groups, true) }
+
+func (s *Store) saveGroups(groups []Group, all bool) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -198,7 +205,24 @@ func (s *Store) SaveGroups(groups []Group) error {
 			return err
 		}
 	}
+	if all {
+		jids := make([]string, len(groups))
+		for i, g := range groups {
+			jids[i] = g.JID
+		}
+		if _, err := tx.Exec(`DELETE FROM wame_group_members WHERE group_jid NOT IN (SELECT value FROM json_each(?))`, jsonList(jids)); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+func jsonList(ss []string) string {
+	data, _ := json.Marshal(ss)
+	if ss == nil {
+		return "[]"
+	}
+	return string(data)
 }
 
 // GroupsWith lists the cached groups any of keys is a member of, by name.

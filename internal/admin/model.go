@@ -210,6 +210,7 @@ type model struct {
 	contactsQ           string
 	contactNotes        string
 	contactView         bot.Profile
+	contactShape        profileShape
 	contactViewReq      inflight
 	contactViewErr      error
 	contactDenied       bool
@@ -514,8 +515,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case contactViewMsg:
-		m.applyContactView(msg)
-		return m, nil
+		return m, m.applyContactView(msg)
 
 	case contactRefreshMsg:
 		return m, m.applyContactRefresh(msg)

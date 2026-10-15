@@ -290,3 +290,42 @@ func TestGroupMembersRelink(t *testing.T) {
 		t.Errorf("moved role = %q, %v", role, err)
 	}
 }
+
+func TestSaveJoinedGroupsDropsGroupsLeft(t *testing.T) {
+	s := openStore(t)
+	if err := s.SaveJoinedGroups([]Group{
+		{JID: family, Name: "Family", Members: []GroupMember{{JID: maria}}},
+		{JID: work, Name: "Work", Members: []GroupMember{{JID: john}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveJoinedGroups([]Group{{JID: family, Name: "Family", Members: []GroupMember{{JID: maria}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := s.GroupsWith(john); len(g) != 0 {
+		t.Fatalf("a group the account left still counts: %+v", g)
+	}
+	if all, _ := s.Groups(); len(all) != 2 {
+		t.Fatal("group names stay for the messages")
+	}
+	if err := s.SaveGroups([]Group{{JID: work, Name: "Work", Members: []GroupMember{{JID: john}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := s.GroupsWith(maria); len(g) != 1 {
+		t.Fatal("SaveGroups with some groups must leave the others alone")
+	}
+}
+
+func TestPutCachedProfileReplacesOtherKeys(t *testing.T) {
+	s := openStore(t)
+	alt := "5521987654321@s.whatsapp.net"
+	if err := s.PutCachedProfile(CachedProfile{JID: ana, OnWhatsApp: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutCachedProfile(CachedProfile{JID: alt, OnWhatsApp: 1}, ana, alt); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := s.CachedProfileOf(ana, alt); err != nil || c.JID != alt || c.OnWhatsApp != 1 {
+		t.Fatalf("read = %+v, %v", c, err)
+	}
+}
