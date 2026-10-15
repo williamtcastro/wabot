@@ -438,6 +438,10 @@ func (b *Bot) outboxStep(ctx context.Context) time.Duration {
 	tokens := map[string]*store.Token{}
 	for _, it := range items {
 		tok, err := b.queueToken(it.TokenID, tokens)
+		if errors.Is(err, errTokenLookup) {
+			b.Log.Error("outbox: token lookup", "err", err)
+			return outboxOffline
+		}
 		if err != nil {
 			b.finishQueued(it, store.OutboxResult{Status: store.OutboxFailed, Error: "the token that queued it: " + err.Error()})
 			continue
@@ -451,8 +455,9 @@ func (b *Bot) outboxStep(ctx context.Context) time.Duration {
 		case err != nil && !b.Client.IsLoggedIn():
 			return outboxOffline
 		case err != nil:
-			// Let the attempt record the error: a bad number fails, anything else is retried later.
-			b.sendQueued(ctx, it)
+			// Record the attempt without sending: a bad number fails, anything else is retried later.
+			// Sending here would skip the slot and, for a file, upload while the item is claimed.
+			b.failAttempt(ctx, it, err)
 			return jitter(s.QueueJitter)
 		}
 		chat := b.PhoneJID(jid).String()
@@ -498,8 +503,11 @@ func (b *Bot) queueToken(id string, seen map[string]*store.Token) (*store.Token,
 	t, ok := seen[id]
 	if !ok {
 		found, err := b.Store.TokenByID(id)
-		if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
 			return nil, errors.New("no longer exists")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", errTokenLookup, err)
 		}
 		t, seen[id] = &found, &found
 	}
@@ -558,6 +566,26 @@ func (b *Bot) sendQueuedWith(ctx context.Context, it store.OutboxItem, media *qu
 		return // shutting down: it stays in sending and is requeued on the next start
 	}
 	b.finishQueued(it, b.attemptResult(it, err))
+}
+
+// errTokenLookup is queueToken's answer when the database couldn't say: try again later, never
+// treat the token as gone.
+var errTokenLookup = errors.New("token lookup")
+
+// failAttempt claims an item and records err as a failed attempt, without sending.
+func (b *Bot) failAttempt(ctx context.Context, it store.OutboxItem, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	claimed, cerr := b.Store.ClaimOutbox(it.ID, string(b.Client.GenerateMessageID()))
+	if cerr != nil {
+		if !errors.Is(cerr, store.ErrNotFound) {
+			b.Log.Error("outbox: claim", "id", it.ID, "err", cerr)
+		}
+		return
+	}
+	b.queueEvent(claimed)
+	b.finishQueued(claimed, b.attemptResult(claimed, err))
 }
 
 // attemptResult turns a failed attempt's error into what happens to the item next.

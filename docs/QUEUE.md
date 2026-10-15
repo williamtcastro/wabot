@@ -290,7 +290,8 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/queue -d '{
   `1TB` or a byte count; `0` refuses new uploads). Over a quota is a 413 that says which one (your
   own usage, never other tokens'), checked before anything is written to disk; a server that can't
   write the file answers 507. At most two uploads per token and eight in all run at once; more is a
-  429 with `Retry-After`.
+  429 with `Retry-After`. An upload must arrive within 5 minutes, so a stalled client can't keep
+  its place.
 - **Sending.** A file item is one send for the limits, like text: the global limiter, the per-chat
   gap and the token's rate, with no discount. The worker uploads the file to WhatsApp before it takes
   a slot (only when the slot is about to be free), one upload at a time, so a slow upload doesn't
@@ -314,15 +315,16 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/queue -d '{
   such files: a file that queued items need stays while those items are open, paused or not). Files
   of a token that was revoked or expired are deleted, and its queued items then fail with "file is
   gone". A deleted file's row keeps only its id, token, size, hash, mime and kind until its items are
-  pruned (7 days), so the item list still says what was sent. Files in `outbox/` without a row that
+  pruned (7 days), so the item list still says what was sent. Files in `wame-queue-files/` without a row that
   are older than 15 minutes (a crash during an upload) are swept.
-- **Privacy.** Queued files sit **unencrypted on the server's disk** in `outbox/` next to the
-  database (`/data/outbox/` in Docker; directory `0700`, files `0600`, named by random ids) until
+- **Privacy.** Queued files sit **unencrypted on the server's disk** in `wame-queue-files/` next to the
+  database (`/data/wame-queue-files/` in Docker; directory `0700`, files `0600`, named by random ids) until
   they are sent or pruned. No route returns their content. Names count as text: they are never in
   events, webhook deliveries, the audit log or the admin panel, which shows only the kind and size.
   `wame logout` (and `POST /logout`, or WhatsApp logging the device out) deletes every file and
-  removes `outbox/`; items still pointing at one then fail with "file is gone". `wame backup`
-  copies the database only, not `outbox/`.
+  removes `wame-queue-files/` (only the files wame wrote there; the directory stays if anything
+  else is in it); items still pointing at one then fail with "file is gone". `wame backup`
+  copies the database only, not `wame-queue-files/`.
 - **Audit.** Uploads are `queue_file` and deletes `queue_file_delete` (target: the file id; detail
   `kind, N bytes`, never the name), a logout that removed files `queue_files_wipe`, and each queued
   file send `send_file` with `kind, N bytes, queue #id`.

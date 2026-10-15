@@ -316,7 +316,7 @@ wame's own tables:
 | `wame_contacts` | your own names, tags, notes, language and time zone per person; deleted on logout |
 | `wame_contact_cache` | what WhatsApp last said about a person (about, picture id, business info, LID), filled by an admin refresh; deleted on logout |
 | `wame_outbox` | the [send queue](QUEUE.md) |
-| `wame_outbox_files` | metadata of the [files](QUEUE.md#files) uploaded for the queue (the bytes are in `outbox/` next to the database); deleted on logout |
+| `wame_outbox_files` | metadata of the [files](QUEUE.md#files) uploaded for the queue (the bytes are in `wame-queue-files/` next to the database); deleted on logout |
 | `wame_optouts` | chats that asked not to get queued messages; kept on logout |
 | `wame_audit` | one row per control action (send, react, edit, delete, read, pair, logout…), served by `GET /audit` |
 | `wame_tokens` | API tokens: id, name, SHA-256 hash of the token (never the token itself), scopes, chats, rate, created/expires/last-used times, revoked flag, `created_by`. Rows are never deleted |

@@ -2,6 +2,7 @@ package bot
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -53,7 +54,7 @@ const (
 	maxUploadsPerActor    = 2                // POST /queue/files running at once
 	maxUploadsInAll       = 8
 	maxZipEntries         = 10000
-	queueFilesDir         = "outbox"
+	queueFilesDir         = "wame-queue-files"
 )
 
 var queueFileID = regexp.MustCompile(`^f_[0-9a-f]{32}$`)
@@ -169,10 +170,10 @@ func (b *Bot) queueFilePath(id string) string { return filepath.Join(b.queueDir(
 
 func (b *Bot) makeQueueDir() (string, error) {
 	dir := b.queueDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		return "", err
 	}
-	return dir, os.Chmod(dir, 0o700)
+	return dir, nil
 }
 
 // AddQueueFile stores an upload for the send queue: at most limit bytes, the type sniffed from
@@ -216,7 +217,8 @@ func (b *Bot) AddQueueFile(actor, tokenID, name string, r io.Reader, limit int64
 	}()
 	h, head := sha256.New(), &headBuffer{}
 	n, copyErr := io.Copy(io.MultiWriter(out, h, head), io.LimitReader(r, limit+1))
-	closeErr := out.Close()
+	written, statErr := out.Stat()
+	closeErr := cmp.Or(statErr, out.Close())
 	_, diskErr := errors.AsType[*fs.PathError](copyErr)
 	switch {
 	case diskErr:
@@ -245,6 +247,16 @@ func (b *Bot) AddQueueFile(actor, tokenID, name string, r io.Reader, limit int64
 	}
 	if err != nil {
 		return store.OutboxFile{}, false, err
+	}
+	if !existed {
+		// A logout or the orphan sweep may have unlinked the file while it was being written.
+		if onDisk, serr := os.Stat(path); serr != nil || !os.SameFile(written, onDisk) {
+			b.Log.Error("queue file: removed while uploading", "id", got.ID)
+			if derr := b.Store.DeleteOutboxFile(got.ID, actor); derr != nil {
+				b.Log.Error("queue file: forget", "err", derr)
+			}
+			return store.OutboxFile{}, false, ErrFileStorage
+		}
 	}
 	keep = !existed
 	if existed {
@@ -535,14 +547,14 @@ func QueueFileExpires(f store.OutboxFile) time.Time {
 // DeleteQueueFile deletes a file the actor uploaded (any actor's for admin) unless queued items
 // still need it.
 func (b *Bot) DeleteQueueFile(actor, id string, admin bool) (err error) {
+	if !ValidQueueFileID(id) {
+		return store.ErrNotFound
+	}
 	var f store.OutboxFile
 	defer func() { b.Audit(actor, "queue_file_delete", id, fmt.Sprintf("%s, %d bytes", f.Kind, f.Size), err) }()
 	owner := actor
 	if admin {
 		owner = ""
-	}
-	if !ValidQueueFileID(id) {
-		return store.ErrNotFound
 	}
 	if f, err = b.Store.OutboxFile(id); err != nil {
 		return err
@@ -896,7 +908,7 @@ func (b *Bot) pruneQueueFiles() {
 	}
 	seen := map[string]*store.Token{}
 	for _, id := range tokens {
-		if _, err := b.queueToken(id, seen); err == nil {
+		if _, err := b.queueToken(id, seen); err == nil || errors.Is(err, errTokenLookup) {
 			continue
 		}
 		gone, err := b.Store.DeleteOutboxFilesOf(id)
@@ -945,17 +957,39 @@ func (b *Bot) sweepQueueFiles(before time.Time) {
 	}
 }
 
-// wipeQueueFiles deletes every queued file and the outbox directory (logout), audited when there
-// was anything to delete. Items that still refer to a file fail when their turn comes.
+// wipeQueueFiles deletes every queued file (logout), audited when there was anything to delete.
+// Only names wame chose are removed, and the directory only when that leaves it empty. Items that
+// still refer to a file fail when their turn comes.
 func (b *Bot) wipeQueueFiles(actor string) {
 	n, err := b.Store.WipeOutboxFiles()
 	if err == nil {
 		b.clearReady()
-		if rerr := os.RemoveAll(b.queueDir()); rerr != nil {
-			err = rerr
-		}
+		err = b.removeQueueDir()
 	}
 	if n > 0 || err != nil {
 		b.Audit(actor, "queue_files_wipe", "", fmt.Sprintf("%d files", n), err)
 	}
+}
+
+// removeQueueDir deletes the files wame stored in the queue directory, then the directory if it's empty.
+func (b *Bot) removeQueueDir() error {
+	dir := b.queueDir()
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Type().IsRegular() && ValidQueueFileID(e.Name()) {
+			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		b.Log.Warn("outbox: queue file directory kept", "err", err)
+	}
+	return nil
 }

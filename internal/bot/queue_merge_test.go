@@ -61,3 +61,21 @@ func TestQueueTagFileErrorNamesTheRow(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+func TestQueueTemplateLiteralBracesWithoutPlaceholders(t *testing.T) {
+	b := newTestBot(t)
+	menu := addFile(t, b, "ops", "menu.pdf", pdfBytes(100))
+	res, err := b.Queue(t.Context(), QueueOptions{Actor: "ops", Read: true, Template: true}, []QueueRequest{
+		{To: "5511999999999", Text: "Promo {{50% off}}"},
+		{To: "5511988887777", Text: "{{x}}", File: menu.ID},
+	})
+	if err != nil || len(res.Items) != 2 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if got, _ := b.Store.OutboxItem(res.Items[0].ID); got.Text != "Promo {50% off}" {
+		t.Fatalf("text %q", got.Text)
+	}
+	if got, _ := b.Store.OutboxItem(res.Items[1].ID); got.Text != "{x}" {
+		t.Fatalf("caption %q", got.Text)
+	}
+}

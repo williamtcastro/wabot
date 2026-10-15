@@ -50,10 +50,10 @@ curl -H "Authorization: Bearer $T" -X POST localhost:8080/queue -d '{
 |---|---|---|
 | Atomic with the queue row | no (write file, then row; sweep orphans) | yes |
 | DB size | unchanged | grows by every file; WAL churn; space only back after `VACUUM` |
-| Backups | must copy `outbox/` too | included |
+| Backups | must copy `wame-queue-files/` too | included |
 | Streaming upload to WhatsApp | from the file | whole BLOB in memory |
 
-**Recommendation: disk.** `<db dir>/outbox/<id>` (so `/data/outbox/` in Docker), directory 0700,
+**Recommendation: disk.** `<db dir>/wame-queue-files/<id>` (so `/data/wame-queue-files/` in Docker), directory 0700,
 files 0600, created with `O_EXCL`. The name on disk is the server's random id (`f_` + 16 random
 bytes hex), never anything the client sent, so there's no path to traverse. Metadata goes in a new
 table:
@@ -86,7 +86,7 @@ with what's used. Disk-full errors fail the upload, never a send.
 **Cleanup**, in `pruneOutbox` (hourly): a file with no open item (queued or sending) is deleted
 1 hour after its last item finished; a file never referenced is deleted 24 hours after upload
 (`expires_at`). The row stays until its items are pruned (7 days), with `size` and `sha256` only,
-so `GET /queue` still shows what was sent. On startup, files in `outbox/` without a row are removed.
+so `GET /queue` still shows what was sent. On startup, files in `wame-queue-files/` without a row are removed.
 
 ## Upload to WhatsApp once, or per recipient
 
@@ -157,7 +157,7 @@ the same flyer upload it twice; acceptable.
 
 ## Privacy
 
-Files are deleted as soon as nothing open needs them (above). `wame logout` removes `outbox/`
+Files are deleted as soon as nothing open needs them (above). `wame logout` removes `wame-queue-files/`
 entirely. The message stored in history after a send keeps only what any sent file
 keeps today (type, mime, size, name), not the bytes. Docs must say plainly that queued files sit on
 the server's disk until sent.
@@ -174,7 +174,7 @@ the server's disk until sent.
 ## Migration
 
 `migrateOutbox` creates `wame_outbox_files` and adds `wame_outbox.file_id`, `file_kind` and `file_size` idempotently; existing
-rows get `''` (text). The `outbox/` directory is created on first upload with 0700. Older servers
+rows get `''` (text). The `wame-queue-files/` directory is created on first upload with 0700. Older servers
 answer 404 on `/queue/files`; the admin panel shows "update the server". `docs/openapi.yaml`,
 `docs/API.md`, `docs/QUEUE.md` and the audit tables (`queue_file`, `queue_file_delete`: target the
 file id, detail `kind, N bytes`, never the name) are updated with the code.
@@ -244,10 +244,10 @@ What was decided while building:
 - Upload errors have their URLs cut to the host before they are stored: the upload URL carries
   WhatsApp's auth token.
 - Cleanup also deletes files of a revoked or expired token (their queued items fail with "file is
-  gone"), sweeps files in `outbox/` without a row older than 15 minutes (instead of only at startup), and
+  gone"), sweeps files in `wame-queue-files/` without a row older than 15 minutes (instead of only at startup), and
   runs once when the worker starts as well as hourly. Logout, `POST /logout` and WhatsApp logging
-  the device out delete every file and remove `outbox/` (audited as `queue_files_wipe`).
-- Backups (`wame backup`) copy the database only, not `outbox/`.
+  the device out delete every file and remove `wame-queue-files/` (audited as `queue_files_wipe`).
+- Backups (`wame backup`) copy the database only, not `wame-queue-files/`.
 - Files that are queued are audited as `send_file` with `kind, N bytes, queue #id` (no name); uploads
   and deletes as `queue_file` and `queue_file_delete`.
 - Types are sniffed from the bytes: JPEG, PNG, WebP; PDF, plain text, CSV, and the Office ZIP

@@ -25,6 +25,8 @@ func showQueueFile(f store.OutboxFile) queueFile {
 // uploadQueueFile takes a multipart body with one "file" part, streamed to disk: 201 for a new
 // file, 200 when the caller had already uploaded the same bytes.
 func (a *server) uploadQueueFile(w http.ResponseWriter, r *http.Request) {
+	// The upload holds one of a few slots; a client that trickles bytes mustn't keep it.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(queueUploadTimeout))
 	r.Body = http.MaxBytesReader(w, r.Body, maxUpload+1<<20)
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -120,3 +122,6 @@ func (a *server) deleteQueueFile(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
+
+// queueUploadTimeout bounds how long one upload may take to arrive.
+var queueUploadTimeout = 5 * time.Minute

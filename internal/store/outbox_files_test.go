@@ -1,7 +1,6 @@
 package store
 
 import (
-	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -163,7 +162,7 @@ func TestExpireOutboxFiles(t *testing.T) {
 
 func TestOutboxFileMigrationKeepsOldItems(t *testing.T) {
 	db := openDB(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	if _, err := db.Exec(`CREATE TABLE wame_outbox (
 		id INTEGER PRIMARY KEY AUTOINCREMENT, batch TEXT NOT NULL, actor TEXT NOT NULL, token_id TEXT NOT NULL DEFAULT '',
 		key TEXT NOT NULL DEFAULT '', recipient TEXT NOT NULL, text TEXT NOT NULL, reply_to TEXT NOT NULL DEFAULT '',

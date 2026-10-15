@@ -125,7 +125,7 @@ func TestQueueFileTypes(t *testing.T) {
 			t.Errorf("disk name %q", f.ID)
 		}
 	}
-	dir := filepath.Join(filepath.Dir(b.queueDir()), "outbox")
+	dir := b.queueDir()
 	info, err := os.Stat(dir)
 	if err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("outbox dir: %v %v", info.Mode(), err)
@@ -295,7 +295,7 @@ func TestQueueUploadReuse(t *testing.T) {
 	uploads := fakeUploads(b, nil)
 	f := addFile(t, b, "promo-bot", "flyer.png", pngBytes(t, 8, 8))
 	items := queueOne(t, b, f, 3)
-	ctx := context.Background()
+	ctx := t.Context()
 	for _, it := range items {
 		m, err := b.queueMediaFor(ctx, it)
 		if err != nil || m.up.DirectPath != "/v/x" || m.file.ID != f.ID {
@@ -351,7 +351,7 @@ func TestQueueUploadErrorsAndGoneFiles(t *testing.T) {
 	uploads := fakeUploads(b, errors.New(`Post "https://mmg.whatsapp.net/mms/image/abc?auth=SECRETAUTH&token=T0K": dial tcp: timeout`))
 	f := addFile(t, b, "promo-bot", "flyer.png", pngBytes(t, 8, 8))
 	items := queueOne(t, b, f, 2)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	m, wait, err := b.queuedFile(ctx, items[0], nil, maria)
 	if err == nil || m != nil || wait != 0 || uploads.Load() != 1 {
@@ -424,7 +424,7 @@ func TestUploadErrorsHideTheAuthToken(t *testing.T) {
 		return whatsmeow.UploadResponse{}, fmt.Errorf("failed to execute request: %w",
 			&url.Error{Op: "Post", URL: "https://mmg.whatsapp.net/mms/image/T0K?auth=SECRETAUTH&token=T0K", Err: context.DeadlineExceeded})
 	}
-	_, err := b.sendFile(context.Background(), types.NewJID("5511999999999", types.DefaultUserServer), nil, pngBytes(t, 2, 2), "x.png", "", SendOptions{})
+	_, err := b.sendFile(t.Context(), types.NewJID("5511999999999", types.DefaultUserServer), nil, pngBytes(t, 2, 2), "x.png", "", SendOptions{})
 	if err == nil || strings.Contains(err.Error(), "SECRETAUTH") || strings.Contains(err.Error(), "T0K") || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("POST /send/file upload error: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestUploadErrorsHideTheAuthToken(t *testing.T) {
 	if err := os.Mkdir(b.queueFilePath(f.ID), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, err = b.queueMediaFor(context.Background(), items[0])
+	_, err = b.queueMediaFor(t.Context(), items[0])
 	if err == nil || strings.Contains(err.Error(), b.dataDir) || strings.Contains(err.Error(), f.ID) {
 		t.Fatalf("a read error must not show the server's paths: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestQueueUploadWaitsForTheSlot(t *testing.T) {
 	if _, ok := b.Limiter.TryReserve(maria, time.Second); !ok {
 		t.Fatal("first slot")
 	}
-	m, wait, err := b.queuedFile(context.Background(), items[0], nil, maria)
+	m, wait, err := b.queuedFile(t.Context(), items[0], nil, maria)
 	if err != nil || m != nil || wait < time.Second || uploads.Load() != 0 {
 		t.Fatalf("no upload while the slot is far: %v %v %v %d", m, wait, err, uploads.Load())
 	}
@@ -531,7 +531,7 @@ func TestLogoutRemovesQueueFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.logout = func(context.Context) error { return nil }
-	if err := b.Logout(context.Background(), "ops"); err != nil {
+	if err := b.Logout(t.Context(), "ops"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(b.queueDir()); !os.IsNotExist(err) {
@@ -563,11 +563,11 @@ func TestFreshUploadEndsTheStep(t *testing.T) {
 	f := addFile(t, b, "promo-bot", "flyer.png", pngBytes(t, 8, 8))
 	items := queueOne(t, b, f, 1)
 	// A long upload: pause, quiet hours or a revoked token must be seen before the send.
-	m, d, err := b.queuedFile(context.Background(), items[0], nil, maria)
+	m, d, err := b.queuedFile(t.Context(), items[0], nil, maria)
 	if err != nil || m != nil || d != redoStep || uploads.Load() != 1 {
 		t.Fatalf("a fresh upload must end the step: %v %v %v", m, d, err)
 	}
-	m, d, err = b.queuedFile(context.Background(), items[0], nil, maria)
+	m, d, err = b.queuedFile(t.Context(), items[0], nil, maria)
 	if err != nil || m == nil || d != 0 || uploads.Load() != 1 {
 		t.Fatalf("the next step must use the kept upload: %v %v %v %d", m, d, err, uploads.Load())
 	}

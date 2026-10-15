@@ -196,15 +196,17 @@ func (b *Bot) Queue(ctx context.Context, opt QueueOptions, reqs []QueueRequest) 
 			items[i].SourceHash = sourceHash(r.tag, r.Text, r.Name)
 		}
 		if parts := templates[r.index]; opt.Template {
+			var names templateNames
 			if hasPlaceholders(parts) {
-				text, err := renderTemplate(parts, b.namesForTemplate(ctx, jid, r.Name))
-				if errors.Is(err, errNoName) {
-					noName[i] = true
-				} else if err := CheckQueueRequest(QueueRequest{To: r.To, Text: text, ReplyTo: r.ReplyTo, SendAt: r.SendAt, File: r.File}); err != nil {
-					return res, BadInput("%s: %v", r.where(), err)
-				} else {
-					items[i].Text = text
-				}
+				names = b.namesForTemplate(ctx, jid, r.Name)
+			}
+			text, err := renderTemplate(parts, names)
+			if errors.Is(err, errNoName) {
+				noName[i] = true
+			} else if err := CheckQueueRequest(QueueRequest{To: r.To, Text: text, ReplyTo: r.ReplyTo, SendAt: r.SendAt, File: r.File}); err != nil {
+				return res, BadInput("%s: %v", r.where(), err)
+			} else {
+				items[i].Text = text
 			}
 		}
 		if opt.Key != "" {
@@ -331,6 +333,7 @@ func (opt QueueOptions) skipSent() (*store.SkipSent, error) {
 // a restricted caller can't learn how big the tag is.
 func (b *Bot) expandTags(ctx context.Context, allow []string, reqs []QueueRequest) ([]queueRow, error) {
 	rows := make([]queueRow, 0, len(reqs))
+	expanded := map[string][]string{}
 	for i, r := range reqs {
 		tag, ok := QueueTag(r.To)
 		if !ok {
@@ -338,9 +341,13 @@ func (b *Bot) expandTags(ctx context.Context, allow []string, reqs []QueueReques
 			continue
 		}
 		tag = strings.ToLower(tag)
-		members, err := b.tagMembers(ctx, tag, allow)
-		if err != nil {
-			return nil, err
+		members, ok := expanded[tag]
+		if !ok {
+			var err error
+			if members, err = b.tagMembers(ctx, tag, allow); err != nil {
+				return nil, err
+			}
+			expanded[tag] = members
 		}
 		if len(members) == 0 {
 			if len(allow) > 0 {
