@@ -107,6 +107,12 @@ paths:
     post:
       tags: [Session]
       summary: Unlink this device and delete the session
+      description: >-
+        Unlinks the device and, if that worked, also deletes your own contacts (names, tags, notes,
+        language, time zone), the WhatsApp profile cache and group members in one transaction.
+        Messages, group names and the audit log are kept. The same happens when the phone unlinks
+        the device; a disconnect or restart while logged in keeps everything. Audited as
+        contacts_wipe (detail "N contacts", never names). Run `wame backup` first to keep your notes.
       responses:
         "200": { $ref: "#/components/responses/OK" }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -509,15 +515,30 @@ paths:
       - { name: number, in: path, required: true, schema: { type: string }, description: "Number (5511999999999, +5511999999999) or URL-escaped JID", example: "5511999999999" }
     get:
       tags: [Contacts]
-      summary: One person
+      summary: One person's profile
       description: |
-        Never asks WhatsApp; someone wame knows nothing about is still a 200. own (your fields, notes included) is
-        only returned to admin. Tokens limited to chats get 403 for anyone outside their list. Requires read.
+        Never asks WhatsApp unless refresh=1; someone wame knows nothing about is still a 200. Requires read.
+        Tokens limited to chats get 403 for anyone outside their list, and inside it always the basic view (jid,
+        phone, lid, names, own.tags, whatsapp.on_whatsapp and whatsapp.stale), even with admin. The full view
+        (notes, about, picture, business profile, activity, queue, opted_out, tokens) needs admin and no chat list.
+        PUT and PATCH still answer with ContactView.
+
+        refresh=1 asks WhatsApp now: 2 to 4 lookups from the shared lookup budget, at most once per person per
+        5 minutes (a second one returns the cache with refreshed false). It needs an admin token without a chat
+        list, checked before anything is looked up. A WhatsApp error is stored in whatsapp.error and the answer
+        is still 200 with refreshed false. Audited as contact_refresh.
+      parameters:
+        - name: refresh
+          in: query
+          schema: { type: boolean }
+          description: "1, true, 0 or false; anything else is a 400. 403 \"refresh=1 needs an admin token without a chat allowlist\" for any other caller."
       responses:
-        "200": { description: The person, content: { application/json: { schema: { $ref: "#/components/schemas/ContactView" } } } }
+        "200": { description: The profile, content: { application/json: { schema: { $ref: "#/components/schemas/ContactProfile" } } } }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502": { $ref: "#/components/responses/BadGateway" }
     put:
       tags: [Contacts]
       summary: Replace your own fields for a person
@@ -1320,6 +1341,98 @@ components:
             own:
               description: Your own fields; admin only, absent when you wrote nothing about them
               allOf: [{ $ref: "#/components/schemas/OwnContact" }]
+    ContactProfile:
+      type: object
+      description: |
+        One person. The basic view (read scope, or any token limited to chats) has jid, phone, lid, names,
+        own.tags and whatsapp.on_whatsapp / stale; everything else is the full view (admin, no chat list).
+      properties:
+        jid: { type: string, example: "5511988887777@s.whatsapp.net" }
+        phone: { type: string, example: "+5511988887777" }
+        lid: { type: string, example: "100000000000001@lid", description: "The person's hidden WhatsApp id when wame's LID map knows it, else an empty string" }
+        names:
+          type: object
+          properties:
+            name: { type: string, description: "The one name every view shows", example: John }
+            name_source: { type: string, enum: [own, book, business, push, number] }
+            own_name: { type: string }
+            book_name: { type: string }
+            business_name: { type: string }
+            push_name: { type: string }
+        own:
+          type: object
+          properties:
+            tags: { type: array, items: { type: string }, example: [clients] }
+            notes: { type: string, description: "Full view only" }
+            language: { type: string, example: en, description: "Full view only" }
+            time_zone: { type: string, example: America/New_York, description: "Full view only" }
+            created_at: { type: string, format: date-time }
+            created_by: { type: string }
+            updated_at: { type: string, format: date-time }
+            updated_by: { type: string }
+        whatsapp:
+          type: object
+          properties:
+            on_whatsapp: { type: boolean, nullable: true, description: "null when unknown" }
+            about: { type: string, description: "Full view only" }
+            about_at: { type: string, format: date-time }
+            verified_name: { type: string }
+            verified_level: { type: string }
+            picture:
+              type: object
+              properties:
+                id: { type: string }
+                url: { type: string, description: "Signed CDN link, dropped after 6 hours" }
+                hidden: { type: boolean }
+                as_of: { type: string, format: date-time }
+            business:
+              type: object
+              properties:
+                address: { type: string }
+                email: { type: string }
+                categories: { type: array, items: { type: string } }
+                options: { type: object, additionalProperties: { type: string } }
+                time_zone: { type: string }
+                as_of: { type: string, format: date-time }
+            as_of: { type: string, format: date-time }
+            stale: { type: boolean, description: "A part is older than its limit, or was never fetched" }
+            error: { type: string, description: "The last WhatsApp error, full view only" }
+            error_at: { type: string, format: date-time }
+        activity:
+          type: object
+          description: Full view only
+          properties:
+            first_at: { type: string, format: date-time }
+            last_at: { type: string, format: date-time }
+            sent: { type: integer }
+            received: { type: integer }
+            unread: { type: integer }
+            groups_in_common:
+              type: array
+              items:
+                type: object
+                properties:
+                  jid: { type: string, example: "120363000000000001@g.us" }
+                  name: { type: string, example: Team }
+        queue:
+          type: object
+          description: Full view only; the person's queue items in the last 7 days
+          properties:
+            window: { type: string, example: 7d }
+            total: { type: integer }
+            open: { type: integer }
+            sent: { type: integer }
+            delivered: { type: integer }
+            read: { type: integer }
+            failed: { type: integer }
+            last_at: { type: string, format: date-time }
+        opted_out: { type: boolean, description: "Full view only" }
+        tokens:
+          type: array
+          items: { type: string }
+          description: "Full view only: names of usable tokens whose chat list names this person"
+        refreshed: { type: boolean, description: "Only with refresh=1; false when the cache was returned or WhatsApp answered with an error" }
+        next_refresh_at: { type: string, format: date-time, description: "Only with refresh=1" }
     OwnContact:
       type: object
       properties:
@@ -1546,7 +1659,7 @@ components:
         id: { type: integer, format: int64 }
         at: { type: string, format: date-time }
         actor: { type: string, description: "Token name for API/MCP calls (api = owner secret or token-less, mcp = stdio without a token), or tui, cli, autoreply, whatsapp", example: "support-bot" }
-        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel, optout_add, optout_remove, alert_test, contact_set, contact_delete, contact_import, contact_delete_all, contact_export] }
+        action: { type: string, enum: [send, send_file, react, edit, delete, read, pair, logout, logged_out, qr, check, token_create, token_revoke, settings, webhook_test, webhook_replay, queue, queue_cancel, optout_add, optout_remove, alert_test, contact_set, contact_delete, contact_import, contact_delete_all, contact_export, contact_refresh, contacts_wipe] }
         target: { type: string, description: "Chat JID, when there is one" }
         detail: { type: string, example: "text, 6 chars" }
         ok: { type: boolean }

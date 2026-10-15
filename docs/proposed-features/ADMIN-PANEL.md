@@ -162,6 +162,8 @@ whatsmeow's own logs are separate (stdout, `waLog`), off in `tui` and `send`.
 | `contact_import` | `POST /contacts/import` | `N rows: A added, U updated`, plus ` (dry run)` (target = `csv`) |
 | `contact_delete_all` | `DELETE /contacts?all=true` | `N contacts` |
 | `contact_export` | `GET /contacts/export` | `N contacts` (target = `csv`) |
+| `contact_refresh` | `GET /contacts/{number}?refresh=1` | `N lookups` or the error (target = chat) |
+| `contacts_wipe` | `POST /logout`, `wame logout`, `logged_out` event | `N contacts` (target = none) |
 
 `send`, `send_file`, `react`, `edit` and `delete` run through `Bot.audited`, which records every
 attempt exactly once, whatever the outcome. Failures (`ok` = 0) include input errors such as empty

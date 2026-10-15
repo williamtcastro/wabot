@@ -1,12 +1,18 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
+	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/williamtcastro/wame/internal/auth"
 	"github.com/williamtcastro/wame/internal/bot"
@@ -91,7 +97,7 @@ func TestContactWrites(t *testing.T) {
 	if w := do(h, "DELETE", "/contacts/5511999999999", admin); w.Code != 200 {
 		t.Fatalf("DELETE = %d %s", w.Code, w.Body)
 	}
-	if v := contactView(t, do(h, "GET", "/contacts/5511999999999", admin)); v.Own != nil || v.Source != bot.SourceNumber {
+	if v := contactProfile(t, do(h, "GET", "/contacts/5511999999999", admin)); v.Own.UpdatedBy != "" || v.Names.Source != bot.SourceNumber {
 		t.Fatalf("after DELETE = %+v", v)
 	}
 
@@ -115,7 +121,7 @@ func TestContactReads(t *testing.T) {
 	h := newHandler(b, "")
 	admin := bearer(issue(t, b, "boss", []auth.Scope{auth.Admin}, nil, 0))
 	reader := bearer(issue(t, b, "reader", []auth.Scope{auth.Read}, nil, 0))
-	if v := contactView(t, do(h, "GET", "/contacts/5521987654321", reader)); v.Own != nil || v.Source != bot.SourceNumber || v.Phone != "+5521987654321" {
+	if v := contactProfile(t, do(h, "GET", "/contacts/5521987654321", reader)); v.Own.UpdatedBy != "" || v.Names.Source != bot.SourceNumber || v.Phone != "+5521987654321" {
 		t.Fatalf("an unknown person is still a 200: %+v", v)
 	}
 	for _, c := range []struct{ to, body string }{
@@ -129,13 +135,13 @@ func TestContactReads(t *testing.T) {
 	}
 
 	w := do(h, "GET", "/contacts/5511999999999", reader)
-	if v := contactView(t, w); v.Own != nil || v.Display != "Maria" || !slices.Equal(v.Tags, []string{"clients", "vip"}) || strings.Contains(w.Body.String(), "mornings") || strings.Contains(w.Body.String(), "pt-BR") {
+	if v := contactProfile(t, w); v.Own.UpdatedBy != "" || v.Names.Display != "Maria" || !slices.Equal(v.Own.Tags, []string{"clients", "vip"}) || strings.Contains(w.Body.String(), "mornings") || strings.Contains(w.Body.String(), "pt-BR") {
 		t.Fatalf("a read token sees names and tags only: %s", w.Body)
 	}
-	if v := contactView(t, do(h, "GET", "/contacts/"+maria, admin)); v.Own == nil || v.Own.Notes != "prefers mornings" || v.Own.Language != "pt-BR" {
+	if v := contactProfile(t, do(h, "GET", "/contacts/"+maria, admin)); v.Own.UpdatedBy != "boss" || v.Own.Notes != "prefers mornings" || v.Own.Language != "pt-BR" {
 		t.Fatalf("admin sees the own fields: %+v", v)
 	}
-	if v := contactView(t, do(h, "GET", "/contacts/5521987654321", admin)); v.Own == nil || v.Display != "Ana" || v.Phone != "+5521987654321" {
+	if v := contactProfile(t, do(h, "GET", "/contacts/5521987654321", admin)); v.Own.UpdatedBy == "" || v.Names.Display != "Ana" || v.Phone != "+5521987654321" {
 		t.Fatalf("the 9th-digit variant finds Ana's row: %+v", v)
 	}
 	if w := do(h, "GET", "/contacts/12", reader); w.Code != 400 {
@@ -221,7 +227,7 @@ func TestContactImportExport(t *testing.T) {
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &res) != nil || res != (store.ImportResult{Added: 3}) || count() != 3 {
 		t.Fatalf("import = %d %s, %d stored", w.Code, w.Body, count())
 	}
-	if v := contactView(t, do(h, "GET", "/contacts/552187654321", admin)); v.Own == nil || !slices.Equal(v.Tags, []string{"imported"}) {
+	if v := contactProfile(t, do(h, "GET", "/contacts/552187654321", admin)); v.Own.UpdatedBy == "" || !slices.Equal(v.Own.Tags, []string{"imported"}) {
 		t.Fatalf("add_tags = %+v", v)
 	}
 	if w := doCSV(h, "/contacts/import?dry_run=perhaps", good, admin); w.Code != 400 {
@@ -291,7 +297,7 @@ func TestContactMobileNeverHitsLandline(t *testing.T) {
 		}
 		return c
 	}
-	if v := contactView(t, do(h, "GET", "/contacts/"+mobile, only)); v.Display == "Maria" || len(v.Tags) != 0 {
+	if v := contactProfile(t, do(h, "GET", "/contacts/"+mobile, only)); v.Names.Display == "Maria" || len(v.Own.Tags) != 0 {
 		t.Fatalf("a token allowed only the mobile sees the landline's row: %+v", v)
 	}
 	if w := do(h, "DELETE", "/contacts/"+mobile, admin); w.Code != 404 {
@@ -339,5 +345,106 @@ func TestContactExportIsAudited(t *testing.T) {
 	entries, _ := b.Store.AuditLog(1, 0)
 	if len(entries) != 1 || entries[0].Action != "contact_export" || entries[0].Actor != "boss" || entries[0].Detail != "2 contacts" || !entries[0].OK {
 		t.Fatalf("audit = %+v", entries)
+	}
+}
+
+func contactProfile(t *testing.T, w *httptest.ResponseRecorder) bot.Profile {
+	t.Helper()
+	var p bot.Profile
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &p) != nil {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	return p
+}
+
+func jsonKeys(t *testing.T, w *httptest.ResponseRecorder) map[string]json.RawMessage {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &m) != nil {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	return m
+}
+
+// withLIDMap gives the bot a whatsmeow LID map in a scratch database, as login would.
+func withLIDMap(t *testing.T, b *bot.Bot, lid, pn string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "lids.db")+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	c := sqlstore.NewWithDB(db, "sqlite3", waLog.Noop)
+	if err := c.Upgrade(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	b.Client.Store.LIDs = c.LIDMap
+	l, _ := types.ParseJID(lid)
+	p, _ := types.ParseJID(pn)
+	if err := b.Client.Store.LIDs.PutLIDMapping(t.Context(), l, p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestContactProfileScopes(t *testing.T) {
+	b := newTestBot(t)
+	seed(t, b)
+	h := newHandler(b, "")
+	admin := bearer(issue(t, b, "boss", []auth.Scope{auth.Admin}, nil, 0))
+	reader := bearer(issue(t, b, "reader", []auth.Scope{auth.Read}, nil, 0))
+	issue(t, b, "maria-bot", []auth.Scope{auth.Read}, []string{maria}, 0)
+	if w := doJSON(h, "PUT", "/contacts/5511999999999", `{"name":"Maria","tags":["clients"],"notes":"prefers mornings","language":"pt-BR"}`, admin); w.Code != 200 {
+		t.Fatalf("PUT = %d %s", w.Code, w.Body)
+	}
+
+	w := do(h, "GET", "/contacts/5511999999999", reader)
+	keys := jsonKeys(t, w)
+	for _, k := range []string{"activity", "queue", "opted_out", "tokens", "refreshed"} {
+		if _, ok := keys[k]; ok {
+			t.Errorf("a read token got %q: %s", k, w.Body)
+		}
+	}
+	for _, secret := range []string{"mornings", "pt-BR", "about", "maria-bot", "notes"} {
+		if strings.Contains(w.Body.String(), secret) {
+			t.Errorf("a read token's profile carries %q: %s", secret, w.Body)
+		}
+	}
+	for _, k := range []string{"jid", "phone", "lid", "names", "own", "whatsapp"} {
+		if _, ok := keys[k]; !ok {
+			t.Errorf("basic profile lacks %q: %s", k, w.Body)
+		}
+	}
+	if p := contactProfile(t, w); p.Names.Display != "Maria" || !slices.Equal(p.Own.Tags, []string{"clients"}) {
+		t.Fatalf("basic profile = %+v", p)
+	}
+
+	w = do(h, "GET", "/contacts/5511999999999", admin)
+	keys = jsonKeys(t, w)
+	for _, k := range []string{"activity", "queue", "opted_out", "tokens"} {
+		if _, ok := keys[k]; !ok {
+			t.Errorf("admin profile lacks %q: %s", k, w.Body)
+		}
+	}
+	p := contactProfile(t, w)
+	if p.Own.Notes != "prefers mornings" || p.Own.Language != "pt-BR" || !slices.Equal(p.Tokens, []string{"maria-bot"}) ||
+		p.Activity == nil || p.Activity.Received != 1 || p.Activity.Sent != 1 || p.OptedOut == nil || *p.OptedOut || p.Refreshed != nil {
+		t.Fatalf("admin profile = %s", w.Body)
+	}
+}
+
+func TestContactProfileLID(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "")
+	reader := bearer(issue(t, b, "reader", []auth.Scope{auth.Read}, nil, 0))
+	const lid = "100000000000001@lid"
+	if p := contactProfile(t, do(h, "GET", "/contacts/5511999999999", reader)); p.LID != "" {
+		t.Fatalf("lid without a mapping = %q", p.LID)
+	}
+	withLIDMap(t, b, lid, maria)
+	if p := contactProfile(t, do(h, "GET", "/contacts/5511999999999", reader)); p.LID != lid || p.JID != maria {
+		t.Fatalf("by number = %+v", p)
+	}
+	if p := contactProfile(t, do(h, "GET", "/contacts/"+lid, reader)); p.LID != lid || p.JID != maria {
+		t.Fatalf("by lid = %+v", p)
 	}
 }

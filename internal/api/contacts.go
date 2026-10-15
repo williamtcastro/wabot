@@ -63,23 +63,28 @@ func (a *server) contactTags(w http.ResponseWriter, r *http.Request) {
 	respond(w, tags, err)
 }
 
-// visibleContact drops your own fields (notes among them) for callers without admin.
-func visibleContact(p auth.Principal, v bot.ContactView) bot.ContactView {
-	if !p.Has(auth.Admin) {
-		v.Own = nil
-	}
-	return v
-}
+const errRefreshForbidden = "refresh=1 needs an admin token without a chat allowlist"
 
-// contact is one person, never looked up on WhatsApp. A restricted token gets the fixed 403 for
-// anyone outside its allowlist.
+// contact is one person's profile: the full one for admin tokens without an allowlist, the basic
+// one for everyone else. Only ?refresh=1 (those admin tokens) asks WhatsApp. A restricted token
+// gets the fixed 403 for anyone outside its allowlist, never a lookup.
 func (a *server) contact(w http.ResponseWriter, r *http.Request) {
 	to, ok := a.authorizeChat(w, r, r.PathValue("number"))
 	if !ok {
 		return
 	}
-	v, err := a.b.ContactOf(r.Context(), to)
-	respond(w, visibleContact(principal(r), v), err)
+	refresh, ok := boolParam(w, r, "refresh")
+	if !ok {
+		return
+	}
+	p := principal(r)
+	full := p.Has(auth.Admin) && !p.Restricted()
+	if refresh && !full {
+		writeErr(w, http.StatusForbidden, errRefreshForbidden)
+		return
+	}
+	v, err := a.b.Profile(r.Context(), to, bot.ProfileOptions{Full: full, Refresh: refresh, Actor: p.Name})
+	respond(w, v, err)
 }
 
 // putContact replaces your own fields (PUT) or changes only the ones given (PATCH).

@@ -36,7 +36,8 @@ Base URL: whatever you passed to `-addr` (default `http://127.0.0.1:8080` for `s
 | GET | `/chats` | conversations by most recent activity |
 | GET | `/contacts` | people: the phone's address book and your own contact list |
 | GET | `/contacts/tags` | your tags and how many people have each |
-| GET, PUT, PATCH, DELETE | `/contacts/{number}` | one person; set or clear your own name, tags, notes, language, time zone |
+| GET, PUT, PATCH, DELETE | `/contacts/{number}` | one person's profile (`GET`); set or clear your own name, tags, notes, language, time zone |
+| GET | `/contacts/{number}?refresh=1` | ask WhatsApp about one person now (admin, no chat limit; 2 to 4 lookups) |
 | DELETE | `/contacts?all=true` | empty your own contact list |
 | POST | `/contacts/import` | import your own contact list from a CSV |
 | GET | `/contacts/export` | your own contact list as a CSV |
@@ -135,7 +136,8 @@ its queue items with token-less `wame mcp`: revoke it and issue one under anothe
 | `GET /media/{seq}` | read | 404 for messages outside the allowed chats |
 | `GET /chats` | read | only allowed chats are listed |
 | `GET /contacts` | read | only allowed chats are listed |
-| `GET /contacts/{number}` | read (your own fields, notes included, only with admin) | only allowed chats (403 otherwise) |
+| `GET /contacts/{number}` | read (the full profile only with admin and no chat limit) | only allowed chats (403 otherwise), always the basic view |
+| `GET /contacts/{number}?refresh=1` | admin | 403 (even with `admin`), before anything is looked up |
 | `GET /contacts/tags`, `GET /groups` | read | 403 |
 | `PUT`, `PATCH`, `DELETE /contacts/{number}`, `DELETE /contacts`, `POST /contacts/import`, `GET /contacts/export` | admin | n/a |
 | `POST /check` | send | 403 |
@@ -196,7 +198,7 @@ Non-2xx responses always look like this:
 |---|---|
 | 400 | bad input: missing fields, invalid JSON (or anything after the JSON value), bad recipient, a number that isn't on WhatsApp, unknown or deleted `reply_to`, editing someone else's message or one older than 20 minutes, idempotency key over 200 characters, media over the 100 MB download cap |
 | 401 | missing, malformed, unknown, revoked or expired token; or `?token=` on a route that doesn't accept it |
-| 403 | the token lacks the scope, or is limited to chats and the request is outside them (or uses `/contacts/tags`, `/groups`, `/check`); a token tried to create an admin token; or token-less mode and the request isn't a local same-origin one |
+| 403 | the token lacks the scope, or is limited to chats and the request is outside them (or uses `/contacts/tags`, `/groups`, `/check`, `?refresh=1`); a token tried to create an admin token; or token-less mode and the request isn't a local same-origin one |
 | 404 | not found: no QR pending, unknown message `id` in that chat, unknown `seq`, a message without media, a deleted message's media, or `DELETE /contacts/{number}` for someone without your own fields |
 | 409 | an idempotency key was reused for a different request; canceling a queued message that is already sending or finished |
 | 410 | media expired on WhatsApp's servers (`/media`) |
@@ -337,8 +339,13 @@ On the phone: **Linked devices → Link a device → Link with phone number inst
 
 ## `POST /logout`
 
-Unlinks the device from your phone and wipes the session from `wame.db`. You'll need to
-log in again afterwards (restart the process to get a new QR). Returns `{"ok": true}`.
+Unlinks the device from your phone and wipes the session from `wame.db`. If the unlink worked, it
+also deletes your own contacts (names, tags, notes, language, time zone), the WhatsApp profile
+cache and group members, in one transaction (messages, group names and the audit log are kept).
+The same happens when the phone unlinks the device. A disconnect or restart while still logged in
+keeps everything. The wipe is audited as `contacts_wipe` (detail `N contacts`, never names). Run
+`wame backup` first if you want to keep your notes. You'll need to log in again afterwards
+(restart the process to get a new QR). Returns `{"ok": true}`.
 
 ## `POST /send`
 
@@ -730,7 +737,8 @@ business name, the name the person set in WhatsApp (shown as `~Name`), then `+nu
 `name_source` says which one it is (`own`, `book`, `business`, `push`, `number`).
 
 None of these routes ever asks WhatsApp anything, except a `PUT` by an admin while logged in,
-which resolves a number once so your fields land under the chat WhatsApp uses.
+which resolves a number once so your fields land under the chat WhatsApp uses, and
+`GET /contacts/{number}?refresh=1`.
 
 ### `GET /contacts`
 
@@ -766,21 +774,91 @@ only those chats, filtered the same way.
 
 ### `GET /contacts/{number}`
 
-One person, by number (`5511999999999`, `+5511999999999`) or URL-escaped JID. Someone wame knows
-nothing about is still a 200, with only the number. Groups are 400 `contacts are people, not
-groups`. A `read` token gets the list fields; with `admin`, `own` adds your own fields:
+One person's profile, by number (`5511999999999`, `+5511999999999`) or URL-escaped JID. It never
+asks WhatsApp unless you pass `?refresh=1` (see below): everything comes from wame's own tables and
+what WhatsApp said last time. Someone wame knows nothing about is still a 200, with only the number.
+Groups are 400 `contacts are people, not groups`.
+
+The **basic view** is for `read` tokens and for every token limited to chats, even one with
+`admin`:
 
 ```json
-{ "jid": "5511988887777@s.whatsapp.net", "phone": "+5511988887777", "name": "John",
-  "name_source": "own", "own_name": "John", "tags": ["clients"],
-  "own": { "jid": "5511988887777@s.whatsapp.net", "name": "John", "tags": ["clients"],
-           "notes": "prefers mornings", "language": "en", "time_zone": "America/New_York",
-           "created_at": "2026-10-13T09:12:00-03:00", "created_by": "admin-panel",
-           "updated_at": "2026-10-13T09:12:00-03:00", "updated_by": "admin-panel" } }
+{ "jid": "5511988887777@s.whatsapp.net", "phone": "+5511988887777",
+  "lid": "100000000000001@lid",
+  "names": { "name": "John", "name_source": "own", "own_name": "John", "push_name": "John" },
+  "own": { "tags": ["clients"] },
+  "whatsapp": { "on_whatsapp": true, "stale": false } }
 ```
+
+`lid` is the person's hidden WhatsApp id when wame's map knows it, else an empty string. `names`
+has `name` (the one name every view shows), `name_source`, and `own_name`, `book_name`,
+`business_name` and `push_name` when known. `on_whatsapp` is `null` when unknown; `stale` says the
+cached WhatsApp data is older than its limit or was never fetched.
+
+The **full view** is for `admin` tokens without a chat limit. It adds more to `own` and
+`whatsapp`, and these top-level fields:
+
+```json
+{ "jid": "5511988887777@s.whatsapp.net", "phone": "+5511988887777",
+  "lid": "100000000000001@lid",
+  "names": { "name": "John", "name_source": "own", "own_name": "John", "push_name": "John" },
+  "own": { "tags": ["clients"], "notes": "prefers mornings", "language": "en",
+           "time_zone": "America/New_York",
+           "created_at": "2026-10-13T09:12:00-03:00", "created_by": "admin-panel",
+           "updated_at": "2026-10-13T09:12:00-03:00", "updated_by": "admin-panel" },
+  "whatsapp": { "on_whatsapp": true, "about": "Available", "about_at": "2026-10-14T08:00:00-03:00",
+                "picture": { "id": "1700000000", "url": "https://example.invalid/pic.jpg",
+                             "hidden": false, "as_of": "2026-10-14T08:00:00-03:00" },
+                "as_of": "2026-10-14T08:00:00-03:00", "stale": false },
+  "activity": { "first_at": "2026-09-01T10:00:00-03:00", "last_at": "2026-10-14T18:30:00-03:00",
+                "sent": 12, "received": 15, "unread": 1,
+                "groups_in_common": [ { "jid": "120363000000000001@g.us", "name": "Team" } ] },
+  "queue": { "window": "7d", "total": 2, "open": 0, "sent": 1, "delivered": 1, "read": 0,
+             "failed": 0, "last_at": "2026-10-14T12:00:00-03:00" },
+  "opted_out": false,
+  "tokens": ["reports"] }
+```
+
+| Field | |
+|---|---|
+| `own` | adds `notes`, `language`, `time_zone`, `created_at`, `created_by`, `updated_at`, `updated_by` |
+| `whatsapp` | adds `about`, `about_at`, `verified_name`, `verified_level`, `picture` (`id`, `url`, `hidden`, `as_of`), `business` (`address`, `email`, `categories`, `options`, `time_zone`, `as_of`), `as_of`, `error`, `error_at` |
+| `activity` | from stored messages: `first_at`, `last_at`, `sent`, `received`, `unread`, `groups_in_common` (`jid`, `name`) |
+| `queue` | the person's queue items in the last 7 days (`window` is `"7d"`): `total`, `open`, `sent`, `delivered`, `read`, `failed`, `last_at` |
+| `opted_out` | whether the person is on the opt-out list |
+| `tokens` | names of usable tokens whose chat limit names this person |
+
+The picture `url` is a signed WhatsApp CDN link that wame drops after 6 hours.
 
 A token limited to chats can ask only about those chats; anyone else gets the usual 403 `this
 token can't access that chat`, and the number is never looked up.
+
+#### `?refresh=1`
+
+`refresh` takes `1`, `true`, `0` or `false`; anything else is a 400. A refresh is for `admin`
+tokens without a chat limit. Any other caller, a limited admin token included, gets 403
+`refresh=1 needs an admin token without a chat allowlist`, checked before anything is looked up.
+
+It asks WhatsApp now and spends 2 to 4 lookups from the shared lookup budget: whether the number
+is on WhatsApp, the profile info (about, verified name), the picture when it changed, and the
+business profile when there is a verified name. It runs at most once per person per 5 minutes. The
+answer is the full view plus `refreshed` and `next_refresh_at`:
+
+```json
+{ "jid": "5511988887777@s.whatsapp.net", "refreshed": true,
+  "next_refresh_at": "2026-10-15T10:05:00-03:00" }
+```
+
+(Shown without the other full-view fields.) A second refresh inside the 5 minutes returns the
+cached profile with `refreshed: false`. When WhatsApp answers with an error, it is stored in
+`whatsapp.error` and `whatsapp.error_at`, and the answer is still a 200 with `refreshed: false`.
+Other errors: 429 with `Retry-After` when the lookup budget is spent, 502 when wame isn't logged
+in. A refresh is audited as `contact_refresh` (`target` the chat JID, `detail` `N lookups` or the
+error).
+
+```sh
+curl -H "Authorization: Bearer $T" "localhost:8080/contacts/5511988887777?refresh=1"
+```
 
 ### `PUT /contacts/{number}`, `PATCH /contacts/{number}`
 
@@ -798,7 +876,7 @@ Admin only. The body (at most 64 KB) has any of:
 `PUT` replaces all your fields: one left out is cleared. `PATCH` changes only the fields given:
 `null` or `""` clears one. Unknown fields are a 400, and so is a body that isn't a JSON object
 (`null` included). When every field ends up empty, the person is removed from your list. Both
-answer with the person as in `GET`, `own` included.
+answer with the contact view (the list fields plus `own`), not the profile that `GET` returns.
 
 While wame is logged in, `PUT` with a number (not a JID) looks it up once on WhatsApp, so the row
 lands under the JID messages use (for example the form with or without Brazil's 9th digit). A number
@@ -858,8 +936,8 @@ so importing it gives back the same list. It holds your notes: keep the file pri
 written as stored; a spreadsheet may treat one starting with `=`, `+`, `-` or `@` as a formula.
 
 Writes are audited as `contact_set` (the changed field names), `contact_delete`,
-`contact_import` (`N rows: A added, U updated`) and `contact_delete_all` (`N contacts`), and the
-export as `contact_export` (`N contacts`). Names, notes and tags are never in the audit `detail`;
+`contact_import` (`N rows: A added, U updated`) and `contact_delete_all` (`N contacts`), a refresh
+as `contact_refresh` (`N lookups` or the error), and the export as `contact_export` (`N contacts`). Names, notes and tags are never in the audit `detail`;
 the `error` of a rejected write may quote the value that was refused (a tag, language, time zone or
 unknown field name, cut to at most 64 characters), and `/audit` is admin-only.
 
@@ -930,7 +1008,7 @@ input (`ok: false` with the error). Message text is never stored here.
 `actor` is the token's name for API and MCP calls (`api` for the owner secret and token-less
 mode, `mcp` for `wame mcp` without a token), or `tui`, `cli`, `autoreply` or `whatsapp`.
 `action` is `send`, `send_file`, `react`, `edit`, `delete`, `read`, `pair`, `logout`,
-`logged_out`, `token_create`, `token_revoke` (for the token ones, `target` is the token name and
+`logged_out`, `contacts_wipe` (`detail` `N contacts`), `token_create`, `token_revoke` (for the token ones, `target` is the token name and
 `detail` the requested scopes), `settings` (`detail` lists the changes, e.g. `rate=10, chat_gap
 reset`), `webhook_test` or `webhook_replay` (`detail` is the delivery id), `alert_test`
 (`detail` is the backend, `gotify`), `qr`, `check`, `queue` (`target` is the batch, `detail` `N

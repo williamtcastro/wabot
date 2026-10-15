@@ -557,7 +557,8 @@ chats.
 |---|---|---|
 | `GET /contacts` | read | `Bot.Contacts` with `Allow` = the token's list, expanded by `ExpandAllowlist` (only the list's own entries are ever resolved); `tag=` and `q=` filter inside it |
 | `GET /contacts/tags` | read | forbidden (`unrestricted`): tag names and counts span every contact |
-| `GET /contacts/{number}` | read | `authorizeChat` (`LocalChat` + `ChatAllowed`, no lookup), the fixed 403 text otherwise; your own fields (`own`, with the notes) only for admin |
+| `GET /contacts/{number}` | read | `authorizeChat` (`LocalChat` + `ChatAllowed`, no lookup), the fixed 403 text otherwise; a restricted token always gets the basic profile, even with admin; the full one (notes included) only for admin without an allowlist |
+| `GET /contacts/{number}?refresh=1` | admin | refused for restricted tokens (even admin) with `refresh=1 needs an admin token without a chat allowlist`, before anything is looked up |
 | `PUT`/`PATCH`/`DELETE /contacts/{number}`, `DELETE /contacts?all=true`, `POST /contacts/import`, `GET /contacts/export` | admin | n/a |
 
 - **Why filtered is safe.** A restricted token could already see these people's names through
@@ -571,8 +572,8 @@ chats.
 - **Writes are admin only.** A name feeds every token's display and a tag will decide who a
   `tag:` batch reaches, so a `send` or `read` token can't change them.
 - **Notes** are only in `own`, which is returned to admin callers only, and in the admin-only CSV
-  export (audited as `contact_export`). MCP's `find_contact` never returns them, even to an admin
-  connection. Audit details carry field names and counts, never values; the `error` of a rejected
+  export (audited as `contact_export`). MCP's `find_contact` and `contact_profile` never return them, even to an admin
+  connection (`contact_profile` uses the allowlist, with no lookups). Audit details carry field names and counts, never values; the `error` of a rejected
   write may quote the refused tag, language, time zone or field name (cut to at most 64
   characters), and the audit log is admin-only.
 - **9th digit, mobiles only.** The variant with or without Brazil's 9th digit is only computed when

@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/williamtcastro/wame/internal/auth"
 	"github.com/williamtcastro/wame/internal/bot"
+	"github.com/williamtcastro/wame/internal/store"
 )
 
 // Regression tests for docs/security/SCOPED-TOKENS.md findings.
@@ -140,11 +142,64 @@ func TestRestrictedContacts(t *testing.T) {
 			t.Errorf("restricted /contacts/%s = %d %s; want the fixed 403", probe, w.Code, w.Body)
 		}
 	}
-	if v := contactView(t, do(h, "GET", "/contacts/5511999999999", mariaBot)); v.JID != maria || v.Own != nil {
+	if v := contactProfile(t, do(h, "GET", "/contacts/5511999999999", mariaBot)); v.JID != maria || v.Own.Notes != "" || v.Activity != nil {
 		t.Errorf("restricted own chat = %+v", v)
 	}
 	if after := lookups(); after != before {
 		t.Fatalf("restricted contact reads spent lookups: %+v -> %+v", before, after)
+	}
+}
+
+// restrictedAdmin stores an admin token limited to chats, which auth.Issue refuses to create, to
+// check that the API still treats such a row as restricted.
+func restrictedAdmin(t *testing.T, b *bot.Bot, chats ...string) map[string]string {
+	t.Helper()
+	plain := auth.Prefix + "abcdefgh_" + strings.Repeat("x", 43)
+	sum := sha256.Sum256([]byte(plain))
+	if err := b.Store.InsertToken(store.Token{ID: "abcdefgh", Name: "boss-maria", Hash: sum[:], Scopes: []string{string(auth.Admin)}, Chats: chats, Created: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	return bearer(plain)
+}
+
+// GET /contacts/{number}?refresh=1 asks WhatsApp, so only an admin token without an allowlist may
+// call it, and every refusal comes before any lookup is charged.
+func TestContactRefreshNeedsUnrestrictedAdmin(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "")
+	admin := bearer(issue(t, b, "boss", []auth.Scope{auth.Admin}, nil, 0))
+	reader := bearer(issue(t, b, "reader", []auth.Scope{auth.Read}, nil, 0))
+	bossMaria := restrictedAdmin(t, b, maria)
+	if w := doJSON(h, "PUT", "/contacts/5511999999999", `{"name":"Maria","notes":"prefers mornings"}`, admin); w.Code != 200 {
+		t.Fatalf("PUT = %d %s", w.Code, w.Body)
+	}
+	lookups := func() bot.LimiterStats { s := b.Lookups.Stats(); s.NextFree = time.Time{}; return s }
+	before := lookups()
+
+	for _, c := range []struct {
+		name string
+		hdr  map[string]string
+		path string
+		code int
+		want string
+	}{
+		{"read token", reader, "/contacts/5511999999999?refresh=1", 403, errRefreshForbidden},
+		{"restricted admin", bossMaria, "/contacts/5511999999999?refresh=true", 403, errRefreshForbidden},
+		{"restricted admin, other chat", bossMaria, "/contacts/5511988887777?refresh=1", 403, errChatForbidden},
+		{"restricted admin, other chat, no refresh", bossMaria, "/contacts/5511988887777", 403, errChatForbidden},
+		{"bad value", admin, "/contacts/5511999999999?refresh=maybe", 400, "refresh"},
+		{"not logged in", admin, "/contacts/5511999999999?refresh=1", 502, "not logged in"},
+	} {
+		w := do(h, "GET", c.path, c.hdr)
+		if w.Code != c.code || !strings.Contains(errorOf(w), c.want) {
+			t.Errorf("%s: %d %s, want %d %q", c.name, w.Code, w.Body, c.code, c.want)
+		}
+	}
+	if w := do(h, "GET", "/contacts/5511999999999", bossMaria); strings.Contains(w.Body.String(), "mornings") || strings.Contains(w.Body.String(), `"activity"`) {
+		t.Fatalf("a restricted admin token gets the basic profile only: %s", w.Body)
+	}
+	if after := lookups(); after != before {
+		t.Fatalf("refused refreshes spent lookups: %+v -> %+v", before, after)
 	}
 }
 
