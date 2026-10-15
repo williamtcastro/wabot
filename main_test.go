@@ -36,28 +36,16 @@ func TestDefaultDB(t *testing.T) {
 	if got, want := defaultDB(), filepath.Join(home, ".config", "wame", "wame.db"); got != want {
 		t.Errorf("relative XDG_CONFIG_HOME must be ignored: %q", got)
 	}
-	old := filepath.Join(xdg, "wabot", "wabot.db")
-	if err := os.MkdirAll(filepath.Dir(old), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(old, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("XDG_CONFIG_HOME", xdg)
-	if got := defaultDB(); got != old {
-		t.Errorf("a pre-rename database must be picked up when there's no new one: %q", got)
-	}
 }
 
-func TestEnvFallsBackToOldNames(t *testing.T) {
+func TestEnvOr(t *testing.T) {
 	t.Setenv("WAME_RATE", "")
-	t.Setenv("WABOT_RATE", "7")
-	if got := envOr("WAME_RATE", "20"); got != "7" {
-		t.Errorf("WABOT_RATE fallback = %q", got)
+	if got := envOr("WAME_RATE", "20"); got != "20" {
+		t.Errorf("unset: %q", got)
 	}
 	t.Setenv("WAME_RATE", "9")
 	if got := envOr("WAME_RATE", "20"); got != "9" {
-		t.Errorf("WAME_RATE must win: %q", got)
+		t.Errorf("set: %q", got)
 	}
 }
 

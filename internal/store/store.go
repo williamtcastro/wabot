@@ -21,9 +21,6 @@ type Store struct {
 
 // Open creates or upgrades wame's tables in db.
 func Open(ctx context.Context, db *sql.DB) (*Store, error) {
-	if err := renameLegacyTables(ctx, db); err != nil {
-		return nil, fmt.Errorf("rename wabot_ tables: %w", err)
-	}
 	if err := migrate(ctx, db); err != nil {
 		return nil, fmt.Errorf("create message tables: %w", err)
 	}
@@ -424,66 +421,4 @@ FROM wame_messages m WHERE type <> 'reaction' GROUP BY chat ORDER BY MAX(ts) DES
 		out[i].Name = name(out[i].JID, push[i])
 	}
 	return out, nil
-}
-
-// legacyPrefix is the table prefix from before the rename to wame.
-const legacyPrefix = "wabot_"
-
-// renameLegacyTables moves a database from before the rename to the wame_ names, in one
-// transaction. Tables are renamed with their rows; indexes, triggers and the search index are
-// dropped, and the migrations after this one recreate them (rebuilding the search index).
-func renameLegacyTables(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx, `SELECT type, name FROM sqlite_master WHERE name LIKE 'wabot\_%' ESCAPE '\'`)
-	if err != nil {
-		return err
-	}
-	var tables, other [][2]string
-	for rows.Next() {
-		var typ, name string
-		if err := rows.Scan(&typ, &name); err != nil {
-			rows.Close()
-			return err
-		}
-		if typ == "table" {
-			tables = append(tables, [2]string{typ, name})
-		} else {
-			other = append(other, [2]string{typ, name})
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil || len(tables)+len(other) == 0 {
-		return err
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, o := range other {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DROP %s IF EXISTS "%s"`, strings.ToUpper(o[0]), o[1])); err != nil {
-			return err
-		}
-	}
-	// Dropping the search index also drops its shadow tables, so skip those below.
-	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS wabot_messages_fts`); err != nil {
-		return err
-	}
-	for _, t := range tables {
-		name := t[1]
-		if strings.HasPrefix(name, "wabot_messages_fts") {
-			continue
-		}
-		newName := "wame_" + strings.TrimPrefix(name, legacyPrefix)
-		exists, err := tableExists(ctx, tx, newName)
-		if err != nil {
-			return err
-		}
-		if exists {
-			return fmt.Errorf("both %s and %s exist; keep one and remove the other", name, newName)
-		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE "%s" RENAME TO "%s"`, name, newName)); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
 }

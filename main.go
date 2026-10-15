@@ -222,9 +222,6 @@ func run(ctx context.Context, cmd string, args []string, c config) error {
 	if dir := filepath.Dir(c.db); dir != "." {
 		_ = os.MkdirAll(dir, 0o700)
 	}
-	if c.db == defaultDB() {
-		legacyDBNotice(c.db)
-	}
 
 	b, err := bot.New(ctx, c.db, waLogger, log)
 	if err != nil {
@@ -502,33 +499,21 @@ func isLoopbackAddr(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// envOr reads WAME_* variables, falling back to the WABOT_* names from before the rename.
+// envOr reads the environment variable k, or def when it is unset or empty.
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
 	}
-	if old, ok := strings.CutPrefix(k, "WAME_"); ok {
-		if v := os.Getenv("WABOT_" + old); v != "" {
-			return v
-		}
-	}
 	return def
 }
 
-// defaultDB is ~/.config/wame/wame.db (or $XDG_CONFIG_HOME/wame/wame.db) on macOS and Linux alike. A
-// database from before the rename (~/.config/wabot/wabot.db) is used when there's no new one yet.
+// defaultDB is ~/.config/wame/wame.db (or $XDG_CONFIG_HOME/wame/wame.db) on macOS and Linux alike.
 func defaultDB() string {
 	dir := configDir()
 	if dir == "" {
 		return "wame.db"
 	}
-	current := filepath.Join(dir, "wame", "wame.db")
-	if _, err := os.Stat(current); errors.Is(err, os.ErrNotExist) {
-		if old := filepath.Join(dir, "wabot", "wabot.db"); fileExists(old) {
-			return old
-		}
-	}
-	return current
+	return filepath.Join(dir, "wame", "wame.db")
 }
 
 func configDir() string {
@@ -543,25 +528,6 @@ func configDir() string {
 		return filepath.Join(home, ".config")
 	}
 	return ""
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-// legacyDBNotice points at a wabot.db in the current directory, where early versions kept it.
-func legacyDBNotice(path string) {
-	if fileExists(path) || !fileExists("wabot.db") {
-		return
-	}
-	dir := filepath.Dir(path)
-	if home, err := os.UserHomeDir(); err == nil {
-		if rest, ok := strings.CutPrefix(dir, home+string(filepath.Separator)); ok {
-			dir = filepath.Join("~", rest)
-		}
-	}
-	fmt.Fprintf(os.Stderr, "notice: ./wabot.db is no longer the default; move it with 'mkdir -p %[1]s && mv wabot.db %[1]s/wame.db' (and its -wal/-shm files) or pass '-db wabot.db'\n", dir)
 }
 
 // logBufferSize is how many app log records GET /logs can return.

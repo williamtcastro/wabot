@@ -33,7 +33,7 @@ func queueServer(t *testing.T) (*bot.Bot, string) {
 	t.Cleanup(func() { b.Close() })
 	srv := httptest.NewServer(api.NewHandler(b, &auth.Authenticator{Store: b.Store, Owner: testOwner}, "test"))
 	t.Cleanup(srv.Close)
-	for _, k := range []string{"WAME_SERVER", "WAME_TOKEN", "WABOT_SERVER", "WABOT_TOKEN"} {
+	for _, k := range []string{"WAME_SERVER", "WAME_TOKEN"} {
 		t.Setenv(k, "")
 	}
 	cfg := t.TempDir()

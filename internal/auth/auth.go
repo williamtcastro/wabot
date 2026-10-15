@@ -29,9 +29,6 @@ const (
 // Prefix starts every issued token, so leaked tokens are easy to spot and to scan for.
 const Prefix = "wame_"
 
-// legacyPrefix started tokens issued before the rename; they keep working.
-const legacyPrefix = "wabot_"
-
 var (
 	ErrUnauthorized = errors.New("unauthorized")
 	ErrExpired      = store.ErrTokenExpired
@@ -219,9 +216,7 @@ func (a *Authenticator) Authenticate(presented string) (Principal, error) {
 func tokenID(presented string) (string, bool) {
 	rest, ok := strings.CutPrefix(presented, Prefix)
 	if !ok {
-		if rest, ok = strings.CutPrefix(presented, legacyPrefix); !ok {
-			return "", false
-		}
+		return "", false
 	}
 	id, secret, ok := strings.Cut(rest, "_")
 	return id, ok && len(id) == 8 && secret != ""
