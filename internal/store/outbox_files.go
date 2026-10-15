@@ -118,7 +118,8 @@ func scanOutboxFile(row interface{ Scan(...any) error }, counts bool) (OutboxFil
 	return f, err
 }
 
-func (s *Store) liveOutboxFile(actor, sha string) (OutboxFile, error) {
+// OutboxFileBySHA is the actor's live file with this sha256 (hex), or ErrNotFound.
+func (s *Store) OutboxFileBySHA(actor, sha string) (OutboxFile, error) {
 	return scanOutboxFile(s.db.QueryRow(`SELECT `+outboxFileCols+outboxFileCounts+` FROM wame_outbox_files f
 		WHERE actor = ? AND sha256 = ? AND deleted_at = 0`, actor, sha), true)
 }
@@ -127,7 +128,7 @@ func (s *Store) liveOutboxFile(actor, sha string) (OutboxFile, error) {
 // which is returned instead (existed true). The quota is checked by the INSERT itself, so two
 // uploads at once can't both squeeze under it; going over is ErrOutboxFileQuota.
 func (s *Store) InsertOutboxFile(f OutboxFile, q OutboxFileQuota) (_ OutboxFile, existed bool, err error) {
-	if old, err := s.liveOutboxFile(f.Actor, f.SHA256); err == nil {
+	if old, err := s.OutboxFileBySHA(f.Actor, f.SHA256); err == nil {
 		return old, true, nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return f, false, err
@@ -143,7 +144,7 @@ func (s *Store) InsertOutboxFile(f OutboxFile, q OutboxFileQuota) (_ OutboxFile,
 		f.Actor, q.ActorFiles, f.Actor, f.Size, q.ActorBytes, f.Size, q.TotalBytes), false)
 	if errors.Is(err, ErrNotFound) {
 		// Nothing inserted: the same file from a parallel upload, or over quota.
-		if old, err := s.liveOutboxFile(f.Actor, f.SHA256); err == nil {
+		if old, err := s.OutboxFileBySHA(f.Actor, f.SHA256); err == nil {
 			return old, true, nil
 		}
 		return f, false, ErrOutboxFileQuota

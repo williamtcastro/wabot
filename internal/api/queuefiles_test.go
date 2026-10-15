@@ -187,3 +187,24 @@ func itoa(n int64) string {
 	b, _ := json.Marshal(n)
 	return string(b)
 }
+
+func TestQueueFileReuploadAtTheQuota(t *testing.T) {
+	b := newTestBot(t)
+	h := newHandler(b, "s3cret-owner-secret")
+	sender := bearer(issue(t, b, "promo-bot", []auth.Scope{auth.Send}, nil, 0))
+	pdf := []byte("%PDF-1.4\n% menu of Ana\n%%EOF\n")
+	w := doUpload(h, "menu.pdf", pdf, "application/pdf", sender)
+	var f uploaded
+	if w.Code != 201 || json.Unmarshal(w.Body.Bytes(), &f) != nil {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if err := b.UpdateSettings("ops", map[string]*string{"queue_files_quota": new(itoa(f.Size))}); err != nil {
+		t.Fatal(err)
+	}
+	if w := doUpload(h, "menu.pdf", pdf, "application/pdf", sender); w.Code != 200 || !strings.Contains(w.Body.String(), f.ID) {
+		t.Fatalf("the same file at the quota (a re-run import): %d %s", w.Code, w.Body)
+	}
+	if w := doUpload(h, "other.pdf", append(pdf, 'x'), "application/pdf", sender); w.Code != 413 {
+		t.Fatalf("a new file at the quota: %d %s", w.Code, w.Body)
+	}
+}
