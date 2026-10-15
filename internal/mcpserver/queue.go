@@ -32,6 +32,11 @@ func (s *server) queueTarget(ctx context.Context, p auth.Principal, to string) (
 	switch {
 	case strings.TrimSpace(to) == "":
 		return "", errors.New("to is required")
+	}
+	if _, isTag := bot.QueueTag(to); isTag {
+		return to, nil // Bot expands it, dropping members outside the allowlist
+	}
+	switch {
 	case p.Restricted():
 		return s.allowedChat(ctx, p, to)
 	}
@@ -72,18 +77,20 @@ func ownFilter(p auth.Principal, f store.OutboxFilter) store.OutboxFilter {
 }
 
 type scheduleIn struct {
-	To     string `json:"to" jsonschema:"chat JID or phone number with country code"`
-	Text   string `json:"text" jsonschema:"message text (WhatsApp formatting like *bold* works)"`
-	SendAt string `json:"send_at,omitempty" jsonschema:"when to send: RFC 3339 with offset (2026-10-13T09:00:00-03:00) or a delay like 90m, 2h, 3d; omit to send as soon as the limits allow"`
-	Batch  string `json:"batch,omitempty" jsonschema:"group name for list_scheduled and cancel_scheduled (letters, digits, . _ -); generated when omitted"`
+	To       string `json:"to" jsonschema:"chat JID, phone number with country code, or tag:NAME for everyone with that contact tag (needs the read scope)"`
+	Text     string `json:"text" jsonschema:"message text (WhatsApp formatting like *bold* works)"`
+	Template bool   `json:"template,omitempty" jsonschema:"fill {name}, {first_name} or {push_name} (with an optional |fallback, like {name|there}) per recipient; {{ and }} are literal braces. Needs the read scope"`
+	SendAt   string `json:"send_at,omitempty" jsonschema:"when to send: RFC 3339 with offset (2026-10-13T09:00:00-03:00) or a delay like 90m, 2h, 3d; omit to send as soon as the limits allow"`
+	Batch    string `json:"batch,omitempty" jsonschema:"group name for list_scheduled and cancel_scheduled (letters, digits, . _ -); generated when omitted"`
 }
 
 type scheduledOut struct {
-	ID     int64     `json:"id"`
+	ID     int64     `json:"id,omitempty"`
 	Batch  string    `json:"batch"`
 	To     string    `json:"to"`
 	Status string    `json:"status"`
 	Due    time.Time `json:"due"`
+	Queued int       `json:"queued"`
 	Note   string    `json:"note,omitempty"`
 }
 
@@ -100,12 +107,20 @@ func (s *server) scheduleMessage(ctx context.Context, req *mcp.CallToolRequest, 
 	if err != nil {
 		return nil, scheduledOut{}, err
 	}
-	items, err := s.b.Enqueue(p.Name, p.TokenID, in.Batch, "", []bot.QueueRequest{{To: to, Text: in.Text, SendAt: at}})
+	res, err := s.b.Queue(ctx, bot.QueueOptions{Actor: p.Name, TokenID: p.TokenID, Batch: in.Batch, Template: in.Template,
+		Read: p.Has(auth.Read), Allow: p.Chats}, []bot.QueueRequest{{To: to, Text: in.Text, SendAt: at}})
 	if err != nil {
 		return nil, scheduledOut{}, err
 	}
-	it := items[0]
-	out := scheduledOut{ID: it.ID, Batch: it.Batch, To: cleanID(it.To), Status: it.Status, Due: it.Due}
+	if len(res.Items) == 0 {
+		return nil, scheduledOut{}, errors.New("nothing was queued")
+	}
+	it := res.Items[0]
+	out := scheduledOut{ID: it.ID, Batch: it.Batch, To: cleanID(it.To), Status: it.Status, Due: it.Due, Queued: len(res.Items)}
+	if _, isTag := bot.QueueTag(in.To); isTag {
+		// One item per member: list_scheduled with the batch shows them.
+		out.ID, out.To = 0, cleanID(strings.TrimSpace(in.To))
+	}
 	switch st := s.b.QueueStats(); {
 	case st.Paused:
 		out.Note = "the queue is paused; nothing goes out until an admin resumes it"

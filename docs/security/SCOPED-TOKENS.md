@@ -588,6 +588,26 @@ outside the list 403 with the fixed text and no lookups), `TestContactReads` (a 
 never sees `own`), `TestContactWrites` (admin only, unknown fields, 413, audit without values),
 MCP `TestFindContact`.
 
+**The queue (contacts phase 3).** `POST /queue` and MCP `schedule_message` accept `tag:NAME`, and
+templates that fill in names:
+
+- **Both need `read` as well as `send`**: the queued items show who has the tag, and the filled
+  text (returned to the token by `GET /queue/{id}`) shows names, which a `send`-only token can't
+  read anywhere else. `Bot.Queue` checks it (`QueueOptions.Read`), so every front end gets the
+  same rule.
+- **Restricted tokens:** a tag's members outside the allowlist are dropped before anything is
+  stored, counted or listed in `skipped_rows`; an empty result is `tag NAME has no contacts this
+  token can reach`, whether the tag is empty or only has others. Members are checked with
+  `ChatAllowed` on their stored key: nothing is looked up.
+- **`{name}` never uses a push name** (a stranger's choice, sent under your account);
+  `{push_name}` is explicit.
+- **`skip_sent` without `admin`** counts only the token's own queue items (`OutboxFilter.For`), so
+  it can't tell whether another token messaged someone; sent messages in `wame_messages` count only
+  for a token with `read`, which could list them anyway.
+
+Regression tests: `TestQueueTagsTemplatesAndSkips` (api), `TestQueueTagExpansion`,
+`TestQueueSkipSent` (bot), MCP `TestScheduleTagAndTemplate`.
+
 ## Residual risks (accepted by design)
 
 - Per-token rates default to 10/min against a global 20/min, so two busy `send` tokens can still fill

@@ -388,18 +388,36 @@ func (c *Client) QueueCounts(ctx context.Context, batch string) (store.OutboxCou
 
 // QueueResult is the answer of POST /queue; items come without their text.
 type QueueResult struct {
-	Batch    string             `json:"batch"`
-	Queued   int                `json:"queued"`
-	Replayed int                `json:"replayed"` // of Queued, items an earlier request with the same key already queued
-	Items    []store.OutboxItem `json:"items"`
+	Batch       string             `json:"batch"`
+	Queued      int                `json:"queued"`
+	Replayed    int                `json:"replayed"` // of Queued, items an earlier request with the same key already queued
+	Items       []store.OutboxItem `json:"items"`
+	Skipped     bot.SkipCounts     `json:"skipped"`
+	SkippedRows []bot.SkippedRow   `json:"skipped_rows"`
+}
+
+// QueueCSVOptions are POST /queue's options for a CSV upload (see docs/QUEUE.md).
+type QueueCSVOptions struct {
+	Template bool
+	Dedupe   bool
+	SkipSent string
 }
 
 // QueueCSV queues the messages of a CSV file (at most 1000 rows, see docs/QUEUE.md) under batch;
 // the idempotency key makes a retry return the items already queued instead of adding them again.
-func (c *Client) QueueCSV(ctx context.Context, csv []byte, batch, key string) (QueueResult, error) {
-	var q url.Values
+func (c *Client) QueueCSV(ctx context.Context, csv []byte, batch, key string, opt QueueCSVOptions) (QueueResult, error) {
+	q := url.Values{}
 	if batch != "" {
-		q = url.Values{"batch": {batch}}
+		q.Set("batch", batch)
+	}
+	if opt.Template {
+		q.Set("template", "1")
+	}
+	if opt.Dedupe {
+		q.Set("dedupe", "1")
+	}
+	if opt.SkipSent != "" {
+		q.Set("skip_sent", opt.SkipSent)
 	}
 	h := http.Header{"Content-Type": {"text/csv; charset=utf-8"}}
 	if key != "" {

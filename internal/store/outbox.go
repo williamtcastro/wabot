@@ -52,6 +52,10 @@ type OutboxItem struct {
 	Error     string    `json:"error,omitempty"`
 	Delivered time.Time `json:"delivered_at,omitzero"`
 	Read      time.Time `json:"read_at,omitzero"`
+	// RecipientKey is To as a chat key, found without a lookup; SourceHash is the hash of a {name}
+	// template's unrendered text (see EnqueueOptions).
+	RecipientKey string `json:"-"`
+	SourceHash   string `json:"-"`
 }
 
 // Receipt progress of an item WhatsApp accepted, beyond its state.
@@ -168,12 +172,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS wame_outbox_key ON wame_outbox (actor, key) WH
 	if err := addColumns(ctx, db, "wame_outbox", outboxReceiptColumns); err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS wame_outbox_message ON wame_outbox (message_id) WHERE message_id != ''`)
-	return err
+	if _, err = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS wame_outbox_message ON wame_outbox (message_id) WHERE message_id != ''`); err != nil {
+		return err
+	}
+	return migrateOutboxRecipients(ctx, db)
 }
 
 // outboxReceiptColumns came after the table did, so they're added to older databases on startup.
-var outboxReceiptColumns = []string{"delivered_at INTEGER NOT NULL DEFAULT 0", "read_at INTEGER NOT NULL DEFAULT 0", "send_at INTEGER NOT NULL DEFAULT -1"}
+var outboxReceiptColumns = []string{"delivered_at INTEGER NOT NULL DEFAULT 0", "read_at INTEGER NOT NULL DEFAULT 0", "send_at INTEGER NOT NULL DEFAULT -1",
+	"recipient_key TEXT NOT NULL DEFAULT ''", "source_hash TEXT NOT NULL DEFAULT ''"}
 
 // addColumns adds each "name type…" definition that table doesn't have yet.
 func addColumns(ctx context.Context, db *sql.DB, table string, defs []string) error {
@@ -216,7 +223,7 @@ func addColumn(ctx context.Context, db *sql.DB, table, def string) error {
 	return err
 }
 
-const outboxColumns = `id, batch, actor, token_id, key, recipient, text, reply_to, status, attempts, due, created_at, updated_at, chat, message_id, error, delivered_at, read_at, send_at`
+const outboxColumns = `id, batch, actor, token_id, key, recipient, text, reply_to, status, attempts, due, created_at, updated_at, chat, message_id, error, delivered_at, read_at, send_at, recipient_key, source_hash`
 
 // outboxColumnsNoText reads an item without its text, where it isn't needed.
 var outboxColumnsNoText = strings.Replace(outboxColumns, " text,", " '',", 1)
@@ -232,7 +239,7 @@ func scanOutbox(row interface{ Scan(...any) error }) (OutboxItem, error) {
 	var it OutboxItem
 	var due, created, updated, delivered, read int64
 	err := row.Scan(&it.ID, &it.Batch, &it.Actor, &it.TokenID, &it.Key, &it.To, &it.Text, &it.ReplyTo, &it.Status,
-		&it.Attempts, &due, &created, &updated, &it.Chat, &it.MessageID, &it.Error, &delivered, &read, &it.SendAt)
+		&it.Attempts, &due, &created, &updated, &it.Chat, &it.MessageID, &it.Error, &delivered, &read, &it.SendAt, &it.RecipientKey, &it.SourceHash)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = ErrNotFound
 	}
@@ -266,41 +273,78 @@ type EnqueueCheck func(out []OutboxItem, replayed []bool, open int) error
 // Enqueue stores items in one transaction. An item whose (Actor, Key) is already stored isn't added
 // again; the stored one is returned in its place, so a retried request doesn't send twice.
 func (s *Store) Enqueue(items []OutboxItem, check EnqueueCheck) ([]OutboxItem, error) {
+	out, _, err := s.EnqueueWith(items, EnqueueOptions{Check: check})
+	return out, err
+}
+
+// EnqueueWith is Enqueue with the options of EnqueueOptions. skipped[i] says why items[i] wasn't
+// stored ("" when it was); out[i] is then the zero item.
+func (s *Store) EnqueueWith(items []OutboxItem, opt EnqueueOptions) (out []OutboxItem, skipped []string, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer tx.Rollback()
+	first := opt.lookupFirst()
+	if first {
+		if err := outboxWriteLock(tx); err != nil {
+			return nil, nil, err
+		}
+	}
 	now := time.Now().UnixMilli()
-	out := make([]OutboxItem, len(items))
+	out = make([]OutboxItem, len(items))
 	replayed := make([]bool, len(items))
+	skipped = make([]string, len(items))
+	seen := map[string]bool{}
 	for i, it := range items {
+		if first {
+			if out[i], replayed[i], err = opt.stored(tx, i, it); err != nil {
+				return nil, nil, err
+			}
+			if !replayed[i] {
+				if err = opt.taken(tx, i, it); err == nil {
+					skipped[i], err = opt.skip(tx, i, it, seen)
+				}
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+			if skipped[i] != "" {
+				continue
+			}
+			opt.mark(i, it, seen)
+			if replayed[i] {
+				continue
+			}
+		}
 		sendAt := int64(0)
 		if !it.Due.IsZero() {
 			sendAt = it.Due.UnixMilli()
 		}
-		out[i], err = scanOutbox(tx.QueryRow(`INSERT INTO wame_outbox (batch, actor, token_id, key, recipient, text, reply_to, status, due, created_at, updated_at, send_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING `+outboxColumns,
-			it.Batch, it.Actor, it.TokenID, it.Key, it.To, it.Text, it.ReplyTo, OutboxQueued, max(sendAt, now), now, now, sendAt))
+		out[i], err = scanOutbox(tx.QueryRow(`INSERT INTO wame_outbox (batch, actor, token_id, key, recipient, text, reply_to, status, due, created_at, updated_at, send_at, recipient_key, source_hash)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING `+outboxColumns,
+			it.Batch, it.Actor, it.TokenID, it.Key, it.To, it.Text, it.ReplyTo, OutboxQueued, max(sendAt, now), now, now, sendAt, it.RecipientKey, it.SourceHash))
 		if errors.Is(err, ErrNotFound) {
 			replayed[i] = true
 			out[i], err = scanOutbox(tx.QueryRow(`SELECT `+outboxColumns+` FROM wame_outbox WHERE actor = ? AND key = ?`, it.Actor, it.Key))
+		} else if err == nil && !first {
+			err = opt.taken(tx, i, it)
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	if check != nil && len(items) > 0 {
+	if check := opt.Check; check != nil && len(items) > 0 {
 		var open int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM wame_outbox WHERE actor = ? AND status IN (?, ?)`,
 			items[0].Actor, OutboxQueued, OutboxSending).Scan(&open); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := check(out, replayed, open); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return out, tx.Commit()
+	return out, skipped, tx.Commit()
 }
 
 func (s *Store) OutboxItem(id int64) (OutboxItem, error) {

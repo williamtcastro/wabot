@@ -19,6 +19,7 @@ type queueMessage struct {
 	Text    string    `json:"text"`
 	ReplyTo string    `json:"reply_to"`
 	SendAt  time.Time `json:"send_at"`
+	Name    string    `json:"name"`
 }
 
 // queueBody is POST /queue as JSON; a CSV upload is read into the same shape.
@@ -28,13 +29,17 @@ type queueBody struct {
 	SendAt         time.Time      `json:"send_at"`
 	Messages       []queueMessage `json:"messages"`
 	IdempotencyKey string         `json:"idempotency_key"`
+	Template       bool           `json:"template"`
+	Dedupe         bool           `json:"dedupe"`
+	SkipSent       string         `json:"skip_sent"`
 	isCSV          bool
 	csv            []bot.QueueRequest
 }
 
-// enqueue takes {"batch", "text", "send_at", "messages": [{to, text, reply_to, send_at}], "idempotency_key"},
-// or a text/csv (or application/csv) body with batch, text and send_at in the query (see
-// readQueueCSV); the top-level text and send_at are defaults for messages that leave them out.
+// enqueue takes {"batch", "text", "send_at", "messages": [{to, text, reply_to, send_at, name}],
+// "idempotency_key", "template", "dedupe", "skip_sent"}, or a text/csv (or application/csv) body
+// with the other fields in the query (see readQueueCSV); the top-level text and send_at are
+// defaults for messages that leave them out.
 func (a *server) enqueue(w http.ResponseWriter, r *http.Request) {
 	var req queueBody
 	if ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); ct == "text/csv" || ct == "application/csv" {
@@ -49,8 +54,11 @@ func (a *server) enqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principal(r)
-	key := cmp.Or(r.Header.Get("Idempotency-Key"), req.IdempotencyKey)
-	res, err := a.b.QueueMessages(p.Name, p.TokenID, req.Batch, key, reqs)
+	res, err := a.b.Queue(r.Context(), bot.QueueOptions{
+		Actor: p.Name, TokenID: p.TokenID, Batch: req.Batch, Key: cmp.Or(r.Header.Get("Idempotency-Key"), req.IdempotencyKey),
+		Template: req.Template, Dedupe: req.Dedupe, SkipSent: req.SkipSent,
+		Admin: p.Has(auth.Admin), Read: p.Has(auth.Read), Allow: p.Chats,
+	}, reqs)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -58,7 +66,11 @@ func (a *server) enqueue(w http.ResponseWriter, r *http.Request) {
 	for i := range res.Items {
 		res.Items[i].Text = ""
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"batch": res.Items[0].Batch, "queued": len(res.Items), "replayed": res.Replayed, "items": res.Items})
+	if res.SkippedRows == nil {
+		res.SkippedRows = []bot.SkippedRow{}
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"batch": res.Batch, "queued": len(res.Items), "replayed": res.Replayed, "items": res.Items,
+		"skipped": res.Skipped, "skipped_rows": res.SkippedRows})
 }
 
 // readQueueCSV reads a CSV body (bot.ReadQueueCSV) of at most maxQueueBody bytes and
@@ -66,6 +78,14 @@ func (a *server) enqueue(w http.ResponseWriter, r *http.Request) {
 func readQueueCSV(w http.ResponseWriter, r *http.Request, req *queueBody) bool {
 	q := r.URL.Query()
 	req.Batch, req.Text, req.isCSV = q.Get("batch"), q.Get("text"), true
+	var ok bool
+	if req.Template, ok = boolParam(w, r, "template"); !ok {
+		return false
+	}
+	if req.Dedupe, ok = boolParam(w, r, "dedupe"); !ok {
+		return false
+	}
+	req.SkipSent = q.Get("skip_sent")
 	if s := q.Get("send_at"); s != "" {
 		t, err := bot.ParseSendAt(s)
 		if err != nil {
@@ -93,11 +113,15 @@ func (a *server) queueRequests(w http.ResponseWriter, r *http.Request, req queue
 	if !req.isCSV {
 		reqs = make([]bot.QueueRequest, len(req.Messages))
 		for i, m := range req.Messages {
-			reqs[i] = bot.QueueRequest{To: m.To, Text: m.Text, ReplyTo: m.ReplyTo, SendAt: m.SendAt}
+			reqs[i] = bot.QueueRequest{To: m.To, Text: m.Text, ReplyTo: m.ReplyTo, SendAt: m.SendAt, Name: m.Name}
 		}
 	}
 	for i := range reqs {
-		to, ok := a.allowedChat(r, reqs[i].To)
+		to, ok := reqs[i].To, true
+		// A tag's members are checked against the allowlist when Bot expands it.
+		if _, isTag := bot.QueueTag(to); !isTag {
+			to, ok = a.allowedChat(r, reqs[i].To)
+		}
 		if !ok {
 			writeErr(w, http.StatusForbidden, reqs[i].Where(i)+": "+errChatForbidden)
 			return nil, false

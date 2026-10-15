@@ -66,7 +66,7 @@ To send every kind of message (files, edits and deletes are API-only), see [SEND
 | `send_message` | send | `to`, `text`, `reply_to` (optional) | `seq`, `id`, `chat` |
 | `react` | send | `chat`, `message_id`, `emoji` (empty removes) | `seq`, `id`, `chat` |
 | `mark_read` | send | `chat`, `message_ids` (optional; omit for the whole chat) | `marked` |
-| `schedule_message` | send | `to`, `text`, `send_at` (optional: RFC 3339 with offset, or a delay like `90m`, `2h`, `3d`), `batch` (optional) | `id`, `batch`, `to`, `status`, `due`, `note` (when the queue is paused or no worker runs) |
+| `schedule_message` | send | `to` (or `tag:NAME`: everyone with that contact tag, needs read too), `text`, `send_at` (optional: RFC 3339 with offset, or a delay like `90m`, `2h`, `3d`), `batch` (optional), `template` (optional: fill `{name}`, `{first_name}`, `{push_name}`, with `{name\|fallback}`; needs read too) | `id` (one recipient only), `batch`, `to`, `status`, `due`, `queued` (how many items), `note` (when the queue is paused or no worker runs) |
 | `list_scheduled` | send | `status`, `batch`, `before` (id, to page), `limit` (default 50, max 200) | `items[]` newest first: `id`, `batch`, `actor`, `to`, `chat`, `status`, `attempts`, `due`, `created_at`, `updated_at`, `message_id`, `error`, `delivered_at` and `read_at` (once WhatsApp reports them), `untrusted.text` (own items only); `counts` by status (plus `delivered` and `read` among the sent); `note` |
 | `cancel_scheduled` | send | `id` **or** `batch` | `canceled` (ids) |
 
@@ -81,7 +81,10 @@ the limits allow; `send_at` may be at most 30 days ahead, and a time more than a
 refused. Without the `admin` scope, `list_scheduled` and `cancel_scheduled` only see the items the
 same token (or, over stdio without a token, `mcp`, a name no token can take) queued; with it, every item, but the text of other
 callers' items is never returned. A finished item can't be canceled ("only queued messages can be
-canceled").
+canceled"). A `tag:` recipient queues one item per tagged person, the same
+[rules](QUEUE.md#tags-templates-and-skips) as the API: a token limited to chats reaches only the
+members on its list, without learning about the rest. With `template`, `{name}` is never a push
+name; the filled text shows in `list_scheduled` under `untrusted.text`.
 
 Read tools and `list_scheduled` are annotated read-only. `send_message` and `schedule_message` are
 marked destructive and open-world, `react` / `mark_read` open-world, and `cancel_scheduled`

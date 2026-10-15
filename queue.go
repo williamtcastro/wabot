@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -56,7 +57,7 @@ type importChunk struct {
 }
 
 func queueImport(ctx context.Context, args []string, out io.Writer) error {
-	const use = "usage: wame queue import [-batch NAME] [-text DEFAULT] [-send-at TIME] [-key KEY] [-dry-run] FILE.csv"
+	const use = "usage: wame queue import [-batch NAME] [-text DEFAULT] [-send-at TIME] [-key KEY] [-template] [-dedupe] [-skip-sent DURATION|batch:NAME] [-dry-run] FILE.csv"
 	file := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		file, args = args[0], args[1:]
@@ -70,6 +71,10 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 	sendAt := fs.String("send-at", "", "")
 	key := fs.String("key", "", "")
 	dryRun := fs.Bool("dry-run", false, "")
+	var opt admin.QueueCSVOptions
+	fs.BoolVar(&opt.Template, "template", false, "")
+	fs.BoolVar(&opt.Dedupe, "dedupe", false, "")
+	fs.StringVar(&opt.SkipSent, "skip-sent", "", "")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w\n%s", err, use)
 	}
@@ -86,6 +91,13 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 		var err error
 		if at, err = bot.ParseSendAt(*sendAt); err != nil {
 			return fmt.Errorf("-send-at %w", err)
+		}
+	}
+	var skipRule bot.SkipSentRule
+	if opt.SkipSent != "" {
+		var err error
+		if skipRule, err = bot.ParseSkipSent(opt.SkipSent); err != nil {
+			return fmt.Errorf("-skip-sent: %w", err)
 		}
 	}
 
@@ -105,6 +117,15 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 		if err := bot.CheckQueueRequest(rows[i]); err != nil {
 			return fmt.Errorf("%s: %s: %w", file, rows[i].Where(i), err)
 		}
+		if opt.Template {
+			if err := bot.CheckTemplate(rows[i].Text); err != nil {
+				return fmt.Errorf("%s: %s: %w", file, rows[i].Where(i), err)
+			}
+		}
+	}
+	duplicates := 0
+	if opt.Dedupe {
+		rows, duplicates = dedupeRows(rows)
 	}
 	base, err := importKey(*key, file)
 	if err != nil {
@@ -122,6 +143,12 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 
 	if *dryRun {
 		fmt.Fprintf(out, "%s: %d messages to %d recipients, batch %s, in %d request(s):\n", file, len(rows), recipients(rows), *batch, len(chunks))
+		for _, tag := range rowTags(rows) {
+			fmt.Fprintf(out, "  tag:%s (expanded by the server)\n", tag)
+		}
+		if duplicates > 0 {
+			fmt.Fprintf(out, "  %d duplicate rows left out\n", duplicates)
+		}
 		for i, c := range chunks {
 			fmt.Fprintf(out, "  %d/%d: lines %d-%d, %d messages, %s, key %s\n", i+1, len(chunks), c.first, c.last, c.rows, byteSize(int64(len(c.body))), chunkKey(base, i))
 		}
@@ -138,8 +165,9 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	queued, replayed := 0, 0
+	skipped := bot.SkipCounts{Duplicate: duplicates}
 	for i, ch := range chunks {
-		res, err := c.QueueCSV(ctx, ch.body, *batch, chunkKey(base, i))
+		res, err := c.QueueCSV(ctx, ch.body, *batch, chunkKey(base, i), opt)
 		if err != nil {
 			fmt.Fprintf(out, "%d/%d: lines %d-%d: failed: %s\n", i+1, len(chunks), ch.first, ch.last, termui.SafeLine(ch.fileError(err).Error()))
 			apiErr, ok := errors.AsType[*admin.APIError](err)
@@ -149,16 +177,104 @@ func queueImport(ctx context.Context, args []string, out io.Writer) error {
 					"Rows that were already queued can't be changed (cancel them instead); for a new import, pass another -key", queued, len(rows), ch.first, ch.last, chunkKey(base, i))
 			case ok && (apiErr.Code == http.StatusBadRequest || apiErr.Code == http.StatusForbidden):
 				return fmt.Errorf("stopped after %d of %d messages. Fix the cause above (a row from line %d on: leave the lines before it as they are), then run: "+
-					"wame queue import -key %s -batch %s %s (what was already queued isn't queued twice)", queued, len(rows), ch.first, base, *batch, file)
+					"wame queue import -key %s -batch %s%s %s (what was already queued isn't queued twice)", queued, len(rows), ch.first, base, *batch, optionFlags(opt), file)
 			}
 			return fmt.Errorf("stopped after %d of %d messages; run the same command again (with -key %s) to retry: what was already queued isn't queued twice", queued, len(rows), base)
 		}
 		queued += res.Queued - res.Replayed
 		replayed += res.Replayed
-		fmt.Fprintf(out, "%d/%d: lines %d-%d: queued %d%s\n", i+1, len(chunks), ch.first, ch.last, res.Queued-res.Replayed, alreadyQueued(res.Replayed))
+		skipped.Duplicate += res.Skipped.Duplicate
+		skipped.RecentlySent += res.Skipped.RecentlySent
+		fmt.Fprintf(out, "%d/%d: lines %d-%d: queued %d%s%s\n", i+1, len(chunks), ch.first, ch.last, res.Queued-res.Replayed, alreadyQueued(res.Replayed), skippedCount(res.Skipped.Total()))
 	}
-	fmt.Fprintf(out, "queued %d messages%s, batch %s (follow it with: wame queue status -batch %s)\n", queued, alreadyQueued(replayed), *batch, *batch)
+	fmt.Fprintf(out, "queued %d messages%s%s, batch %s (follow it with: wame queue status -batch %s)\n", queued, alreadyQueued(replayed), skippedReport(skipped, skipRule), *batch, *batch)
 	return nil
+}
+
+// dedupeRows drops rows whose recipient, text and name already appeared earlier in the file, as
+// the server would (name matters for templates). It runs before the file is split into requests,
+// so duplicates in different requests are caught and the split is the same on every run.
+func dedupeRows(rows []bot.QueueRequest) ([]bot.QueueRequest, int) {
+	seen := map[[3]string]bool{}
+	out := rows[:0:0]
+	for _, r := range rows {
+		to := strings.TrimSpace(r.To)
+		if tag, ok := bot.QueueTag(to); ok {
+			to = "tag:" + strings.ToLower(tag)
+		} else if jid, err := bot.ParseRecipient(to); err == nil {
+			to = jid.String()
+		}
+		k := [3]string{to, r.Text, strings.TrimSpace(r.Name)}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, r)
+	}
+	return out, len(rows) - len(out)
+}
+
+// rowTags lists the tags rows send to, once each, in file order.
+func rowTags(rows []bot.QueueRequest) []string {
+	var tags []string
+	for _, r := range rows {
+		if tag, ok := bot.QueueTag(r.To); ok && !slices.Contains(tags, strings.ToLower(tag)) {
+			tags = append(tags, strings.ToLower(tag))
+		}
+	}
+	return tags
+}
+
+// optionFlags repeats the options that change what a request queues, for a rerun hint.
+func optionFlags(opt admin.QueueCSVOptions) string {
+	var s strings.Builder
+	if opt.Template {
+		s.WriteString(" -template")
+	}
+	if opt.Dedupe {
+		s.WriteString(" -dedupe")
+	}
+	if opt.SkipSent != "" {
+		s.WriteString(" -skip-sent " + opt.SkipSent)
+	}
+	return s.String()
+}
+
+func skippedCount(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(", skipped %d", n)
+}
+
+// skippedReport is ", skipped 12 (8 sent in the last 48h, 4 duplicates)", or "" when nothing was.
+func skippedReport(c bot.SkipCounts, rule bot.SkipSentRule) string {
+	if c.Total() == 0 {
+		return ""
+	}
+	var why []string
+	if c.RecentlySent > 0 {
+		if rule.Batch != "" {
+			why = append(why, fmt.Sprintf("%d already in batch %s", c.RecentlySent, rule.Batch))
+		} else {
+			why = append(why, fmt.Sprintf("%d sent in the last %s", c.RecentlySent, shortDuration(rule.Within)))
+		}
+	}
+	if c.Duplicate > 0 {
+		why = append(why, fmt.Sprintf("%d duplicates", c.Duplicate))
+	}
+	return fmt.Sprintf(", skipped %d (%s)", c.Total(), strings.Join(why, ", "))
+}
+
+// shortDuration writes whole days as 3d and the rest like 48h or 90m.
+func shortDuration(d time.Duration) string {
+	switch {
+	case d%(24*time.Hour) == 0 && d >= 72*time.Hour:
+		return fmt.Sprintf("%dd", d/(24*time.Hour))
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%dh", d/time.Hour)
+	}
+	return strings.TrimSuffix(strings.TrimSuffix(d.String(), "0s"), "0m")
 }
 
 func readImportFile(path string) ([]byte, error) {
@@ -181,6 +297,11 @@ func chunkRows(rows []bot.QueueRequest) ([]importChunk, error) {
 	var buf, rec bytes.Buffer
 	var cur importChunk
 	lines := 0
+	// The name column goes out only when the file has names, so older servers still take the rest.
+	columns := bot.QueueColumns
+	if !slices.ContainsFunc(rows, func(r bot.QueueRequest) bool { return r.Name != "" }) {
+		columns = columns[:len(columns)-1]
+	}
 	flush := func() {
 		if cur.rows > 0 {
 			cur.body = bytes.Clone(buf.Bytes())
@@ -191,14 +312,14 @@ func chunkRows(rows []bot.QueueRequest) ([]importChunk, error) {
 	}
 	for _, r := range rows {
 		rec.Reset()
-		if err := writeRecord(&rec, bot.QueueRecord(r)); err != nil {
+		if err := writeRecord(&rec, bot.QueueRecord(r)[:len(columns)]); err != nil {
 			return nil, err
 		}
 		if cur.rows == chunkMax || (cur.rows > 0 && buf.Len()+rec.Len() > maxChunkBytes) {
 			flush()
 		}
 		if cur.rows == 0 {
-			_ = writeRecord(&buf, bot.QueueColumns)
+			_ = writeRecord(&buf, columns)
 			cur.first, cur.lines, lines = r.Line, map[int]int{}, 1
 		}
 		cur.lines[lines+1] = r.Line
@@ -256,9 +377,13 @@ func importKey(key, file string) (string, error) {
 	return "csv-" + hex.EncodeToString(sum[:8]), nil
 }
 
+// recipients counts the distinct numbers rows name; tags are counted by the server.
 func recipients(rows []bot.QueueRequest) int {
 	seen := map[string]bool{}
 	for _, r := range rows {
+		if _, isTag := bot.QueueTag(r.To); isTag {
+			continue
+		}
 		jid, _ := bot.ParseRecipient(r.To)
 		seen[jid.String()] = true
 	}

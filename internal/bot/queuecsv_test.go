@@ -57,7 +57,7 @@ func TestReadQueueCSVErrors(t *testing.T) {
 		limit          int
 	}{
 		{"empty", "", "empty", 0},
-		{"unknown columns", "to,text,name,city\n", `line 1: unknown columns "name", "city"`, 0},
+		{"unknown columns", "to,text,nome,city\n", `line 1: unknown columns "nome", "city"`, 0},
 		{"missing to", "text\nhello\n", `"to" column is required`, 0},
 		{"duplicate column", "to,TO\n", `column "to" appears twice`, 0},
 		{"bad time", "to,send_at\n5511999999999,tomorrow\n", "line 2: send_at", 0},
@@ -84,7 +84,7 @@ func TestReadQueueCSVErrors(t *testing.T) {
 func TestQueueRecordRoundTrip(t *testing.T) {
 	in := []QueueRequest{
 		{To: "5511999999999", Text: "Hi Maria, \"quoted\"\nnext line", SendAt: time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)},
-		{To: "5511988887777", Text: "Hi John", ReplyTo: "3EB0C4"},
+		{To: "5511988887777", Text: "Hi John", ReplyTo: "3EB0C4", Name: "John Smith"},
 	}
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
@@ -94,7 +94,7 @@ func TestQueueRecordRoundTrip(t *testing.T) {
 	}
 	w.Flush()
 	out, err := ReadQueueCSV(&buf, 0)
-	if err != nil || len(out) != 2 || out[0].Text != in[0].Text || !out[0].SendAt.Equal(in[0].SendAt) || out[1].ReplyTo != "3EB0C4" || out[1].Line != 4 {
+	if err != nil || len(out) != 2 || out[0].Text != in[0].Text || !out[0].SendAt.Equal(in[0].SendAt) || out[1].ReplyTo != "3EB0C4" || out[1].Name != "John Smith" || out[1].Line != 4 {
 		t.Fatalf("%+v %v", out, err)
 	}
 }

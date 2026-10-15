@@ -54,6 +54,8 @@ type QueueRequest struct {
 	ReplyTo string
 	SendAt  time.Time
 	Line    int
+	// Name is the {name} for this message's template; it wins over every name wame knows.
+	Name string
 }
 
 // Where names the i-th message of a request in errors: its CSV line, or its index.
@@ -177,10 +179,14 @@ func (b *Bot) wakeOutbox() {
 }
 
 // Enqueued is what QueueMessages stored: Items in the request's order, Replayed of them already
-// queued under the same idempotency key before.
+// queued under the same idempotency key before. Rows skipped by dedupe or skip_sent have no item;
+// Skipped counts them and SkippedRows lists the first maxSkippedRows.
 type Enqueued struct {
-	Items    []store.OutboxItem
-	Replayed int
+	Batch       string
+	Items       []store.OutboxItem
+	Replayed    int
+	Skipped     SkipCounts
+	SkippedRows []SkippedRow
 }
 
 // Enqueue is QueueMessages without the replay count.
@@ -192,62 +198,23 @@ func (b *Bot) Enqueue(actor, tokenID, batch, key string, reqs []QueueRequest) ([
 // QueueMessages validates and stores messages for the outbox worker. key makes the request safe to
 // retry: the same key from the same actor returns the items already queued, and the same key for a
 // different request is ErrKeyReused, with nothing stored.
-func (b *Bot) QueueMessages(actor, tokenID, batch, key string, reqs []QueueRequest) (res Enqueued, err error) {
-	named := batch != ""
-	if !named {
-		batch = "b-" + randomHex(6)
-	}
-	defer func() { b.Audit(actor, "queue", batch, fmt.Sprintf("%d messages", len(reqs)), err) }()
-	switch {
-	case len(reqs) == 0:
-		return res, BadInput("no messages given")
-	case len(reqs) > MaxQueueBatch:
-		return res, BadInput("at most %d messages per request", MaxQueueBatch)
-	case !batchName.MatchString(batch):
-		return res, errBatchName
-	case len(key) > MaxKeyLength:
-		return res, BadInput("idempotency key is longer than %d characters", MaxKeyLength)
-	}
-	rows := make([]store.OutboxItem, len(reqs))
-	for i, r := range reqs {
-		if err := CheckQueueRequest(r); err != nil {
-			return res, BadInput("%s: %v", r.Where(i), err)
-		}
-		rows[i] = store.OutboxItem{Batch: batch, Actor: actor, TokenID: tokenID, To: strings.TrimSpace(r.To), Text: r.Text, ReplyTo: strings.TrimSpace(r.ReplyTo), Due: r.SendAt}
-		if key != "" {
-			rows[i].Key = fmt.Sprintf("%s#%d", key, i)
-		}
-	}
-	res.Items, err = b.Store.Enqueue(rows, func(out []store.OutboxItem, replayed []bool, open int) error {
-		for i, it := range out {
-			if !replayed[i] {
-				continue
-			}
-			res.Replayed++
-			if !sameRequest(it, rows[i], named) {
-				return ErrKeyReused
-			}
-		}
-		if added := len(rows) - res.Replayed; added > 0 && open > maxQueueOpen {
-			return BadInput("%s already has %d messages waiting; at most %d may be", actor, open-added, maxQueueOpen)
-		}
-		return nil
-	})
-	if err != nil {
-		return Enqueued{}, err
-	}
-	b.wakeOutbox()
-	return res, nil
+func (b *Bot) QueueMessages(actor, tokenID, batch, key string, reqs []QueueRequest) (Enqueued, error) {
+	return b.Queue(context.Background(), QueueOptions{Actor: actor, TokenID: tokenID, Batch: batch, Key: key}, reqs)
 }
 
 // sameRequest reports whether stored was queued by the request that would queue want. Items stored
-// before send_at was kept (SendAt -1) are compared without it.
+// before send_at was kept (SendAt -1) are compared without it. A template's items compare the
+// unrendered text (SourceHash), so a name changed since doesn't make a retry differ.
 func sameRequest(stored, want store.OutboxItem, named bool) bool {
 	sendAt := int64(0)
 	if !want.Due.IsZero() {
 		sendAt = want.Due.UnixMilli()
 	}
-	return (!named || stored.Batch == want.Batch) && stored.To == want.To && stored.Text == want.Text &&
+	sameText := stored.Text == want.Text
+	if stored.SourceHash != "" || want.SourceHash != "" {
+		sameText = stored.SourceHash == want.SourceHash
+	}
+	return (!named || stored.Batch == want.Batch) && stored.To == want.To && sameText &&
 		strings.TrimSpace(stored.ReplyTo) == want.ReplyTo && (stored.SendAt == -1 || stored.SendAt == sendAt)
 }
 
@@ -260,6 +227,7 @@ func CheckBatch(name string) error {
 }
 
 // CheckQueueRequest is Enqueue's check of one message, for callers that report errors their own way.
+// A to of tag:NAME passes when the tag is well formed: the server expands it.
 func CheckQueueRequest(r QueueRequest) error {
 	switch {
 	case len(strings.TrimSpace(r.To)) > maxQueueTo:
@@ -272,6 +240,9 @@ func CheckQueueRequest(r QueueRequest) error {
 		return fmt.Errorf("text is longer than %d characters", maxQueueText)
 	case r.SendAt.After(time.Now().Add(maxQueueAhead)):
 		return fmt.Errorf("send_at is more than %d days ahead", int(maxQueueAhead.Hours()/24))
+	}
+	if _, ok := QueueTag(r.To); ok {
+		return checkQueueTag(r)
 	}
 	_, err := ParseRecipient(r.To)
 	return err

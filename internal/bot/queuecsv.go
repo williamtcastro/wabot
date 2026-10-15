@@ -29,8 +29,9 @@ func ParseSendAt(s string) (time.Time, error) {
 	return t, nil
 }
 
-// QueueColumns are the columns a queue CSV may have, in QueueRecord's order.
-var QueueColumns = []string{"to", "text", "send_at", "reply_to"}
+// QueueColumns are the columns a queue CSV may have, in QueueRecord's order. name (the {name} of a
+// template) is last, so a file without names can leave it out (see QueueRecord).
+var QueueColumns = []string{"to", "text", "send_at", "reply_to", "name"}
 
 // csvTable describes a CSV with a header row: the columns it may name (the first two show up as the
 // example in errors), other names accepted for some of them, the one it must name, the most
@@ -156,7 +157,7 @@ func numberCell(line int, s string) error {
 	return nil
 }
 
-// ReadQueueCSV reads a queue CSV (see readCSVTable): to required; text, send_at and reply_to
+// ReadQueueCSV reads a queue CSV (see readCSVTable): to required; text, send_at, reply_to and name
 // optional. With limit > 0, more records than that is an error.
 func ReadQueueCSV(r io.Reader, limit int) ([]QueueRequest, error) {
 	table, err := readCSVTable(r, csvTable{columns: QueueColumns, required: "to", limit: limit, noun: "messages"})
@@ -165,7 +166,7 @@ func ReadQueueCSV(r io.Reader, limit int) ([]QueueRequest, error) {
 	}
 	rows := make([]QueueRequest, 0, len(table))
 	for _, c := range table {
-		row := QueueRequest{Line: c.line, To: c.cells["to"], Text: c.cells["text"], ReplyTo: c.cells["reply_to"]}
+		row := QueueRequest{Line: c.line, To: c.cells["to"], Text: c.cells["text"], ReplyTo: c.cells["reply_to"], Name: c.cells["name"]}
 		if err := numberCell(c.line, row.To); err != nil {
 			return nil, err
 		}
@@ -188,11 +189,12 @@ func csvError(err error) error {
 	return err
 }
 
-// QueueRecord is r as a record under the QueueColumns header, in the form ReadQueueCSV reads.
+// QueueRecord is r as a record under the QueueColumns header, in the form ReadQueueCSV reads. For a
+// header without the name column, drop the last field.
 func QueueRecord(r QueueRequest) []string {
 	at := ""
 	if !r.SendAt.IsZero() {
 		at = r.SendAt.Format(time.RFC3339Nano)
 	}
-	return []string{r.To, r.Text, at, r.ReplyTo}
+	return []string{r.To, r.Text, at, r.ReplyTo, r.Name}
 }
