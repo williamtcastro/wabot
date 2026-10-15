@@ -53,6 +53,8 @@ wame mcp -mcp-token wame_…  # act as that API token (its scopes and chat allow
 
 ## Tools
 
+To send every kind of message (files, edits and deletes are API-only), see [SENDING.md](SENDING.md).
+
 | Tool | Scope | Input | Output |
 |---|---|---|---|
 | `status` | read | none | `connected`, `logged_in`, `account` (your JID; empty for tokens limited to chats), `state` |

@@ -228,6 +228,7 @@ reset. All flags and commands: [docs/CLI.md](docs/CLI.md).
 |---|---|
 | [CLI](docs/CLI.md) | every command and flag, logs, the database file |
 | [HTTP API](docs/API.md) | every endpoint with curl examples, filters, events, tokens, rate limiting, webhooks |
+| [Sending messages](docs/SENDING.md) | every message type through the API and MCP: text, files, replies, reactions, queue, groups, formatting |
 | [OpenAPI spec](docs/openapi.yaml) | for Postman, Insomnia or Bruno; also served live at `/docs` |
 | [TUI](docs/TUI.md) | layout, keys and commands |
 | [Send queue](docs/QUEUE.md) | bulk sends: pacing, retries, scheduling, canceling, and why it uses SQLite rather than Redis |

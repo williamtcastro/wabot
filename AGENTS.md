@@ -91,7 +91,7 @@ Go's "server project" layout: the `wame` command at the root, everything else un
 | `Dockerfile`, `compose.yaml` | | static build into distroless `nonroot`; `/data` volume with `WAME_DB=/data/wame.db`, `WAME_ADDR=0.0.0.0:8080` (so a token is required). CI builds it and smoke-tests `version` and the no-token refusal. Docs: `docs/DOCKER.md` |
 | `_demo/` | `main` | README screenshot: seeds a scratch DB with fake chats and opens the TUI without connecting; `screenshot.sh` records it with VHS into `docs/wame-tui.png`. Ignored by `./...`, built by CI. Rerun it after visible TUI changes |
 | `docs/openapi.yaml` | | OpenAPI 3 spec, embedded into the binary (rebuild after editing) |
-| `docs/*.md` | | user docs: CLI, API, TUI, MCP, ADMIN (the panel), DOCKER, writing bot logic |
+| `docs/*.md` | | user docs: CLI, API, TUI, MCP, ADMIN (the panel), DOCKER, writing bot logic, SENDING (a task-oriented guide to every message type) |
 | `docs/security/` | | security reviews (`SCOPED-TOKENS.md`: token system threat model, findings and fixes) |
 | `docs/proposed-features/` | | deferred proposals: a web admin panel (its terminal counterpart, `wame admin`, is built; the doc also holds the audit action table), TUI image previews, LLM context, drafts approval, rules and state |
 | `.github/workflows/ci.yml` | | CI on every push to `main` and every PR: gofmt, `go vet`, `go test -race` on Ubuntu and macOS, `CGO_ENABLED=0` build plus `_demo`; a `docker` job builds the image and smoke-tests it |

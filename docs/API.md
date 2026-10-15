@@ -356,7 +356,7 @@ curl -H "Authorization: Bearer $T" -H "Idempotency-Key: order-1234-shipped" -X P
 | Field | Required | |
 |---|---|---|
 | `to` | yes | phone number or JID (see README → Recipients). Numbers are checked with WhatsApp first, so `5521987654321` and `552187654321` both reach the same person. A number that isn't on WhatsApp is a 400 |
-| `text` | yes | message body; WhatsApp formatting like `*bold*` and `_italic_` works |
+| `text` | yes | message body; WhatsApp formatting like `*bold*` and `_italic_` works, see [SENDING.md](SENDING.md#formatting) |
 | `reply_to` | no | `id` of a stored message in the same chat to quote. Unknown or deleted → 400. If the message was edited, the quote shows its current text |
 | `idempotency_key` | no | up to 200 characters, see below. The `Idempotency-Key` header does the same and takes precedence |
 
