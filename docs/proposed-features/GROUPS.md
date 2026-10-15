@@ -56,10 +56,9 @@
 `wame_group_members (group_jid, member, role member|admin|superadmin, first_seen, last_seen,
 PK (group_jid, member))`, indexed on `member`. `member` is a phone JID, or an `@lid` while unmapped.
 `SaveGroups` syncs it from `GetJoinedGroups`, `GroupsWith(keys)` lists a person's groups, and person
-profiles get a LID field. **Assumption:** the pivot holds **current** members only, so a sync
-deletes people who are gone. If phase 2 keeps former members instead, every "current members"
-query below adds `AND last_seen = <the group's last sync>`. Settle this before phase 1 starts
-([open question 1](#open-questions)).
+profiles get a LID field. The pivot holds **current** members only: a refresh deletes members who
+left. `relinkLIDs` relinks its `@lid` member keys to phone JIDs (see
+[Decisions](#decisions-2026-10-15)).
 
 whatsmeow (`go.mau.fi/whatsmeow@v0.0.0-20261007111105-c386243a72ba`):
 
@@ -106,9 +105,9 @@ left_at         INTEGER DEFAULT 0,    -- we left, were removed, or the group was
 synced_at       INTEGER DEFAULT 0     -- last full member sync (refresh); `updated` stays "row touched"
 ```
 
-- **Groups you're not in** keep their row (stored messages still need the name), get `left_at`, and
+- **Groups you left** keep their row (stored messages still need the name), get `left_at`, and
   lose their members (the pivot rows are deleted in the same transaction). History stays until
-  retention. A refresh that no longer lists a group sets `left_at` on it, which fixes the "never
+  retention. (Logging out is different: it deletes the rows, see [Logout](#logout).) A refresh that no longer lists a group sets `left_at` on it, which fixes the "never
   deleted" problem above.
 - `admins` (JSON) stays during the move, so old binaries reading the DB still work. The source of
   truth becomes the pivot's `role`. `loadCachedGroups` reads admins from the pivot once it exists.
@@ -192,9 +191,9 @@ UPDATE wame_groups SET topic_by = <pn> WHERE topic_by <mapped>;
 ```
 
   (`<pn>`/`<mapped>` with `chat` replaced by the column, as in CONTACTS.md.) No unique keys, so
-  plain `UPDATE`. **The pivot's relink belongs to phase 2.** If phase 2 doesn't do it, this plan
-  adds it: merge `@lid` into the phone row with `first_seen = MIN`, `last_seen = MAX`, the higher
-  role, and delete the `@lid` row.
+  plain `UPDATE`. **The pivot's relink belongs to phase 2**: `relinkLIDs` merges an `@lid` member
+  into the phone row with `first_seen = MIN`, `last_seen = MAX` and the higher role, and deletes
+  the `@lid` row.
 - **Our own identity.** "Is it us" checks both `Client.Store.ID` and `Client.Store.LID` (non-AD),
   since LID groups name us by LID.
 
@@ -202,7 +201,7 @@ UPDATE wame_groups SET topic_by = <pn> WHERE topic_by <mapped>;
 
 | What | Bound | Where |
 |---|---|---|
-| `wame_group_events` | 180 days, then at most 5,000 rows per group and 200,000 in total (oldest first) | `Store.PruneGroupEvents(before, perGroup, total)`, from the daily `pruneOutbox` step |
+| `wame_group_events` | on by default: 180 days, then at most 5,000 rows per group and 200,000 in total (oldest first). `group_history_days` changes the age; 0 turns history off | `Store.PruneGroupEvents(before, perGroup, total)`, from the daily `pruneOutbox` step |
 | `bulk` collapse | a refresh diff over 50 changes in one group is one row | `SyncGroups` |
 | Event burst | at most 1,000 history rows per notification (a 1,024-member `Join` on create); the rest becomes one `bulk` row | event handler |
 | `wame_group_counts` | 400 days | same prune step |
@@ -360,7 +359,7 @@ anywhere" need `CREATE INDEX wame_messages_group_sender ON wame_messages (sender
 is_group = 1`. Cost: one more b-tree write per stored group message (insert cost up maybe 15–25%
 for group traffic), about 40–60 bytes per group message on disk (1M group messages ≈ 50 MB), and
 a one-time build on upgrade (seconds to a minute on a big DB, at startup). CONTACTS.md deferred the
-same index (decision 4). **Not in this plan**; [open question 5](#open-questions).
+same index (decision 4). **Not in this plan** (deferred, see [Decisions](#decisions-2026-10-15)).
 
 ## MCP
 
@@ -427,8 +426,9 @@ capped (for example 50 per batch), opt-outs applied, and `-skip-sent` on by defa
 
 Group lists, profiles, members and stats are `read`, because a member list is what any member sees
 in WhatsApp. History, `lid`, `added_by`/`joined_at`, the left-groups list, silent-member lists and
-forced refreshes are `admin`. No writes exist. A separate `groups` scope isn't needed
-([open question 6](#open-questions)).
+forced refreshes are `admin`. Listing a group's members needs `read`, and a token limited to some
+chats sees only the groups in its allowlist. No writes exist. A separate `groups` scope isn't
+needed.
 
 ### Chat allowlists and members
 
@@ -453,7 +453,7 @@ A token allowed group X sees X's profile, members and stats, and nothing about o
   only. The handler doesn't log participant lists.
 - `wame backup` covers the new tables, as it does everything else.
 - History can tell you when someone left a group you're in. That's visible in WhatsApp too (the
-  system message), but wame keeps it searchable for 180 days. Retention is a setting
+  system message), but wame keeps it searchable for 180 days by default. Retention is a setting
   (`group_history_days`, 0 = don't record history at all).
 
 ### Unbounded growth
@@ -462,6 +462,9 @@ See [Retention and caps](#retention-and-caps). A hostile group can't flood the t
 capped per group, bursts collapse to `bulk`, and only groups we're in are recorded.
 
 ### Webhook and SSE `group` events
+
+Live `group` events go out on both SSE and the webhook. Both are opt-in (off by default) and carry
+no names.
 
 - **SSE:** opt-in `?events=group` (like `queue`). It's delivered to admin, and to tokens whose
   allowlist contains the group.
@@ -484,13 +487,13 @@ capped per group, bursts collapse to `bulk`, and only groups we're in are record
 
 ### Logout
 
-On `events.LoggedOut`: delete every `wame_group_members` row, clear `picture_id`, `self_role`,
-`invite_reset_at`, and set `synced_at = 0`. That's current state the account can no longer see,
-and it would go stale silently. **Keep** `wame_groups` names (stored messages need them, like
-`wame_messages`, which survives logout), `wame_group_counts`, and the history until retention. An
-admin `DELETE /groups/history` (audited `group_history_delete`) wipes the history. Pairing a
-**different** account later starts from a fresh baseline. The old groups then show `left_at` after
-the first sync, since they're not in the new list.
+On `events.LoggedOut` (`wame logout` unlinks the device), delete **all** group data: every
+`wame_group_members` row, `wame_group_events`, `wame_group_counts` and `wame_groups` (member lists,
+history, daily counts and group profiles), in one transaction through `ClearGroupState`. A
+disconnect (the connection drops, or the server restarts while still logged in) is not a logout and
+keeps all of it. `wame_messages` survives logout as before, so stored group messages show the chat
+JID until the next sync after pairing. Pairing an account later starts from a fresh baseline, so
+the first sync records no history.
 
 ## Phases
 
@@ -503,7 +506,7 @@ starts after contacts phase 2 is merged** (it changes `state.go`, `SaveGroups` a
 
 | Agent | Files | Work |
 |---|---|---|
-| store | `internal/store/groups.go` (new), `groups_test.go` (new), `state.go` (columns, `SyncGroups` diff), `store.go` (`Open`, `relinkLIDs` → `relinkGroups`) | `migrateGroups`, `GroupProfile`, `SyncGroups`, `ApplyGroupChange`, `MarkGroupLeft`, `GroupEvents(filter)`, `GroupMembers(filter)`, `GroupCounts`, `PruneGroupEvents`, `ClearGroupState` (logout) |
+| store | `internal/store/groups.go` (new), `groups_test.go` (new), `state.go` (columns, `SyncGroups` diff), `store.go` (`Open`, `relinkLIDs` → `relinkGroups`) | `migrateGroups`, `GroupProfile`, `SyncGroups`, `ApplyGroupChange`, `MarkGroupLeft`, `GroupEvents(filter)`, `GroupMembers(filter)`, `GroupCounts`, `PruneGroupEvents`, `ClearGroupState` (logout: all group tables) |
 | bot | `internal/bot/groups.go` (new), `groups_test.go` (new), `events.go` (cases), `contacts.go` (`refreshGroups` saves the profile, `group()` admins from events, `requestGroupRefresh`), `outbox.go` (prune call) | event mapping (join vs add, leave vs remove, self), caps and `bulk`, `Groups`, `Group`, `RefreshGroup` (budgeted, 5-min guard, audited), the whatsmeow calls behind the contacts phase 2 interface (extended, not a second one) |
 | api | `internal/api/groups.go` (new), `api.go` (routes only), `groups_test.go` (new), `security_test.go`, `docs/API.md`, `docs/openapi.yaml`, `docs/security/SCOPED-TOKENS.md` | routes, scopes, `lid` number hiding, `/contacts/{number}` `groups`, `/contacts?group=` |
 
@@ -520,7 +523,7 @@ the interface; events built by hand as `*events.GroupInfo` / `*events.JoinedGrou
   group → row created and a refresh requested. Other unknown groups store nothing.
 - Promote/Demote update `isGroupAdmin` at once (a revoke by a just-demoted admin is ignored).
 - `@lid` member and actor relinked. Counts row per day.
-- Prune by age, per group and total caps. Logout clears members and keeps names and history.
+- Prune by age, per group and total caps. Logout clears members, history, counts and profiles; a disconnect keeps them.
 - `GET /groups` makes **no** fake call (count calls) for read, restricted and admin without
   `refresh=1`. `refresh=1` charges 1 lookup, 429 over budget, second inside a minute returns the
   cache.
@@ -565,17 +568,18 @@ it's opt-in).
 The `sender` index and cross-group activity per person; `to=group-members:` in the queue (see the
 warnings); a member-count chart in the panel; communities (parent/sub-groups via `GetSubGroups`).
 
-## Open questions
+## Decisions (2026-10-15)
 
-1. **Pivot semantics.** Does phase 2's `wame_group_members` delete departed members (assumed here)
-   or keep them with an old `last_seen`? And does phase 2 relink the pivot's `@lid` rows?
-2. **History retention:** 180 days and 5,000 rows per group by default, with `group_history_days`
-   to change it or turn it off. Is that right, or should history be opt-in?
-3. **Logout:** keep names, counts and history (proposed), or wipe all group data?
-4. **`lid` groups:** hide mapped numbers from non-admin callers (proposed), or show what wame knows?
-5. **The `sender` index:** worth ~50 MB per million group messages and slower group inserts, for
-   "where does this person talk"? Deferred so far.
-6. **Read scope for members:** is `read` enough to list a group's members (proposed), or should
-   that be `admin` like contact notes?
-7. **Webhook `group` events:** wanted at all, or is SSE enough?
-8. **`GET /groups` restricted change:** filter to the allowlist (proposed), or keep 403?
+1. **History is on by default:** 180 days, at most 5,000 rows per group and 200,000 in total, with
+   `group_history_days` to change it (0 turns it off).
+2. **`wame logout` clears all group data:** member lists, history, daily counts and group profiles.
+   A disconnect (the connection drops or the server restarts while still logged in) keeps all of it.
+3. **Listing a group's members needs the `read` scope.** A token limited to some chats sees only the
+   groups in its allowlist.
+4. **Live `group` events go out on both SSE and the webhook.** They are opt-in (off by default) and
+   carry no names.
+5. **In groups where WhatsApp hides numbers**, non-admin callers don't see the numbers wame knows.
+6. **The `sender` index is deferred.**
+7. **`GET /groups` for chat-limited tokens is a filtered list**, not a 403.
+8. **Contacts phase 2's `wame_group_members` pivot deletes members who left on refresh**, and
+   `relinkLIDs` relinks its `@lid` member keys to phone JIDs.
